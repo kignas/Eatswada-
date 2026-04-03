@@ -1,6 +1,3 @@
-**
- * server.js — Nearbite Backend Entry Point
- */
 require('dotenv').config();
 
 const express        = require('express');
