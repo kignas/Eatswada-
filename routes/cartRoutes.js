@@ -1,27 +1,26 @@
 const express = require('express');
 const router  = express.Router();
-const { body } = require('express-validator');
 
 const {
-  getCart, addToCart, updateCartItem,
-  removeFromCart, clearCart,
-  setDeliveryAddress, setPaymentMethod,
-} = require('../controllers/cartController');
+  createOrder, getOrders, getOrderById,
+  cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
+  createGuestOrder // <--- IMPORTED GUEST FUNCTION
+} = require('../controllers/orderController');
 
-const { protect } = require('../middleware/authMiddleware');
-const validate    = require('../middleware/validateMiddleware');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
-router.use(protect); // all cart routes require auth
+// ── VIP GUEST DOOR (Must go ABOVE protect!) ──
+router.post('/guest', createGuestOrder);
 
-router.get   ('/',                 getCart);
-router.post  ('/add',
-  [body('menuItemId').notEmpty().withMessage('menuItemId is required')],
-  validate, addToCart
-);
-router.put   ('/update',           updateCartItem);
-router.delete('/item/:menuItemId', removeFromCart);
-router.delete('/clear',            clearCart);
-router.patch ('/address',          setDeliveryAddress);
-router.patch ('/payment',          setPaymentMethod);
+// ── SECURE DOORS (Everything below requires login) ──
+router.use(protect);
+
+router.post ('/',            createOrder);
+router.get  ('/',            getOrders);
+router.get  ('/admin/all',   authorize('admin'), getAllOrders);
+router.get  ('/:id',         getOrderById);
+router.put  ('/:id/cancel',  cancelOrder);
+router.put  ('/:id/rate',    rateOrder);
+router.put  ('/:id/status',  authorize('admin', 'restaurant_owner'), updateOrderStatus);
 
 module.exports = router;
