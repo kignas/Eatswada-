@@ -156,8 +156,25 @@ const getAllOrders = asyncHandler(async (req, res) => {
   });
 });
 
+// POST /api/orders/guest  — Guest checkout (bypasses login and cart)
+const createGuestOrder = asyncHandler(async (req, res) => {
+  const { items, deliveryAddress, restaurantId, restaurantName, subtotal, total } = req.body;
+
+  const order = await Order.create({
+    user: '000000000000000000000000', // Dummy 24-character ID for a Guest
+    restaurant: restaurantId,
+    restaurantName: restaurantName,
+    items: items,
+    deliveryAddress: deliveryAddress,
+    subtotal: subtotal,
+    total: total,
+  });
+
+  res.status(201).json({ success: true, data: order });
+});
+
 module.exports = {
   createOrder, getOrders, getOrderById,
   cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
+  createGuestOrder // <--- ADDED THE NEW FUNCTION HERE
 };
-      
