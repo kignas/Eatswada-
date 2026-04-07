@@ -18,7 +18,7 @@ const sendOTPHandler = asyncHandler(async (req, res) => {
 
 const verifyOTPHandler = asyncHandler(async (req, res) => {
   const { phone, otp } = req.body;
-  const user = await User.findOne({ phone }).select('+otp');
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt');
   if (!user) return res.status(404).json({ success: false, message: 'Phone not found' });
   if (!user.matchOTP(otp)) return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
   user.isPhoneVerified = true;
