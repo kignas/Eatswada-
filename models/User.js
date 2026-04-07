@@ -87,10 +87,14 @@ userSchema.pre('save', async function (next) {
   next();
 });
 
-/* ── Instance method: compare password ── */
-userSchema.methods.matchPassword = async function (enteredPassword) {
-  return bcrypt.compare(enteredPassword, this.password);
+/* ── Instance method: compare OTP ── */
+userSchema.methods.matchOTP = function (enteredOTP) {
+  if (!this.otp || !this.otp.code) return false;
+  if (this.otp.expiresAt < Date.now()) return false;
+  // Force both to be strings so 8499 exactly matches "8499"
+  return String(this.otp.code) === String(enteredOTP);
 };
+
 
 /* ── Instance method: compare OTP ── */
 userSchema.methods.matchOTP = function (enteredOTP) {
