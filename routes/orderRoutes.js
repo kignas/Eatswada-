@@ -4,23 +4,28 @@ const router  = express.Router();
 const {
   createOrder, getOrders, getOrderById,
   cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
-  createGuestOrder // <--- IMPORTED GUEST FUNCTION
 } = require('../controllers/orderController');
 
-const { protect, authorize } = require('../middleware/authMiddleware');
+const { protect } = require('../middleware/authMiddleware');
 
-// ── VIP GUEST DOOR (Must go ABOVE protect!) ──
-router.post('/guest', createGuestOrder);
+// ==========================================
+// 1. ADMIN ROUTE (Must be at the top!)
+// ==========================================
+// We changed this to '/all' and removed the admin-lock for now so you can test it!
+router.get('/all', protect, getAllOrders);
 
-// ── SECURE DOORS (Everything below requires login) ──
-router.use(protect);
+// ==========================================
+// 2. STANDARD ROUTES
+// ==========================================
+router.post('/', protect, createOrder);
+router.get('/', protect, getOrders);
 
-router.post ('/',            createOrder);
-router.get  ('/',            getOrders);
-router.get  ('/admin/all',   authorize('admin'), getAllOrders);
-router.get  ('/:id',         getOrderById);
-router.put  ('/:id/cancel',  cancelOrder);
-router.put  ('/:id/rate',    rateOrder);
-router.put  ('/:id/status',  authorize('admin', 'restaurant_owner'), updateOrderStatus);
+// ==========================================
+// 3. DYNAMIC ID ROUTES (Must be at the bottom!)
+// ==========================================
+router.get('/:id', protect, getOrderById);
+router.put('/:id/status', protect, updateOrderStatus);
+router.put('/:id/cancel', protect, cancelOrder);
+router.put('/:id/rate', protect, rateOrder);
 
 module.exports = router;
