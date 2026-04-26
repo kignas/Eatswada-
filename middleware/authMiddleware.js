@@ -1,9 +1,6 @@
 const jwt  = require('jsonwebtoken');
 const User = require('../models/User');
 
-/**
- * protect — require a valid JWT
- */
 const protect = async (req, res, next) => {
   let token;
 
@@ -28,9 +25,14 @@ const protect = async (req, res, next) => {
 
     next();
   } catch (err) {
-    return res.status(401).json({ success: false, message: 'Token invalid or expired' });
+    // 🚨 THIS IS THE FIX: Print the EXACT raw system error instead of a generic message 🚨
+    return res.status(401).json({ success: false, message: 'SYSTEM AUTH ERROR: ' + err.message });
   }
 };
+
+// Keep your authorize and optionalAuth functions below this exactly as they are!
+// ...
+
 
 /**
  * authorize — restrict to certain roles
