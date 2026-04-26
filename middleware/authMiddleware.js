@@ -1,6 +1,9 @@
 const jwt  = require('jsonwebtoken');
 const User = require('../models/User');
 
+/**
+ * protect — require a valid JWT
+ */
 const protect = async (req, res, next) => {
   let token;
 
@@ -17,7 +20,9 @@ const protect = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = await User.findById(decoded.id).select('-password -otp');
+    
+    // 🚨 THE FIX: Removed '-otp' to prevent the MongoDB Path Collision 🚨
+    req.user = await User.findById(decoded.id).select('-password');
 
     if (!req.user || !req.user.isActive) {
       return res.status(401).json({ success: false, message: 'Account not found or deactivated' });
@@ -25,18 +30,13 @@ const protect = async (req, res, next) => {
 
     next();
   } catch (err) {
-    // 🚨 THIS IS THE FIX: Print the EXACT raw system error instead of a generic message 🚨
+    // Keeping the truth serum just in case!
     return res.status(401).json({ success: false, message: 'SYSTEM AUTH ERROR: ' + err.message });
   }
 };
 
-// Keep your authorize and optionalAuth functions below this exactly as they are!
-// ...
-
-
 /**
  * authorize — restrict to certain roles
- * Usage: router.delete('/x', protect, authorize('admin'), handler)
  */
 const authorize = (...roles) => (req, res, next) => {
   if (!roles.includes(req.user.role)) {
@@ -62,11 +62,12 @@ const optionalAuth = async (req, res, next) => {
   if (token) {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = await User.findById(decoded.id).select('-password -otp');
+      
+      // 🚨 THE FIX: Removed '-otp' here too 🚨
+      req.user = await User.findById(decoded.id).select('-password');
     } catch (_) { /* ignore */ }
   }
   next();
 };
 
 module.exports = { protect, authorize, optionalAuth };
-                               
