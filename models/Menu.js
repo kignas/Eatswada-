@@ -2,7 +2,8 @@ const mongoose = require('mongoose');
 
 const menuItemSchema = new mongoose.Schema(
   {
-    restaurant: {
+    // 🚨 UPDATED: Changed to 'restaurantId' to match the Vendor security locks
+    restaurantId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Restaurant',
       required: true,
@@ -28,9 +29,10 @@ const menuItemSchema = new mongoose.Schema(
     originalPrice: {
       type: Number,  // for strikethrough display
     },
+    // 🚨 PERFECT: You already had the image field. I just added a premium default fallback!
     image: {
       type: String,
-      default: '',
+      default: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c',
     },
     isVeg: {
       type: Boolean,
@@ -50,7 +52,8 @@ const menuItemSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    isAvailable: {
+    // 🚨 UPDATED: Changed from 'isAvailable' to 'inStock' so the Vendor Toggle works!
+    inStock: {
       type: Boolean,
       default: true,
     },
@@ -73,7 +76,9 @@ const menuItemSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-menuItemSchema.index({ restaurant: 1, category: 1 });
+// 🚨 UPDATED: Fixed the index to match the new 'restaurantId' field
+menuItemSchema.index({ restaurantId: 1, category: 1 });
 menuItemSchema.index({ name: 'text', description: 'text' });
 
-module.exports = mongoose.model('MenuItem', menuItemSchema);
+// Exported as 'Menu' to match your controller imports
+module.exports = mongoose.model('Menu', menuItemSchema);
