@@ -12,12 +12,19 @@ const morgan         = require('morgan');
 
 const connectDB      = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
+// 🚨 Added your protect middleware for the secret upgrade route
+const { protect }    = require('./middleware/authMiddleware'); 
 
 // ── Route imports ─────────────────────────────────────────────
 const userRoutes       = require('./routes/userRoutes');
 const restaurantRoutes = require('./routes/restaurantRoutes');
 const cartRoutes       = require('./routes/cartRoutes');
 const orderRoutes      = require('./routes/orderRoutes');
+const vendorRoutes     = require('./routes/vendorRoutes'); // 🚨 ADDED VENDOR ROUTES
+
+// ── Model imports for Secret Upgrade ──────────────────────────
+const Restaurant = require('./models/Restaurant');
+const User       = require('./models/User');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 connectDB();
@@ -109,12 +116,34 @@ app.get('/', (req, res) => {
   res.status(200).send('<h2>🍔 Nearbite Backend API is Live and Running! 🚀</h2>');
 });
 
+// ── SECRET UPGRADE ROUTE (Remove before public launch!) ───────
+app.post('/api/secret-upgrade', protect, async (req, res) => {
+  try {
+      // 1. Create a dummy restaurant connected to you
+      const myRestaurant = await Restaurant.create({
+          name: "Ruby's Swader Prantik",
+          address: "Maynaguri Locality",
+          owner: req.user._id
+      });
+
+      // 2. Upgrade your user account to vendor
+      const updatedUser = await User.findByIdAndUpdate(req.user._id, {
+          role: 'vendor',
+          restaurantId: myRestaurant._id
+      }, { new: true });
+
+      res.json({ success: true, message: "Success! You are now the Vendor.", data: myRestaurant });
+  } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 // ── API Routes ────────────────────────────────────────────────
 app.use('/api/users',       authLimiter, userRoutes);
 app.use('/api/restaurants', restaurantRoutes);
 app.use('/api/cart',        cartRoutes);
 app.use('/api/orders',      orderRoutes);
+app.use('/api/vendor',      vendorRoutes); // 🚨 ACTIVATED VENDOR ROUTES
 
 // ── 404 + Global Error Handler ───────────────────────────────
 app.use(notFound);
