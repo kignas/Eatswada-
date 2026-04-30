@@ -142,6 +142,22 @@ app.post('/api/secret-upgrade', protect, async (req, res) => {
   }
 });
 
+// 🚨 SECRET CEO MAKER (Remove before public launch!) 🚨
+app.post('/api/make-me-ceo', protect, async (req, res) => {
+  try {
+      const User = require('./models/User');
+      // Upgrade the logged-in user to 'admin'
+      const updatedUser = await User.findByIdAndUpdate(req.user._id, {
+          role: 'admin'
+      }, { new: true });
+
+      res.json({ success: true, message: "Welcome, CEO! You now have God-Mode.", user: updatedUser });
+  } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
 // ── API Routes ────────────────────────────────────────────────
 app.use('/api/users',       authLimiter, userRoutes);
 app.use('/api/restaurants', restaurantRoutes);
