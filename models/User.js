@@ -35,8 +35,15 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ['user', 'admin', 'restaurant_owner'],
+      // 🚨 ADDED 'vendor' and 'rider' to the allowed roles!
+      enum: ['user', 'admin', 'restaurant_owner', 'vendor', 'rider'],
       default: 'user',
+    },
+    // 🚨 THE SECURE LOCK: Connects the owner directly to their restaurant
+    restaurantId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Restaurant',
+      default: null,
     },
     isActive: {
       type: Boolean,
@@ -93,14 +100,6 @@ userSchema.methods.matchOTP = function (enteredOTP) {
   if (this.otp.expiresAt < Date.now()) return false;
   // Force both to be strings so 8499 exactly matches "8499"
   return String(this.otp.code) === String(enteredOTP);
-};
-
-
-/* ── Instance method: compare OTP ── */
-userSchema.methods.matchOTP = function (enteredOTP) {
-  if (!this.otp || !this.otp.code) return false;
-  if (this.otp.expiresAt < Date.now()) return false;
-  return this.otp.code === enteredOTP;
 };
 
 /* ── Remove sensitive fields from JSON output ── */
