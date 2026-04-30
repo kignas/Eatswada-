@@ -21,6 +21,10 @@ const restaurantRoutes = require('./routes/restaurantRoutes');
 const cartRoutes       = require('./routes/cartRoutes');
 const orderRoutes      = require('./routes/orderRoutes');
 const vendorRoutes     = require('./routes/vendorRoutes'); // 🚨 ADDED VENDOR ROUTES
+const adminRoutes = require('./routes/adminRoutes'); // Add this near the top
+// ...
+app.use('/api/admin', adminRoutes); // Add this where your other app.use routes are
+
 
 // ── Model imports for Secret Upgrade ──────────────────────────
 const Restaurant = require('./models/Restaurant');
