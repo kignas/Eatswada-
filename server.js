@@ -12,42 +12,31 @@ const morgan         = require('morgan');
 
 const connectDB      = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
-// 🚨 Added your protect middleware for the secret upgrade route
 const { protect }    = require('./middleware/authMiddleware'); 
 
-// ── Route imports ─────────────────────────────────────────────
+// ── Route & Model imports ─────────────────────────────────────
 const userRoutes       = require('./routes/userRoutes');
 const restaurantRoutes = require('./routes/restaurantRoutes');
 const cartRoutes       = require('./routes/cartRoutes');
 const orderRoutes      = require('./routes/orderRoutes');
-const vendorRoutes     = require('./routes/vendorRoutes'); // 🚨 ADDED VENDOR ROUTES
-const adminRoutes = require('./routes/adminRoutes'); // Add this near the top
-// ...
-app.use('/api/admin', adminRoutes); // Add this where your other app.use routes are
-
-
-// ── Model imports for Secret Upgrade ──────────────────────────
-const Restaurant = require('./models/Restaurant');
-const User       = require('./models/User');
+const vendorRoutes     = require('./routes/vendorRoutes'); 
+const adminRoutes      = require('./routes/adminRoutes'); // 🚨 Imported correctly
+const Restaurant       = require('./models/Restaurant');
+const User             = require('./models/User');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 connectDB();
 
+// 🚨 APP IS CREATED HERE FIRST! 🚨
 const app = express();
 
 app.set("trust proxy", 1);
 
-// ── Compression (gzip all responses) ─────────────────────────
+// ── Middleware ────────────────────────────────────────────────
 app.use(compression());
-
-// ── Security: HTTP headers ────────────────────────────────────
 app.use(helmet());
 
-// ── CORS — reads ALLOWED_ORIGINS from .env ────────────────────
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*')
-  .split(',')
-  .map(s => s.trim());
-
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
@@ -61,111 +50,63 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Handle preflight for all routes
 app.options('*', cors());
 
-// ── Global Rate Limiter ───────────────────────────────────────
 const globalLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max:      Number(process.env.RATE_LIMIT_MAX)        || 100,
-  standardHeaders: true,
-  legacyHeaders:   false,
+  standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many requests, please slow down.' },
 });
 app.use(globalLimiter);
 
-// Stricter limiter for auth endpoints
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many auth attempts. Try again in 15 minutes.' },
 });
 
-// ── Body Parsing ──────────────────────────────────────────────
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
-
-// ── Security: sanitize NoSQL injection ───────────────────────
 app.use(mongoSanitize());
-
-// ── Security: sanitize XSS ───────────────────────────────────
 app.use(xssClean());
+app.use(hpp({ whitelist: ['sort', 'category', 'cuisine'] }));
 
-// ── Security: prevent HTTP parameter pollution ────────────────
-app.use(hpp({
-  whitelist: ['sort', 'category', 'cuisine'],
-}));
+if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
 
-// ── HTTP Request Logger (dev only) ───────────────────────────
-if (process.env.NODE_ENV === 'development') {
-  app.use(morgan('dev'));
-}
-
-// ── Health Check ──────────────────────────────────────────────
+// ── Health & Welcome Routes ───────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({
-    success:  true,
-    service:  'Nearbite API',
-    version:  '1.0.0',
-    env:      process.env.NODE_ENV || 'development',
-    uptime:   process.uptime().toFixed(2) + 's',
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ success: true, service: 'Nearbite API', version: '1.0.0', uptime: process.uptime().toFixed(2) + 's' });
 });
 
-// ── Root Welcome Route (Stops the 404 errors) ─────────────────
 app.get('/', (req, res) => {
   res.status(200).send('<h2>🍔 Nearbite Backend API is Live and Running! 🚀</h2>');
 });
 
-// ── SECRET UPGRADE ROUTE (Remove before public launch!) ───────
+// ── SECRET UPGRADE ROUTES ─────────────────────────────────────
 app.post('/api/secret-upgrade', protect, async (req, res) => {
   try {
-      // 1. Create a dummy restaurant connected to you
-      const myRestaurant = await Restaurant.create({
-          name: "Ruby's Swader Prantik",
-          address: "Maynaguri Locality",
-          owner: req.user._id
-      });
-
-      // 2. Upgrade your user account to vendor
-      const updatedUser = await User.findByIdAndUpdate(req.user._id, {
-          role: 'vendor',
-          restaurantId: myRestaurant._id
-      }, { new: true });
-
+      const myRestaurant = await Restaurant.create({ name: "Ruby's Swader Prantik", address: "Maynaguri Locality", owner: req.user._id });
+      const updatedUser = await User.findByIdAndUpdate(req.user._id, { role: 'vendor', restaurantId: myRestaurant._id }, { new: true });
       res.json({ success: true, message: "Success! You are now the Vendor.", data: myRestaurant });
-  } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-// 🚨 SECRET CEO MAKER (Remove before public launch!) 🚨
 app.post('/api/make-me-ceo', protect, async (req, res) => {
   try {
-      const User = require('./models/User');
-      // Upgrade the logged-in user to 'admin'
-      const updatedUser = await User.findByIdAndUpdate(req.user._id, {
-          role: 'admin'
-      }, { new: true });
-
+      const updatedUser = await User.findByIdAndUpdate(req.user._id, { role: 'admin' }, { new: true });
       res.json({ success: true, message: "Welcome, CEO! You now have God-Mode.", user: updatedUser });
-  } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-
-// ── API Routes ────────────────────────────────────────────────
+// ── API Routes (MOUNTED SAFELY AFTER APP IS CREATED) ──────────
 app.use('/api/users',       authLimiter, userRoutes);
 app.use('/api/restaurants', restaurantRoutes);
 app.use('/api/cart',        cartRoutes);
 app.use('/api/orders',      orderRoutes);
-app.use('/api/vendor',      vendorRoutes); // 🚨 ACTIVATED VENDOR ROUTES
+app.use('/api/vendor',      vendorRoutes); 
+app.use('/api/admin',       adminRoutes); // 🚨 PERFECT PLACEMENT
 
-// ── 404 + Global Error Handler ───────────────────────────────
+// ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
 app.use(errorHandler);
 
@@ -174,21 +115,12 @@ const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('╔══════════════════════════════════════════════╗');
   console.log(`║  🍔  Nearbite API running on port ${PORT}       ║`);
-  console.log(`║  🌍  Environment : ${(process.env.NODE_ENV || 'development').padEnd(24)}║`);
-  console.log(`║  📦  MongoDB     : connected                 ║`);
   console.log('╚══════════════════════════════════════════════╝');
-  console.log('');
 });
 
-// ── Graceful Shutdown ─────────────────────────────────────────
 process.on('unhandledRejection', (err) => {
   console.error(`❌ Unhandled Rejection: ${err.message}`);
   server.close(() => process.exit(1));
 });
-
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  server.close(() => process.exit(0));
-});
-
+process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 module.exports = app;
