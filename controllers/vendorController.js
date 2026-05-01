@@ -64,3 +64,21 @@ exports.updateMenuItem = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+const Restaurant = require('../models/Restaurant');
+const Menu = require('../models/Menu');
+
+// This controls the Master Online/Offline Switch
+exports.updateRestaurantStatus = async (req, res) => {
+  try {
+    // Finds the restaurant owned by the logged-in vendor and updates isActive
+    const restaurant = await Restaurant.findOneAndUpdate(
+       { owner: req.user._id },
+       { isActive: req.body.isActive },
+       { new: true }
+    );
+    res.json({ success: true, data: restaurant });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server Error' });
+  }
+};
