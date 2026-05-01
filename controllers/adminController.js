@@ -13,7 +13,7 @@ exports.createMasterItem = async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access Denied.' });
     
-    // 🚨 FIX 2: Maps the ID perfectly to your schema so Mongoose doesn't crash!
+    // 🚨 THIS WAS FAILING! Fixes the ID so the Menu saves properly!
     if(req.body.restaurantId && !req.body.restaurant) {
         req.body.restaurant = req.body.restaurantId; 
     }
