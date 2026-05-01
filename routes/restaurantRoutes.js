@@ -29,3 +29,13 @@ router.put   ('/:id/menu/:itemId',  protect, authorize('admin'), updateMenuItem)
 router.delete('/:id/menu/:itemId',  protect, authorize('admin'), deleteMenuItem);
 
 module.exports = router;
+
+const express = require('express');
+const router = express.Router();
+// Import your controller functions here...
+
+// 🚨 Add this PUBLIC route (Notice there is NO 'protect' middleware here!)
+router.get('/:id/menu', getRestaurantMenuPublic); 
+
+module.exports = router;
+
