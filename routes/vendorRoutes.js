@@ -1,12 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middleware/authMiddleware'); // The bouncer that checks JWTs
-const { getVendorOrders, getVendorMenu, addMenuItem, updateMenuItem } = require('../controllers/vendorController');
+const { protect } = require('../middleware/authMiddleware');
+const { updateRestaurantStatus } = require('../controllers/vendorController');
 
-// All routes here are protected by JWT authentication
-router.get('/orders', protect, getVendorOrders);
-router.get('/menu', protect, getVendorMenu);
-router.post('/menu', protect, addMenuItem);
-router.put('/menu/:id', protect, updateMenuItem);
+// The route the Master Switch hits when the owner taps it
+router.put('/status', protect, updateRestaurantStatus);
 
 module.exports = router;
