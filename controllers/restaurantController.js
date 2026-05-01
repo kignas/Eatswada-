@@ -133,4 +133,22 @@ module.exports = {
   createRestaurant, updateRestaurant, deleteRestaurant,
   addMenuItem, updateMenuItem, deleteMenuItem,
 };
+
+const Menu = require('../models/Menu');
+
+// 🚨 PUBLIC ROUTE: Get menu for a specific restaurant
+exports.getRestaurantMenuPublic = async (req, res) => {
+  try {
+    // It only finds items for this specific restaurant AND where inStock is true!
+    const menu = await Menu.find({ 
+        restaurantId: req.params.id, 
+        inStock: true 
+    }).sort({ createdAt: -1 });
+
+    res.json({ success: true, count: menu.length, data: menu });
+  } catch (err) { 
+    res.status(500).json({ success: false, message: 'Server Error' }); 
+  }
+};
+
     
