@@ -2,58 +2,42 @@ const Restaurant = require('../models/Restaurant');
 const MenuItem   = require('../models/Menu');
 const asyncHandler = require('express-async-handler');
 
-// GET /api/restaurants
 const getRestaurants = asyncHandler(async (req, res) => {
   const { veg, category, search, sort = 'rating', page = 1, limit = 20 } = req.query;
   const filter = {};
-  if (veg === 'true')   filter.isVeg = true;
-  if (category)         filter.categories = { $in: [category] };
-  if (search)           filter.$text = { $search: search };
-
+  if (veg === 'true') filter.isVeg = true;
+  if (category) filter.categories = { $in: [category] };
+  if (search) filter.$text = { $search: search };
   const sortMap = { rating: { rating: -1 }, time: { time: 1 }, distance: { distance: 1 } };
   const sortOpt = sortMap[sort] || { rating: -1 };
-
-  const skip  = (Number(page) - 1) * Number(limit);
+  const skip = (Number(page) - 1) * Number(limit);
   const [restaurants, total] = await Promise.all([
     Restaurant.find(filter).sort(sortOpt).skip(skip).limit(Number(limit)),
     Restaurant.countDocuments(filter),
   ]);
-
-  res.json({
-    success: true,
-    page: Number(page),
-    pages: Math.ceil(total / Number(limit)),
-    total,
-    data: restaurants,
-  });
+  res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data: restaurants });
 });
 
-// GET /api/restaurants/:id
 const getRestaurantById = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findById(req.params.id);
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });
 });
 
-// GET /api/restaurants/:id/menu
 const getMenu = asyncHandler(async (req, res) => {
   const { category, veg } = req.query;
   const filter = { restaurant: req.params.id, isAvailable: true };
   if (category) filter.category = category;
   if (veg === 'true') filter.isVeg = true;
-
   const items = await MenuItem.find(filter).sort({ category: 1, sortOrder: 1, name: 1 });
-
   const grouped = items.reduce((acc, item) => {
     if (!acc[item.category]) acc[item.category] = [];
     acc[item.category].push(item);
     return acc;
   }, {});
-
   res.json({ success: true, count: items.length, data: grouped });
 });
 
-// GET /api/restaurants/under99
 const getUnder99Items = asyncHandler(async (req, res) => {
   const items = await MenuItem.find({ isUnder99: true, price: { $lte: 99 } })
     .populate('restaurant', 'name image rating')
@@ -62,19 +46,14 @@ const getUnder99Items = asyncHandler(async (req, res) => {
   res.json({ success: true, count: items.length, data: items });
 });
 
-// GET /api/restaurants/search
 const searchRestaurants = asyncHandler(async (req, res) => {
   const { q } = req.query;
   if (!q || q.trim().length < 2) return res.status(400).json({ success: false, message: 'Query must be at least 2 characters' });
-
   const regex = new RegExp(q, 'i');
   const [restaurants, menuItems] = await Promise.all([
     Restaurant.find({ $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
-    MenuItem.find({ name: regex })
-      .populate('restaurant', 'name image rating time distance')
-      .limit(20),
+    MenuItem.find({ name: regex }).populate('restaurant', 'name image rating time distance').limit(20),
   ]);
-
   res.json({ success: true, data: { restaurants, menuItems } });
 });
 
@@ -83,20 +62,16 @@ const getCategories = asyncHandler(async (req, res) => {
   res.json({ success: true, data: cats });
 });
 
-// ── ADMIN: create / update / delete ──────────────────────────
-
+// 🚨 THIS WAS FAILING! NOW FIXED SO MONGODB ACCEPTS IT:
 const createRestaurant = asyncHandler(async (req, res) => {
-  // 🚨 FIX 1: Automatically add the required 'cuisine' array and 'slug' so MongoDB doesn't crash!
   if (!req.body.cuisine && req.body.cuisineDisplay) {
-    req.body.cuisine = [req.body.cuisineDisplay];
+    req.body.cuisine = [req.body.cuisineDisplay]; // MongoDB requires an array!
   } else if (!req.body.cuisine) {
     req.body.cuisine = ['General'];
   }
-  
   if (!req.body.slug && req.body.name) {
     req.body.slug = req.body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '-' + Date.now();
   }
-
   const restaurant = await Restaurant.create(req.body);
   res.status(201).json({ success: true, data: restaurant });
 });
@@ -132,18 +107,15 @@ const deleteMenuItem = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Menu item deleted' });
 });
 
-// 🚨 PUBLIC ROUTE FOR HOMEPAGE
+// PUBLIC ROUTE FOR HOMEPAGE
 const getRestaurantMenuPublic = asyncHandler(async (req, res) => {
   const menu = await MenuItem.find({
       $or: [{ restaurant: req.params.id }, { restaurantId: req.params.id }]
   }).sort({ createdAt: -1 });
-
-  // Only send items that are NOT marked out of stock
   const availableMenu = menu.filter(item => item.inStock !== false && item.isAvailable !== false);
   res.json({ success: true, count: availableMenu.length, data: availableMenu });
 });
 
-// 🚨 ONE PERFECT UNIFIED EXPORT LIST!
 module.exports = {
   getRestaurants, getRestaurantById, getMenu, getUnder99Items,
   searchRestaurants, getCategories,
