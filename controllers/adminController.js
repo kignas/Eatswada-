@@ -18,7 +18,7 @@ exports.createMasterItem = async (req, res) => {
         req.body.restaurant = req.body.restaurantId; 
     }
 
-    // 🚨 NEW: Automatically flag items for the 99 Store!
+    // 🚨 THIS IS WHAT WAS MISSING! Auto-flag items for the 99 Store!
     if (Number(req.body.price) <= 99) {
         req.body.isUnder99 = true;
     }
