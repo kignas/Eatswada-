@@ -38,23 +38,33 @@ const getMenu = asyncHandler(async (req, res) => {
   res.json({ success: true, count: items.length, data: grouped });
 });
 
+// 🚨 FIXED: Removed .populate() to prevent crashes from missing restaurants
 const getUnder99Items = asyncHandler(async (req, res) => {
-  const items = await MenuItem.find({ isUnder99: true, price: { $lte: 99 } })
-    .populate('restaurant', 'name image rating')
-    .sort({ price: 1 })
-    .limit(40);
-  res.json({ success: true, count: items.length, data: items });
+  try {
+    const items = await MenuItem.find({ isUnder99: true, price: { $lte: 99 } })
+      .sort({ price: 1 })
+      .limit(40);
+    res.json({ success: true, count: items.length, data: items });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to fetch 99 items' });
+  }
 });
 
+// 🚨 FIXED: Safe search route that won't crash your backend
 const searchRestaurants = asyncHandler(async (req, res) => {
   const { q } = req.query;
   if (!q || q.trim().length < 2) return res.status(400).json({ success: false, message: 'Query must be at least 2 characters' });
   const regex = new RegExp(q, 'i');
-  const [restaurants, menuItems] = await Promise.all([
-    Restaurant.find({ $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
-    MenuItem.find({ name: regex }).populate('restaurant', 'name image rating time distance').limit(20),
-  ]);
-  res.json({ success: true, data: { restaurants, menuItems } });
+  
+  try {
+    const [restaurants, menuItems] = await Promise.all([
+      Restaurant.find({ $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
+      MenuItem.find({ name: regex }).limit(20),
+    ]);
+    res.json({ success: true, data: { restaurants, menuItems } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Search failed' });
+  }
 });
 
 const getCategories = asyncHandler(async (req, res) => {
@@ -62,7 +72,6 @@ const getCategories = asyncHandler(async (req, res) => {
   res.json({ success: true, data: cats });
 });
 
-// 🚨 THIS WAS FAILING! NOW FIXED SO MONGODB ACCEPTS IT:
 const createRestaurant = asyncHandler(async (req, res) => {
   if (!req.body.cuisine && req.body.cuisineDisplay) {
     req.body.cuisine = [req.body.cuisineDisplay]; // MongoDB requires an array!
@@ -107,7 +116,6 @@ const deleteMenuItem = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Menu item deleted' });
 });
 
-// PUBLIC ROUTE FOR HOMEPAGE
 const getRestaurantMenuPublic = asyncHandler(async (req, res) => {
   const menu = await MenuItem.find({
       $or: [{ restaurant: req.params.id }, { restaurantId: req.params.id }]
