@@ -38,21 +38,34 @@ const getMenu = asyncHandler(async (req, res) => {
   res.json({ success: true, count: items.length, data: grouped });
 });
 
-// 🚨 FIXED: Brings back .populate() so the frontend doesn't crash, but safely filters out deleted restaurants!
+// 🚨 FIXED 99 STORE ENGINE
 const getUnder99Items = asyncHandler(async (req, res) => {
   try {
-    // Look for ANY item ₹99 or less
     const items = await MenuItem.find({ price: { $lte: 99 } })
-      .populate('restaurant', 'name image rating')
+      .populate('restaurant', 'name image rating') 
       .sort({ price: 1 })
       .limit(40);
 
-    // Safety net: Filter out "orphan" items where the restaurant was deleted
     const validItems = items.filter(item => item.restaurant != null);
-
     res.json({ success: true, count: validItems.length, data: validItems });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch 99 items' });
+  }
+});
+
+const searchRestaurants = asyncHandler(async (req, res) => {
+  const { q } = req.query;
+  if (!q || q.trim().length < 2) return res.status(400).json({ success: false, message: 'Query must be at least 2 characters' });
+  const regex = new RegExp(q, 'i');
+  
+  try {
+    const [restaurants, menuItems] = await Promise.all([
+      Restaurant.find({ $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
+      MenuItem.find({ name: regex }).limit(20),
+    ]);
+    res.json({ success: true, data: { restaurants, menuItems } });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Search failed' });
   }
 });
 
@@ -63,7 +76,7 @@ const getCategories = asyncHandler(async (req, res) => {
 
 const createRestaurant = asyncHandler(async (req, res) => {
   if (!req.body.cuisine && req.body.cuisineDisplay) {
-    req.body.cuisine = [req.body.cuisineDisplay]; // MongoDB requires an array!
+    req.body.cuisine = [req.body.cuisineDisplay]; 
   } else if (!req.body.cuisine) {
     req.body.cuisine = ['General'];
   }
