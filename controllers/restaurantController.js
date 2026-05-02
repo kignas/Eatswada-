@@ -38,15 +38,16 @@ const getMenu = asyncHandler(async (req, res) => {
   res.json({ success: true, count: items.length, data: grouped });
 });
 
+// 🚨 FIXED: Brings back .populate() so the frontend doesn't crash, but safely filters out deleted restaurants!
 const getUnder99Items = asyncHandler(async (req, res) => {
   try {
-    // 🚨 Safe fetch: Gets items ₹99 or less and attaches the restaurant info
+    // Look for ANY item ₹99 or less
     const items = await MenuItem.find({ price: { $lte: 99 } })
-      .populate('restaurant', 'name image rating') 
+      .populate('restaurant', 'name image rating')
       .sort({ price: 1 })
       .limit(40);
 
-    // 🚨 Safety net: Only send items if the restaurant actually exists (prevents crashes)
+    // Safety net: Filter out "orphan" items where the restaurant was deleted
     const validItems = items.filter(item => item.restaurant != null);
 
     res.json({ success: true, count: validItems.length, data: validItems });
@@ -54,7 +55,6 @@ const getUnder99Items = asyncHandler(async (req, res) => {
     res.status(500).json({ success: false, message: 'Failed to fetch 99 items' });
   }
 });
-
 
 const getCategories = asyncHandler(async (req, res) => {
   const cats = await Restaurant.distinct('categories');
