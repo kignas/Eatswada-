@@ -13,9 +13,14 @@ exports.createMasterItem = async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access Denied.' });
     
-    // 🚨 THIS WAS FAILING! Fixes the ID so the Menu saves properly!
+    // Maps the ID perfectly to your schema
     if(req.body.restaurantId && !req.body.restaurant) {
         req.body.restaurant = req.body.restaurantId; 
+    }
+
+    // 🚨 NEW: Automatically flag items for the 99 Store!
+    if (Number(req.body.price) <= 99) {
+        req.body.isUnder99 = true;
     }
 
     const item = await Menu.create(req.body);
