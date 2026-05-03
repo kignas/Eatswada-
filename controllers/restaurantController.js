@@ -4,22 +4,28 @@ const asyncHandler = require('express-async-handler');
 
 const getRestaurants = asyncHandler(async (req, res) => {
   const { veg, category, search, sort = 'rating', page = 1, limit = 20 } = req.query;
-  const filter = {};
+  
+  // Production Fix: Only fetch active restaurants
+  const filter = { isActive: true }; 
+  
   if (veg === 'true') filter.isVeg = true;
   if (category) filter.categories = { $in: [category] };
   if (search) filter.$text = { $search: search };
-  const sortMap = { rating: { rating: -1 }, time: { time: 1 }, distance: { distance: 1 } };
+  
+  const sortMap = { rating: { rating: -1 }, time: { estimatedDeliveryMin: 1 }, distance: { distanceMeters: 1 } };
   const sortOpt = sortMap[sort] || { rating: -1 };
   const skip = (Number(page) - 1) * Number(limit);
+  
   const [restaurants, total] = await Promise.all([
     Restaurant.find(filter).sort(sortOpt).skip(skip).limit(Number(limit)),
     Restaurant.countDocuments(filter),
   ]);
+  
   res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data: restaurants });
 });
 
 const getRestaurantById = asyncHandler(async (req, res) => {
-  const restaurant = await Restaurant.findById(req.params.id);
+  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });
 });
@@ -29,27 +35,38 @@ const getMenu = asyncHandler(async (req, res) => {
   const filter = { restaurant: req.params.id, isAvailable: true };
   if (category) filter.category = category;
   if (veg === 'true') filter.isVeg = true;
+  
   const items = await MenuItem.find(filter).sort({ category: 1, sortOrder: 1, name: 1 });
   const grouped = items.reduce((acc, item) => {
     if (!acc[item.category]) acc[item.category] = [];
     acc[item.category].push(item);
     return acc;
   }, {});
+  
   res.json({ success: true, count: items.length, data: grouped });
 });
 
-// 🚨 FIXED 99 STORE ENGINE
+// 🚨 UPGRADED 99 STORE ENGINE
 const getUnder99Items = asyncHandler(async (req, res) => {
   try {
-    const items = await MenuItem.find({ price: { $lte: 99 } })
-      .populate('restaurant', 'name image rating') 
+    // Upgraded to pull items up to 149 and ensuring they aren't deleted
+    const items = await MenuItem.find({ 
+      price: { $lte: 149 },
+      isAvailable: true 
+    })
+      .populate({
+        path: 'restaurant',
+        match: { isActive: true }, 
+        select: 'name image rating'
+      }) 
       .sort({ price: 1 })
-      .limit(40);
+      .limit(50);
 
+    // Filter out items attached to a soft-deleted restaurant
     const validItems = items.filter(item => item.restaurant != null);
     res.json({ success: true, count: validItems.length, data: validItems });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Failed to fetch 99 items' });
+    res.status(500).json({ success: false, message: 'Failed to fetch 99 store items' });
   }
 });
 
@@ -60,8 +77,8 @@ const searchRestaurants = asyncHandler(async (req, res) => {
   
   try {
     const [restaurants, menuItems] = await Promise.all([
-      Restaurant.find({ $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
-      MenuItem.find({ name: regex }).limit(20),
+      Restaurant.find({ isActive: true, $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
+      MenuItem.find({ isAvailable: true, name: regex }).limit(20),
     ]);
     res.json({ success: true, data: { restaurants, menuItems } });
   } catch (error) {
@@ -70,7 +87,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
 });
 
 const getCategories = asyncHandler(async (req, res) => {
-  const cats = await Restaurant.distinct('categories');
+  const cats = await Restaurant.distinct('categories', { isActive: true });
   res.json({ success: true, data: cats });
 });
 
@@ -93,11 +110,26 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   res.json({ success: true, data: restaurant });
 });
 
+// 🚨 UPGRADED TO SOFT DELETE
 const deleteRestaurant = asyncHandler(async (req, res) => {
-  const restaurant = await Restaurant.findByIdAndDelete(req.params.id);
-  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
-  await MenuItem.deleteMany({ restaurant: req.params.id });
-  res.json({ success: true, message: 'Restaurant and menu deleted' });
+  // Hides the restaurant without breaking carts/orders
+  const restaurant = await Restaurant.findByIdAndUpdate(
+    req.params.id, 
+    { isActive: false, isOpen: false }, 
+    { new: true }
+  );
+
+  if (!restaurant) {
+    return res.status(404).json({ success: false, message: 'Restaurant not found' });
+  }
+
+  // Hide the menu items
+  await MenuItem.updateMany(
+    { restaurant: req.params.id },
+    { isAvailable: false }
+  );
+
+  res.json({ success: true, message: 'Restaurant and menu successfully deactivated' });
 });
 
 const addMenuItem = asyncHandler(async (req, res) => {
@@ -113,6 +145,7 @@ const updateMenuItem = asyncHandler(async (req, res) => {
 });
 
 const deleteMenuItem = asyncHandler(async (req, res) => {
+  // Production apps also soft delete items, but keeping your hard delete here for now if preferred
   const item = await MenuItem.findByIdAndDelete(req.params.itemId);
   if (!item) return res.status(404).json({ success: false, message: 'Menu item not found' });
   res.json({ success: true, message: 'Menu item deleted' });
@@ -120,9 +153,11 @@ const deleteMenuItem = asyncHandler(async (req, res) => {
 
 const getRestaurantMenuPublic = asyncHandler(async (req, res) => {
   const menu = await MenuItem.find({
-      $or: [{ restaurant: req.params.id }, { restaurantId: req.params.id }]
+      $or: [{ restaurant: req.params.id }, { restaurantId: req.params.id }],
+      isAvailable: true
   }).sort({ createdAt: -1 });
-  const availableMenu = menu.filter(item => item.inStock !== false && item.isAvailable !== false);
+  
+  const availableMenu = menu.filter(item => item.inStock !== false);
   res.json({ success: true, count: availableMenu.length, data: availableMenu });
 });
 
