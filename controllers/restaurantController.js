@@ -133,7 +133,15 @@ const deleteRestaurant = asyncHandler(async (req, res) => {
 });
 
 const addMenuItem = asyncHandler(async (req, res) => {
-  const item = await MenuItem.create({ ...req.body, restaurant: req.params.id });
+  // 🚨 PRODUCTION FIX: Prevent "Orphaned" items
+  const targetRestaurantId = req.params.id || req.body.restaurant || req.body.restaurantId;
+  
+  if (!targetRestaurantId) {
+    return res.status(400).json({ success: false, message: 'Restaurant ID is required' });
+  }
+
+  const item = await MenuItem.create({ ...req.body, restaurant: targetRestaurantId });
+  
   if (item.price <= 99) { item.isUnder99 = true; await item.save(); }
   res.status(201).json({ success: true, data: item });
 });
