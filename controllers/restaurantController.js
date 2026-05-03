@@ -31,18 +31,33 @@ const getRestaurantById = asyncHandler(async (req, res) => {
 });
 
 const getMenu = asyncHandler(async (req, res) => {
-  const { category, veg } = req.query;
-  const filter = { restaurant: req.params.id, isAvailable: true };
-  if (category) filter.category = category;
-  if (veg === 'true') filter.isVeg = true;
-  
-  const items = await MenuItem.find(filter).sort({ category: 1, sortOrder: 1, name: 1 });
-  const grouped = items.reduce((acc, item) => {
-    if (!acc[item.category]) acc[item.category] = [];
-    acc[item.category].push(item);
+  // 1. Fetch only items that are active, in stock, and belong to this restaurant
+  const items = await MenuItem.find({
+    $or: [{ restaurant: req.params.id }, { restaurantId: req.params.id }],
+    isAvailable: true,
+    inStock: true
+  }).sort({ category: 1, name: 1 });
+
+  // 2. PRODUCTION FORMATTING: Group the items by Category for the frontend UI
+  const groupedMenu = items.reduce((acc, item) => {
+    // If an item was injected without a category, default to 'Recommended'
+    const cat = item.category || 'Recommended'; 
+    
+    if (!acc[cat]) {
+      acc[cat] = [];
+    }
+    acc[cat].push(item);
     return acc;
   }, {});
-  
+
+  // 3. Send the properly grouped object to the frontend
+  res.json({ 
+    success: true, 
+    count: items.length, 
+    data: groupedMenu // The frontend will now map this perfectly!
+  });
+});
+
   res.json({ success: true, count: items.length, data: grouped });
 });
 
