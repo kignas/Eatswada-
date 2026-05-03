@@ -10,11 +10,11 @@ const restaurantSchema = new mongoose.Schema(
       index: true,
     },
     slug: {
-     type: String,
-     required: true,
-     unique: true,
-     lowercase: true,
-     trim: true,
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
     },
     owner: {
       type: mongoose.Schema.Types.ObjectId,
@@ -28,7 +28,6 @@ const restaurantSchema = new mongoose.Schema(
       type: [String],
       required: true,
     },
-    // Matches frontend: "Biryani, Chinese, North Indian"
     cuisineDisplay: {
       type: String,
       default: '',
@@ -43,16 +42,30 @@ const restaurantSchema = new mongoose.Schema(
       type: String,
       default: '100+',
     },
+    // Retained for frontend backward compatibility
     time: {
-      type: String,   // e.g. "25-35 mins"
+      type: String,
       default: '30-40 mins',
     },
     distance: {
-      type: String,   // e.g. "1.2 km"
+      type: String,
       default: '2 km',
     },
+    // Production numeric fields for accurate database sorting
+    estimatedDeliveryMin: {
+      type: Number,
+      default: 30,
+    },
+    estimatedDeliveryMax: {
+      type: Number,
+      default: 40,
+    },
+    distanceMeters: {
+      type: Number,
+      default: 2000,
+    },
     offer: {
-      type: String,   // e.g. "20% OFF up to ₹50"
+      type: String,
       default: '',
     },
     minOrder: {
@@ -79,6 +92,11 @@ const restaurantSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    isActive: {
+      type: Boolean,
+      default: true,
+      index: true, // Speeds up filtering for active restaurants
+    },
     isFeatured: {
       type: Boolean,
       default: false,
@@ -98,7 +116,6 @@ const restaurantSchema = new mongoose.Schema(
         default: [88.3832, 26.4416], // Maynaguri default
       },
     },
-    // Category tags matching frontend category.html
     categories: {
       type: [String],
       index: true,
