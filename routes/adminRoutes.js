@@ -1,34 +1,19 @@
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 
-// Import the controllers we just upgraded
-const { 
-  getAllRestaurants, 
-  createMasterItem, 
-  getRestaurantMenu, 
-  deleteMenuItem,
-  getTodayOrders 
-} = require('../controllers/adminController');
+const { protect } = require('../middleware/authMiddleware');
+const { getMetrics } = require('../controllers/adminController');
 
-// Import your authentication middleware to secure the CEO routes
-const { protect, admin } = require('../middleware/authMiddleware');
+/* ─────────────────────────────────────────────────────────────
+ *  CEO / ADMIN ROUTES
+ *
+ *  Mount this in your main server.js / app.js:
+ *    app.use('/api/admin', require('./routes/adminRoutes'));
+ * ───────────────────────────────────────────────────────────── */
 
-// ==========================================
-// 🏪 ADMIN RESTAURANT ROUTES
-// ==========================================
-router.get('/restaurants', protect, admin, getAllRestaurants);
-router.get('/restaurants/:restaurantId/menu', protect, admin, getRestaurantMenu);
-
-// ==========================================
-// 🍔 MASTER CATALOG INJECTION ROUTES
-// ==========================================
-// 🚨 This MUST point to createMasterItem to fix the orphan bug
-router.post('/menu', protect, admin, createMasterItem);
-router.delete('/menu/:itemId', protect, admin, deleteMenuItem);
-
-// ==========================================
-// 📊 METRICS & DASHBOARD ROUTES
-// ==========================================
-router.get('/orders/today', protect, admin, getTodayOrders);
+// GET /api/admin/metrics
+// Returns totalRevenue, ordersToday, successRate, totalOrders.
+// protect middleware validates the JWT; getMetrics enforces role === 'admin'|'ceo'.
+router.get('/metrics', protect, getMetrics);
 
 module.exports = router;
