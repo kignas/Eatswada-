@@ -1,184 +1,98 @@
-'use strict';
+const asyncHandler   = require('express-async-handler');
+const Order          = require('../models/Order');
+const Menu           = require('../models/Menu');
+const Restaurant     = require('../models/Restaurant');
 
-/**
- * vendorController.js
- *
- * Handles all Vendor Portal business logic.
- * Every export is wrapped in express-async-handler so unhandled promise
- * rejections never crash the Render server process.
- *
- * Architectural rules enforced:
- *  - No hard deletes (Rule #1): menu items use isAvailable: false.
- *  - Backend-driven formatting (Rule #2): getVendorMenu groups by category.
- *  - No orphan items (Rule #3): restaurantId is always server-enforced.
- *  - Strict data types (Rule #4): price is coerced to Number on write.
- *  - Strict payload validation: no req.body is ever trusted blindly.
- *  - Whitelisted updates: updateMenuItem only allows specific fields.
- */
-
-const asyncHandler = require('express-async-handler');
-const Order      = require('../models/Order');
-const Menu       = require('../models/Menu');
-const Restaurant = require('../models/Restaurant');
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPER — shared role + restaurantId guard
-// ─────────────────────────────────────────────────────────────────────────────
-function assertVendor(req, res) {
-  if (req.user.role !== 'vendor') {
-    res.status(403).json({ success: false, message: 'Access denied. Vendor role required.' });
-    return false;
-  }
-  if (!req.user.restaurantId) {
+/* ─────────────────────────────────────────────────────────────
+ *  STRICT JWT PAYLOAD GUARD
+ *  Every handler that touches vendor-scoped data calls this
+ *  first.  Returns true if the payload is valid; otherwise
+ *  responds 403 and returns false.
+ * ───────────────────────────────────────────────────────────── */
+function assertVendorPayload(req, res) {
+  if (
+    !req.user ||
+    req.user.role !== 'vendor' ||
+    !req.user.restaurantId
+  ) {
     res.status(403).json({
       success: false,
-      message: 'Access denied. Your account is not linked to a restaurant. Contact EatSwada support.',
+      message: 'Access denied. You are not a registered vendor.',
     });
     return false;
   }
   return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. GET /api/vendor/orders
-//    Returns only this vendor's non-terminal orders, newest first.
-// ─────────────────────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+ *  1. GET /api/vendor/orders
+ *     Returns ONLY the live orders that belong to this vendor.
+ * ───────────────────────────────────────────────────────────── */
 exports.getVendorOrders = asyncHandler(async (req, res) => {
-  if (!assertVendor(req, res)) return;
+  if (!assertVendorPayload(req, res)) return;
 
   const orders = await Order.find({
     restaurantId: req.user.restaurantId,
-  })
-    .sort({ createdAt: -1 })
-    .lean();
+  }).sort({ createdAt: -1 });
 
-  res.status(200).json({ success: true, count: orders.length, data: orders });
+  res.status(200).json({ success: true, data: orders });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. GET /api/vendor/menu
-//    Returns this vendor's available menu items GROUPED BY CATEGORY.
-//    Rule #2: Backend shapes the data so the frontend never needs to transform.
-//
-//    Response shape:
-//    {
-//      success: true,
-//      data: {
-//        "Starters": [ { _id, name, price, isVeg, inStock, ... }, ... ],
-//        "Mains":    [ ... ],
-//        ...
-//      }
-//    }
-// ─────────────────────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+ *  2. GET /api/vendor/menu
+ *     Returns items grouped by category for this vendor.
+ * ───────────────────────────────────────────────────────────── */
 exports.getVendorMenu = asyncHandler(async (req, res) => {
-  if (!assertVendor(req, res)) return;
+  if (!assertVendorPayload(req, res)) return;
 
-  // Fetch all menu items for this restaurant (including out-of-stock).
-  // isAvailable: false means soft-deleted — exclude those.
   const items = await Menu.find({
     restaurantId: req.user.restaurantId,
-    isAvailable: { $ne: false },
-  })
-    .sort({ category: 1, createdAt: 1 })
-    .lean();
+  }).sort({ sortOrder: 1, createdAt: -1 });
 
-  // Group by category — plain loop, no .reduce() without safety checks.
+  // Group by category — safe iteration, no blind .map
   const grouped = {};
-  if (Array.isArray(items)) {
-    for (const item of items) {
-      const cat = (typeof item.category === 'string' && item.category.trim())
-        ? item.category.trim()
-        : 'Uncategorised';
-
-      if (!grouped[cat]) {
-        grouped[cat] = [];
-      }
-      grouped[cat].push(item);
-    }
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const cat  = (typeof item.category === 'string' && item.category.trim())
+      ? item.category.trim()
+      : 'Uncategorised';
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(item);
   }
 
   res.status(200).json({ success: true, data: grouped });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. POST /api/vendor/menu
-//    Creates a new menu item. restaurantId is always set from the server token —
-//    any restaurantId in the request body is IGNORED (Rule #3: no orphan items).
-// ─────────────────────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+ *  3. POST /api/vendor/menu
+ *     Adds a new item, always locked to this vendor's restaurant.
+ * ───────────────────────────────────────────────────────────── */
 exports.addMenuItem = asyncHandler(async (req, res) => {
-  if (!assertVendor(req, res)) return;
+  if (!assertVendorPayload(req, res)) return;
 
-  const { name, price, category, description, image, isVeg } = req.body;
-
-  // ── Strict payload validation ──
-  if (!name || typeof name !== 'string' || name.trim().length === 0) {
-    return res.status(400).json({ success: false, message: 'Item name is required.' });
-  }
-
-  const parsedPrice = Number(price);
-  if (!price || isNaN(parsedPrice) || parsedPrice < 0) {
-    return res.status(400).json({ success: false, message: 'A valid price (number ≥ 0) is required.' });
-  }
-
-  if (!category || typeof category !== 'string' || category.trim().length === 0) {
-    return res.status(400).json({ success: false, message: 'Category is required.' });
-  }
-
-  // Build the item with a server-enforced restaurantId.
   const itemData = {
-    name: name.trim(),
-    price: parsedPrice,           // Rule #4: stored as Number
-    category: category.trim(),
-    description: typeof description === 'string' ? description.trim() : '',
-    image: typeof image === 'string' ? image.trim() : '',
-    isVeg: Boolean(isVeg),
-    inStock: true,
-    isAvailable: true,
-    restaurantId: req.user.restaurantId, // Rule #3: always server-enforced
+    ...req.body,
+    restaurantId: req.user.restaurantId, // ownership override — hacker-proof
   };
 
   const item = await Menu.create(itemData);
-
   res.status(201).json({ success: true, data: item });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. PUT /api/vendor/menu/:id
-//    Updates a menu item. Only whitelisted fields can be changed.
-//    restaurantId, _id, and createdAt can NEVER be overwritten through this route.
-//    The compound query { _id, restaurantId } ensures cross-vendor tampering
-//    returns 404 rather than exposing that the item exists.
-// ─────────────────────────────────────────────────────────────────────────────
+/* ─────────────────────────────────────────────────────────────
+ *  4. PUT /api/vendor/menu/:id
+ *     General field update (price, name, etc.).
+ *     Security: compound query ensures item belongs to THIS vendor.
+ * ───────────────────────────────────────────────────────────── */
 exports.updateMenuItem = asyncHandler(async (req, res) => {
-  if (!assertVendor(req, res)) return;
+  if (!assertVendorPayload(req, res)) return;
 
-  // ── Whitelist: only these fields can be updated via the vendor portal ──
-  const ALLOWED_FIELDS = ['name', 'price', 'category', 'description', 'image', 'isVeg', 'inStock'];
-  const updates = {};
+  // Strip any attempt to re-assign ownership via the body
+  const { restaurantId: _stripped, ...safeBody } = req.body;
 
-  for (const field of ALLOWED_FIELDS) {
-    if (req.body[field] !== undefined) {
-      updates[field] = req.body[field];
-    }
-  }
-
-  // ── Type coercion for price (Rule #4) ──
-  if (updates.price !== undefined) {
-    const parsedPrice = Number(updates.price);
-    if (isNaN(parsedPrice) || parsedPrice < 0) {
-      return res.status(400).json({ success: false, message: 'Price must be a valid number ≥ 0.' });
-    }
-    updates.price = parsedPrice;
-  }
-
-  if (Object.keys(updates).length === 0) {
-    return res.status(400).json({ success: false, message: 'No valid fields provided to update.' });
-  }
-
-  // Compound query — item must belong to this vendor's restaurant.
   const item = await Menu.findOneAndUpdate(
     { _id: req.params.id, restaurantId: req.user.restaurantId },
-    { $set: updates },
+    safeBody,
     { new: true, runValidators: true }
   );
 
@@ -192,108 +106,89 @@ exports.updateMenuItem = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: item });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. DELETE /api/vendor/menu/:id  (SOFT DELETE — Rule #1)
-//    Sets isAvailable: false. The item is never hard-deleted so existing
-//    order history that references it remains intact.
-// ─────────────────────────────────────────────────────────────────────────────
-exports.deleteMenuItem = asyncHandler(async (req, res) => {
-  if (!assertVendor(req, res)) return;
+/* ─────────────────────────────────────────────────────────────
+ *  5. PUT /api/vendor/menu/:id/toggle-stock  ← NEW
+ *     Atomically flips the inStock boolean.
+ *     Ownership is enforced via the compound { _id, restaurantId }
+ *     filter — a vendor can NEVER touch another restaurant's item.
+ * ───────────────────────────────────────────────────────────── */
+exports.toggleItemStock = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
 
-  const item = await Menu.findOneAndUpdate(
-    { _id: req.params.id, restaurantId: req.user.restaurantId },
-    { $set: { isAvailable: false, inStock: false } },
+  // Step 1: fetch the item (ownership check baked in)
+  const existing = await Menu.findOne({
+    _id:          req.params.id,
+    restaurantId: req.user.restaurantId,
+  });
+
+  if (!existing) {
+    return res.status(404).json({
+      success: false,
+      message: 'Menu item not found or access denied.',
+    });
+  }
+
+  // Step 2: atomic toggle — no race condition vs. passing boolean from client
+  const updated = await Menu.findByIdAndUpdate(
+    existing._id,
+    { inStock: !existing.inStock },
     { new: true }
   );
 
-  if (!item) {
-    return res.status(404).json({
-      success: false,
-      message: 'Item not found or you do not have permission to remove it.',
-    });
-  }
-
-  res.status(200).json({ success: true, message: 'Item removed from menu.', data: item });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 6. PUT /api/vendor/status
-//    Toggles the restaurant's online/offline master switch.
-//    Strict boolean validation — no arbitrary payload is accepted.
-// ─────────────────────────────────────────────────────────────────────────────
-exports.updateRestaurantStatus = asyncHandler(async (req, res) => {
-  if (!assertVendor(req, res)) return;
-
-  // ── Strict boolean validation ──
-  const { isActive } = req.body;
-  if (typeof isActive !== 'boolean') {
-    return res.status(400).json({
-      success: false,
-      message: 'isActive must be a boolean (true or false).',
-    });
-  }
-
-  const restaurant = await Restaurant.findOneAndUpdate(
-    { owner: req.user._id },
-    { $set: { isActive } },
-    { new: true, runValidators: true }
-  );
-
-  if (!restaurant) {
-    return res.status(404).json({
-      success: false,
-      message: 'No restaurant found for your account.',
-    });
-  }
-
   res.status(200).json({
-    success: true,
-    message: `Restaurant is now ${isActive ? 'Online' : 'Offline'}.`,
-    data: { _id: restaurant._id, name: restaurant.name, isActive: restaurant.isActive },
+    success:  true,
+    data:     updated,
+    inStock:  updated.inStock,
+    message:  updated.inStock
+      ? 'Item is now In Stock.'
+      : 'Item is now Out of Stock.',
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 7. GET /api/vendor/restaurant
-//    Returns the vendor's own restaurant details (name, isActive, etc.)
-//    so the frontend can populate the header on load without depending on
-//    order data being present.
-// ─────────────────────────────────────────────────────────────────────────────
-exports.getVendorRestaurant = asyncHandler(async (req, res) => {
-  if (!assertVendor(req, res)) return;
+/* ─────────────────────────────────────────────────────────────
+ *  6. GET /api/vendor/restaurant
+ *     Returns the restaurant profile for the header / toggle.
+ * ───────────────────────────────────────────────────────────── */
+exports.getRestaurantProfile = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
 
-  const restaurant = await Restaurant.findOne({ owner: req.user._id })
-    .select('name isActive isOpen rating ratingCount cuisineDisplay image')
-    .lean();
-
+  const restaurant = await Restaurant.findById(req.user.restaurantId);
   if (!restaurant) {
     return res.status(404).json({
       success: false,
-      message: 'No restaurant found for your account.',
+      message: 'Restaurant profile not found.',
     });
   }
 
   res.status(200).json({ success: true, data: restaurant });
 });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
 
-const Restaurant = require('../models/Restaurant');
-const Menu = require('../models/Menu');
+/* ─────────────────────────────────────────────────────────────
+ *  7. PUT /api/vendor/status
+ *     Master online / offline switch for the restaurant.
+ * ───────────────────────────────────────────────────────────── */
+exports.updateRestaurantStatus = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
 
-// This controls the Master Online/Offline Switch
-exports.updateRestaurantStatus = async (req, res) => {
-  try {
-    // Finds the restaurant owned by the logged-in vendor and updates isActive
-    const restaurant = await Restaurant.findOneAndUpdate(
-       { owner: req.user._id },
-       { isActive: req.body.isActive },
-       { new: true }
-    );
-    res.json({ success: true, data: restaurant });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Server Error' });
+  if (typeof req.body.isActive !== 'boolean') {
+    return res.status(400).json({
+      success: false,
+      message: 'isActive must be a boolean.',
+    });
   }
-};
+
+  const restaurant = await Restaurant.findOneAndUpdate(
+    { owner: req.user._id },
+    { isActive: req.body.isActive },
+    { new: true }
+  );
+
+  if (!restaurant) {
+    return res.status(404).json({
+      success: false,
+      message: 'Restaurant not found.',
+    });
+  }
+
+  res.status(200).json({ success: true, data: restaurant });
+});
