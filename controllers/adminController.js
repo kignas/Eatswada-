@@ -1,75 +1,132 @@
-const Menu = require('../models/Menu');
-const Restaurant = require('../models/Restaurant');
-const Order = require('../models/Order'); // Needed for the Today's Orders metric
+const asyncHandler = require('express-async-handler');
+const Order        = require('../models/Order');
 
-exports.getAllRestaurants = async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access Denied.' });
-    const restaurants = await Restaurant.find({});
-    res.json({ success: true, data: restaurants });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-};
-
-// 🚨 UPGRADED BULLETPROOF INJECTION ENGINE
-exports.createMasterItem = async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access Denied.' });
-
-    // 1. Bulletproof ID mapping to prevent orphans
-    const targetId = req.body.restaurant || req.body.restaurantId;
-    if (!targetId) {
-        return res.status(400).json({ success: false, message: 'Restaurant ID is required' });
-    }
-
-    // 2. Force the correct data structure so it shows up on the main site & vendor pages
-    req.body.restaurant = targetId;
-    req.body.isAvailable = true; // Forces visibility on main website
-    req.body.inStock = true;
-
-    // 3. Auto-flag for the 99 Store
-    if (Number(req.body.price) <= 99) {
-      req.body.isUnder99 = true;
-    }
-
-    const item = await Menu.create(req.body);
-    res.status(201).json({ success: true, data: item });
-  } catch (err) { 
-    res.status(500).json({ success: false, message: err.message }); 
+/* ─────────────────────────────────────────────────────────────
+ *  STRICT JWT PAYLOAD GUARD
+ *  Only users with role === 'admin' or 'ceo' may proceed.
+ * ───────────────────────────────────────────────────────────── */
+function assertAdminPayload(req, res) {
+  const ADMIN_ROLES = ['admin', 'ceo'];
+  if (!req.user || !ADMIN_ROLES.includes(req.user.role)) {
+    res.status(403).json({
+      success: false,
+      message: 'Access denied. Admin credentials required.',
+    });
+    return false;
   }
-};
+  return true;
+}
 
-exports.getRestaurantMenu = async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access Denied.' });
-    const menu = await Menu.find({ 
-        $or: [{ restaurant: req.params.restaurantId }, { restaurantId: req.params.restaurantId }] 
-    }).sort({ createdAt: -1 });
-    res.json({ success: true, data: menu });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-};
+/* ─────────────────────────────────────────────────────────────
+ *  GET /api/admin/metrics
+ *
+ *  Returns a single JSON object with:
+ *    - totalRevenue   : sum of `total` for all 'delivered' orders
+ *    - ordersToday    : count of orders placed since midnight (local)
+ *    - successRate    : % of terminal orders that are 'delivered'
+ *                       (delivered / (delivered + cancelled) × 100)
+ *    - totalOrders    : all-time order count (bonus — free with pipeline)
+ *
+ *  Uses three targeted aggregation pipelines to keep each
+ *  $match filter lean.  All run concurrently via Promise.all.
+ * ───────────────────────────────────────────────────────────── */
+exports.getMetrics = asyncHandler(async (req, res) => {
+  if (!assertAdminPayload(req, res)) return;
 
-exports.deleteMenuItem = async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access Denied.' });
-    await Menu.findByIdAndDelete(req.params.itemId);
-    res.json({ success: true, message: 'Item deleted' });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-};
+  // Midnight of the current server day (UTC)
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
 
-// 📊 NEW: POWERS THE "TODAY'S ORDERS" METRIC ON CEO DASHBOARD
-exports.getTodayOrders = async (req, res) => {
-  try {
-    if (req.user.role !== 'admin') return res.status(403).json({ success: false, message: 'Access Denied.' });
+  const [revenueResult, todayResult, rateResult] = await Promise.all([
 
-    // Calculate the start and end time for the current day
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    const end = new Date();
-    end.setHours(23, 59, 59, 999);
+    /* ── Pipeline 1: Total Revenue ────────────────────────── */
+    Order.aggregate([
+      { $match: { status: 'delivered' } },
+      {
+        $group: {
+          _id:          null,
+          totalRevenue: { $sum: '$total' },
+          totalOrders:  { $sum: 1 },
+        },
+      },
+    ]),
 
-    const count = await Order.countDocuments({ createdAt: { $gte: start, $lt: end } });
-    res.json({ success: true, count: count });
-  } catch (err) { 
-    res.status(500).json({ success: false, message: err.message }); 
+    /* ── Pipeline 2: Orders Today ─────────────────────────── */
+    Order.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: todayStart },
+        },
+      },
+      {
+        $group: {
+          _id:         null,
+          ordersToday: { $sum: 1 },
+        },
+      },
+    ]),
+
+    /* ── Pipeline 3: Success Rate ─────────────────────────── */
+    Order.aggregate([
+      {
+        $match: {
+          status: { $in: ['delivered', 'cancelled'] },
+        },
+      },
+      {
+        $group: {
+          _id:       '$status',
+          count:     { $sum: 1 },
+        },
+      },
+    ]),
+
+  ]);
+
+  /* ── Safely unpack Pipeline 1 ── */
+  const revenueDoc  = Array.isArray(revenueResult) && revenueResult.length > 0
+    ? revenueResult[0]
+    : null;
+  const totalRevenue = revenueDoc && typeof revenueDoc.totalRevenue === 'number'
+    ? revenueDoc.totalRevenue
+    : 0;
+  const totalOrders  = revenueDoc && typeof revenueDoc.totalOrders === 'number'
+    ? revenueDoc.totalOrders
+    : 0;
+
+  /* ── Safely unpack Pipeline 2 ── */
+  const todayDoc    = Array.isArray(todayResult) && todayResult.length > 0
+    ? todayResult[0]
+    : null;
+  const ordersToday = todayDoc && typeof todayDoc.ordersToday === 'number'
+    ? todayDoc.ordersToday
+    : 0;
+
+  /* ── Safely unpack Pipeline 3 ── */
+  let deliveredCount = 0;
+  let cancelledCount = 0;
+
+  if (Array.isArray(rateResult)) {
+    for (let i = 0; i < rateResult.length; i++) {
+      const row = rateResult[i];
+      if (!row || typeof row !== 'object') continue;
+      if (row._id === 'delivered')  deliveredCount = Number(row.count) || 0;
+      if (row._id === 'cancelled')  cancelledCount = Number(row.count) || 0;
+    }
   }
-};
+
+  const terminalTotal = deliveredCount + cancelledCount;
+  const successRate   = terminalTotal > 0
+    ? Math.round((deliveredCount / terminalTotal) * 100)
+    : 0; // avoid NaN / divide-by-zero on a fresh DB
+
+  res.status(200).json({
+    success: true,
+    data: {
+      totalRevenue,   // Number  (₹)
+      ordersToday,    // Number  (count)
+      successRate,    // Number  (0–100 %)
+      totalOrders,    // Number  (all-time delivered)
+    },
+  });
+});
