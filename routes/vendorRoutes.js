@@ -1,53 +1,52 @@
-'use strict';
-
-/**
- * vendorRoutes.js
- *
- * All routes are protected by the `protect` middleware (valid JWT required).
- * Role enforcement and restaurantId validation is done inside each controller
- * via the shared assertVendor() helper.
- *
- * Mount point (in app.js / server.js):
- *   app.use('/api/vendor', vendorRoutes);
- *
- * Full route map:
- *   GET    /api/vendor/restaurant   → getVendorRestaurant  (header data on load)
- *   GET    /api/vendor/orders       → getVendorOrders
- *   GET    /api/vendor/menu         → getVendorMenu        (grouped by category)
- *   POST   /api/vendor/menu         → addMenuItem
- *   PUT    /api/vendor/menu/:id     → updateMenuItem       (whitelisted fields)
- *   DELETE /api/vendor/menu/:id     → deleteMenuItem       (soft delete only)
- *   PUT    /api/vendor/status       → updateRestaurantStatus
- */
-
 const express = require('express');
 const router  = express.Router();
 
 const { protect } = require('../middleware/authMiddleware');
 
 const {
-  getVendorRestaurant,
   getVendorOrders,
   getVendorMenu,
   addMenuItem,
   updateMenuItem,
-  deleteMenuItem,
+  toggleItemStock,
+  getRestaurantProfile,
   updateRestaurantStatus,
 } = require('../controllers/vendorController');
 
-// ── Restaurant info ──
-router.get('/restaurant', protect, getVendorRestaurant);
+/* ─────────────────────────────────────────────────────────────
+ *  RESTAURANT
+ * ───────────────────────────────────────────────────────────── */
 
-// ── Orders ──
+// GET  /api/vendor/restaurant  — header profile + isActive flag
+router.get('/restaurant', protect, getRestaurantProfile);
+
+// PUT  /api/vendor/status      — master online / offline toggle
+router.put('/status', protect, updateRestaurantStatus);
+
+/* ─────────────────────────────────────────────────────────────
+ *  ORDERS
+ * ───────────────────────────────────────────────────────────── */
+
+// GET  /api/vendor/orders      — vendor's live order queue
 router.get('/orders', protect, getVendorOrders);
 
-// ── Menu ──
-router.get('/menu',         protect, getVendorMenu);
-router.post('/menu',        protect, addMenuItem);
-router.put('/menu/:id',     protect, updateMenuItem);
-router.delete('/menu/:id',  protect, deleteMenuItem);
+/* ─────────────────────────────────────────────────────────────
+ *  MENU
+ *  NOTE: /menu/:id/toggle-stock MUST come before /menu/:id
+ *        so Express does not greedily match 'toggle-stock' as
+ *        the :id parameter.
+ * ───────────────────────────────────────────────────────────── */
 
-// ── Master Online/Offline toggle ──
-router.put('/status', protect, updateRestaurantStatus);
+// GET  /api/vendor/menu                   — grouped-by-category menu
+router.get('/menu', protect, getVendorMenu);
+
+// POST /api/vendor/menu                   — add new item
+router.post('/menu', protect, addMenuItem);
+
+// PUT  /api/vendor/menu/:id/toggle-stock  — atomic inStock flip  ← NEW
+router.put('/menu/:id/toggle-stock', protect, toggleItemStock);
+
+// PUT  /api/vendor/menu/:id               — general field update (price etc.)
+router.put('/menu/:id', protect, updateMenuItem);
 
 module.exports = router;
