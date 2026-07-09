@@ -30,9 +30,9 @@ const getRestaurantById = asyncHandler(async (req, res) => {
 // 🚨 THE SWIGGY-GRADE MENU FORMATTER
 const getMenu = asyncHandler(async (req, res) => {
   const items = await MenuItem.find({
-    $or: [{ restaurant: req.params.id }, { restaurantId: req.params.id }],
-    isAvailable: true // Only fetch live items
-  }).sort({ category: 1, name: 1 });
+  restaurantId: req.params.id,
+  inStock: true
+}).sort({ category: 1, name: 1 });
 
   // Formats data into categories so the frontend doesn't crash
   const groupedMenu = items.reduce((acc, item) => {
