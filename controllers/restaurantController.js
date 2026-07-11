@@ -27,22 +27,24 @@ const getRestaurantById = asyncHandler(async (req, res) => {
   res.json({ success: true, data: restaurant });
 });
 
-// 🚨 THE SWIGGY-GRADE MENU FORMATTER
 const getMenu = asyncHandler(async (req, res) => {
   const items = await MenuItem.find({
-  restaurantId: req.params.id,
-  inStock: true
-}).sort({ category: 1, name: 1 });
+    restaurantId: req.params.id,
+    inStock: true
+  }).sort({ category: 1, name: 1 });
 
-  // Formats data into categories so the frontend doesn't crash
   const groupedMenu = items.reduce((acc, item) => {
-    const cat = item.category || 'Recommended'; 
+    const cat = item.category || "Recommended";
     if (!acc[cat]) acc[cat] = [];
     acc[cat].push(item);
     return acc;
   }, {});
 
-  res.json({ success: true, count: items.length, data: groupedMenu });
+  res.json({
+    success: true,
+    count: items.length,
+    data: groupedMenu
+  });
 });
 
 const getUnder99Items = asyncHandler(async (req, res) => {
