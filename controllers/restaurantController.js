@@ -53,7 +53,7 @@ const getUnder99Items = asyncHandler(async (req, res) => {
     // and `restaurantId` (not `restaurant`), so this endpoint always returned 0
     // items regardless of what was in the database.
     const items = await MenuItem.find({ price: { $lte: 149 }, inStock: true })
-      .populate({ path: 'restaurantId', match: { isActive: true }, select: 'name image rating' })
+      .populate({ path: 'restaurantId', match: { isOpen: true }, select: 'name image rating' })
       .sort({ price: 1 })
       .limit(50);
 
