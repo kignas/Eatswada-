@@ -22,7 +22,7 @@ const getRestaurants = asyncHandler(async (req, res) => {
 });
 
 const getRestaurantById = asyncHandler(async (req, res) => {
-  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true });
+  const restaurant = await Restaurant.findOne({ _id: req.params.id, isOpen: true });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });
 });
@@ -79,7 +79,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
   const regex = new RegExp(q, 'i');
   try {
     const [restaurants, menuItems] = await Promise.all([
-      Restaurant.find({ isActive: true, $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
+      Restaurant.find({ isOpen: true, $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
       // 🔧 FIX: schema field is `inStock`, not `isAvailable` — same bug as above,
       // meant menu-item search results were always empty.
       MenuItem.find({ inStock: true, name: regex }).limit(20),
@@ -91,7 +91,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
 });
 
 const getCategories = asyncHandler(async (req, res) => {
-  const cats = await Restaurant.distinct('categories', { isActive: true });
+  const cats = await Restaurant.distinct('categories', { isOpen: true });
   res.json({ success: true, data: cats });
 });
 
