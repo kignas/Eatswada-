@@ -49,12 +49,24 @@ const getMenu = asyncHandler(async (req, res) => {
 
 const getUnder99Items = asyncHandler(async (req, res) => {
   try {
-    const items = await MenuItem.find({ price: { $lte: 149 }, isAvailable: true })
-      .populate({ path: 'restaurant', match: { isActive: true }, select: 'name image rating' }) 
+    // 🔧 FIX: same mismatch as above — schema uses `inStock` (not `isAvailable`)
+    // and `restaurantId` (not `restaurant`), so this endpoint always returned 0
+    // items regardless of what was in the database.
+    const items = await MenuItem.find({ price: { $lte: 149 }, inStock: true })
+      .populate({ path: 'restaurantId', match: { isActive: true }, select: 'name image rating' })
       .sort({ price: 1 })
       .limit(50);
 
-    const validItems = items.filter(item => item.restaurant != null);
+    // Response shape kept identical to before (key still called "restaurant")
+    // so the frontend doesn't need any changes.
+    const validItems = items
+      .filter(item => item.restaurantId != null)
+      .map(item => {
+        const obj = item.toObject();
+        obj.restaurant = obj.restaurantId;
+        return obj;
+      });
+
     res.json({ success: true, count: validItems.length, data: validItems });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Failed to fetch 99 store items' });
@@ -68,7 +80,9 @@ const searchRestaurants = asyncHandler(async (req, res) => {
   try {
     const [restaurants, menuItems] = await Promise.all([
       Restaurant.find({ isActive: true, $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
-      MenuItem.find({ isAvailable: true, name: regex }).limit(20),
+      // 🔧 FIX: schema field is `inStock`, not `isAvailable` — same bug as above,
+      // meant menu-item search results were always empty.
+      MenuItem.find({ inStock: true, name: regex }).limit(20),
     ]);
     res.json({ success: true, data: { restaurants, menuItems } });
   } catch (error) {
@@ -98,14 +112,21 @@ const updateRestaurant = asyncHandler(async (req, res) => {
 const deleteRestaurant = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { isActive: false, isOpen: false }, { new: true });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
-  await MenuItem.updateMany({ restaurant: req.params.id }, { isAvailable: false });
+  // 🔧 FIX: Menu schema uses `restaurantId` (not `restaurant`) and `inStock`
+  // (not `isAvailable`). With the old names this matched 0 documents, so menu
+  // items never actually got deactivated when a restaurant was removed.
+  await MenuItem.updateMany({ restaurantId: req.params.id }, { inStock: false });
   res.json({ success: true, message: 'Restaurant and menu successfully deactivated' });
 });
 
 const addMenuItem = asyncHandler(async (req, res) => {
   const targetRestaurantId = req.params.id || req.body.restaurant || req.body.restaurantId;
   if (!targetRestaurantId) return res.status(400).json({ success: false, message: 'Restaurant ID is required' });
-  const item = await MenuItem.create({ ...req.body, restaurant: targetRestaurantId });
+  // 🔧 FIX: Menu schema's field is `restaurantId`, not `restaurant`. Writing only
+  // `restaurant` here meant Mongoose silently dropped it (not in schema), leaving
+  // the required `restaurantId` unset — so the item never matched
+  // GET /api/restaurants/:id/menu, which filters on restaurantId.
+  const item = await MenuItem.create({ ...req.body, restaurantId: targetRestaurantId, restaurant: targetRestaurantId });
   if (item.price <= 99) { item.isUnder99 = true; await item.save(); }
   res.status(201).json({ success: true, data: item });
 });
