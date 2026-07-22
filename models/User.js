@@ -36,7 +36,7 @@ const userSchema = new mongoose.Schema(
     role: {
       type: String,
       // 🚨 ADDED 'vendor' and 'rider' to the allowed roles!
-      enum: ['user', 'admin', 'restaurant_owner', 'vendor', 'rider'],
+      enum: ['user', 'vendor', 'admin', 'rider']
       default: 'user',
     },
     // 🚨 THE SECURE LOCK: Connects the owner directly to their restaurant
