@@ -4,7 +4,7 @@ const asyncHandler = require('express-async-handler');
 
 const getRestaurants = asyncHandler(async (req, res) => {
   const { veg, category, search, sort = 'rating', page = 1, limit = 20 } = req.query;
-  const filter = { isActive: true }; 
+  const filter = {}; 
   if (veg === 'true') filter.isVeg = true;
   if (category) filter.categories = { $in: [category] };
   if (search) filter.$text = { $search: search };
