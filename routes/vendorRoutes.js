@@ -2,9 +2,13 @@ const express = require('express');
 const router  = express.Router();
 
 const { protect } = require('../middleware/authMiddleware');
+const role         = require('../middleware/roleMiddleware');
 
 const {
   getVendorOrders,
+  acceptOrder,
+  rejectOrder,
+  updateOrderStatus,
   getVendorMenu,
   addMenuItem,
   updateMenuItem,
@@ -25,10 +29,24 @@ router.put('/status', protect, updateRestaurantStatus);
 
 /* ─────────────────────────────────────────────────────────────
  *  ORDERS
+ *  NOTE: action routes (accept/reject/status) MUST come before any
+ *        future generic '/orders/:id' route, so Express doesn't try
+ *        to match 'accept' / 'reject' / 'status' as the :id param.
  * ───────────────────────────────────────────────────────────── */
 
-// GET  /api/vendor/orders      — vendor's live order queue
+// GET  /api/vendor/orders             — order list. ?view=queue or ?view=history filters it;
+//                                        omitted = every order (unchanged default behaviour)
 router.get('/orders', protect, getVendorOrders);
+
+// PUT  /api/vendor/orders/:id/accept  — accept a newly placed order                    ← NEW
+router.put('/orders/:id/accept', protect, role('vendor'), acceptOrder);
+
+// PUT  /api/vendor/orders/:id/reject  — reject a newly placed order, body: { reason }  ← NEW
+router.put('/orders/:id/reject', protect, role('vendor'), rejectOrder);
+
+// PUT  /api/vendor/orders/:id/status  — advance one step: confirmed→preparing,
+//                                        preparing→out_for_delivery                     ← NEW
+router.put('/orders/:id/status', protect, role('vendor'), updateOrderStatus);
 
 /* ─────────────────────────────────────────────────────────────
  *  MENU
@@ -43,7 +61,7 @@ router.get('/menu', protect, getVendorMenu);
 // POST /api/vendor/menu                   — add new item
 router.post('/menu', protect, addMenuItem);
 
-// PUT  /api/vendor/menu/:id/toggle-stock  — atomic inStock flip  ← NEW
+// PUT  /api/vendor/menu/:id/toggle-stock  — atomic inStock flip
 router.put('/menu/:id/toggle-stock', protect, toggleItemStock);
 
 // PUT  /api/vendor/menu/:id               — general field update (price etc.)
