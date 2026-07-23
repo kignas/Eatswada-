@@ -20,7 +20,8 @@ const restaurantRoutes = require('./routes/restaurantRoutes');
 const cartRoutes       = require('./routes/cartRoutes');
 const orderRoutes      = require('./routes/orderRoutes');
 const vendorRoutes     = require('./routes/vendorRoutes'); 
-const adminRoutes      = require('./routes/adminRoutes'); // 🚨 Imported correctly
+const adminRoutes      = require('./routes/adminRoutes');
+const authRoutes       = require('./routes/authRoutes');
 const Restaurant       = require('./models/Restaurant');
 const User             = require('./models/User');
 
@@ -98,13 +99,14 @@ app.post('/api/make-me-ceo', protect, async (req, res) => {
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-// ── API Routes (MOUNTED SAFELY AFTER APP IS CREATED) ──────────
+
 app.use('/api/users',       authLimiter, userRoutes);
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/restaurants', restaurantRoutes);
 app.use('/api/cart',        cartRoutes);
 app.use('/api/orders',      orderRoutes);
 app.use('/api/vendor',      vendorRoutes); 
-app.use('/api/admin',       adminRoutes); // 🚨 PERFECT PLACEMENT
+app.use('/api/admin',       adminRoutes); 
 
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
