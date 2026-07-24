@@ -12,7 +12,6 @@ const morgan         = require('morgan');
 
 const connectDB      = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
-const { protect }    = require('./middleware/authMiddleware'); 
 
 // ── Route & Model imports ─────────────────────────────────────
 const userRoutes       = require('./routes/userRoutes');
@@ -22,8 +21,6 @@ const orderRoutes      = require('./routes/orderRoutes');
 const vendorRoutes     = require('./routes/vendorRoutes'); 
 const adminRoutes      = require('./routes/adminRoutes');
 const authRoutes       = require('./routes/authRoutes');
-const Restaurant       = require('./models/Restaurant');
-const User             = require('./models/User');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 connectDB();
@@ -82,23 +79,6 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
   res.status(200).send('<h2>🍔 Nearbite Backend API is Live and Running! 🚀</h2>');
 });
-
-// ── SECRET UPGRADE ROUTES ─────────────────────────────────────
-app.post('/api/secret-upgrade', protect, async (req, res) => {
-  try {
-      const myRestaurant = await Restaurant.create({ name: "Ruby's Swader Prantik", address: "Maynaguri Locality", owner: req.user._id });
-      const updatedUser = await User.findByIdAndUpdate(req.user._id, { role: 'vendor', restaurantId: myRestaurant._id }, { new: true });
-      res.json({ success: true, message: "Success! You are now the Vendor.", data: myRestaurant });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
-app.post('/api/make-me-ceo', protect, async (req, res) => {
-  try {
-      const updatedUser = await User.findByIdAndUpdate(req.user._id, { role: 'admin' }, { new: true });
-      res.json({ success: true, message: "Welcome, CEO! You now have God-Mode.", user: updatedUser });
-  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
-});
-
 
 app.use('/api/users',       authLimiter, userRoutes);
 app.use('/api/auth', authLimiter, authRoutes);
