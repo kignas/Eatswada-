@@ -118,8 +118,12 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
 
 exports.getRestaurants = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
-  const { search } = req.query;
-  const filter = { isActive: true };
+  const { search, status = 'active' } = req.query;
+  const filter = {};
+  // 'all' intentionally omits the isActive filter entirely so deactivated
+  // restaurants remain visible/recoverable instead of vanishing from admin view.
+  if (status === 'active') filter.isActive = true;
+  else if (status === 'inactive') filter.isActive = false;
   if (search) filter.name = { $regex: search, $options: 'i' };
   const restaurants = await Restaurant.find(filter).populate('owner', 'name phone email').sort({ createdAt: -1 });
   res.json({ success: true, data: restaurants.map(r => ({
@@ -127,7 +131,7 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
     phone: r.owner?.phone ?? '', address: r.address ?? '',
     cuisine: r.cuisineDisplay || (r.cuisine || []).join(', '),
     rating: r.rating, avgPrepTime: r.estimatedDeliveryMin ?? 20,
-    isOpen: r.isOpen, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
+    isOpen: r.isOpen, isActive: r.isActive, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
   }))});
 });
 
@@ -135,6 +139,9 @@ exports.toggleRestaurant = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const restaurant = await Restaurant.findById(req.params.id);
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
+  if (!restaurant.isActive) {
+    return res.status(409).json({ success: false, message: 'This restaurant is deactivated. Restore it before changing its open/closed status.' });
+  }
   restaurant.isOpen = !restaurant.isOpen;
   await restaurant.save();
   res.json({ success: true, data: { isOpen: restaurant.isOpen } });
@@ -207,4 +214,145 @@ exports.getTopRestaurants = asyncHandler(async (req, res) => {
     { $limit: 10 },
   ]);
   res.json({ success: true, data: result.map(r => ({ id: r._id, name: r.name, orders: r.orders, revenue: r.revenue })) });
+});
+
+/* ─────────────────────────────────────────────────────────────
+ *  VENDOR MANAGEMENT
+ *  (vendor *creation* stays in authController.createVendor — this
+ *  is read/update/deactivate for accounts that already exist.)
+ * ───────────────────────────────────────────────────────────── */
+
+exports.getVendors = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const { search, status, page = 1, limit = 20 } = req.query;
+  const filter = { role: 'vendor' };
+  if (status === 'active') filter.isActive = true;
+  if (status === 'inactive') filter.isActive = false;
+  if (search) {
+    filter.$or = [
+      { name: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } },
+      { phone: { $regex: search, $options: 'i' } },
+    ];
+  }
+  const skip = (Number(page) - 1) * Number(limit);
+  const [vendors, total] = await Promise.all([
+    User.find(filter)
+      .populate('restaurantId', 'name image isActive isOpen')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit)),
+    User.countDocuments(filter),
+  ]);
+  res.json({
+    success: true,
+    data: {
+      vendors: vendors.map((v) => ({
+        id: v._id,
+        name: v.name,
+        email: v.email,
+        phone: v.phone,
+        isActive: v.isActive,
+        restaurant: v.restaurantId
+          ? {
+              id: v.restaurantId._id,
+              name: v.restaurantId.name,
+              image: v.restaurantId.image,
+              isActive: v.restaurantId.isActive,
+              isOpen: v.restaurantId.isOpen,
+            }
+          : null,
+        lastLogin: v.lastLogin,
+        createdAt: v.createdAt,
+      })),
+      total,
+      page: Number(page),
+      pages: Math.ceil(total / Number(limit)),
+    },
+  });
+});
+
+exports.getVendorById = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const vendor = await User.findOne({ _id: req.params.id, role: 'vendor' }).populate('restaurantId');
+  if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
+  res.json({ success: true, data: vendor });
+});
+
+exports.updateVendor = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const vendor = await User.findOne({ _id: req.params.id, role: 'vendor' });
+  if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
+
+  const { name, email, phone, password } = req.body;
+
+  if (email !== undefined) {
+    const normalized = String(email).toLowerCase().trim();
+    if (normalized !== vendor.email) {
+      const clash = await User.findOne({ email: normalized, _id: { $ne: vendor._id } });
+      if (clash) return res.status(409).json({ success: false, message: 'Email is already in use by another account.' });
+      vendor.email = normalized;
+    }
+  }
+
+  if (phone !== undefined) {
+    const normalized = String(phone).trim();
+    if (normalized !== vendor.phone) {
+      const clash = await User.findOne({ phone: normalized, _id: { $ne: vendor._id } });
+      if (clash) return res.status(409).json({ success: false, message: 'Phone number is already in use by another account.' });
+      vendor.phone = normalized;
+    }
+  }
+
+  if (name !== undefined) vendor.name = String(name).trim();
+
+  if (password !== undefined && password !== '') {
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    }
+    vendor.password = password; // re-hashed by the User pre('save') hook
+  }
+
+  try {
+    await vendor.save();
+  } catch (err) {
+    return res.status(400).json({ success: false, message: err.message });
+  }
+
+  res.json({
+    success: true,
+    message: 'Vendor updated successfully.',
+    data: {
+      id: vendor._id,
+      name: vendor.name,
+      email: vendor.email,
+      phone: vendor.phone,
+      isActive: vendor.isActive,
+      restaurantId: vendor.restaurantId,
+    },
+  });
+});
+
+// Soft-deactivate / reactivate — mirrors the isActive pattern already used
+// for Restaurant. A vendor account is never hard-deleted: their orders and
+// restaurant history must survive.
+exports.toggleVendorStatus = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const vendor = await User.findOne({ _id: req.params.id, role: 'vendor' });
+  if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
+
+  vendor.isActive = !vendor.isActive;
+  await vendor.save();
+
+  // Deactivating the vendor's login should also take their restaurant off
+  // the live menu — it can no longer be managed if nobody can log in to it.
+  if (!vendor.isActive && vendor.restaurantId) {
+    await Restaurant.findByIdAndUpdate(vendor.restaurantId, { isOpen: false });
+  }
+
+  res.json({
+    success: true,
+    message: vendor.isActive ? 'Vendor reactivated.' : 'Vendor deactivated.',
+    data: { id: vendor._id, isActive: vendor.isActive },
+  });
 });
