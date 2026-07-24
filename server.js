@@ -88,6 +88,8 @@ app.use('/api/orders',      orderRoutes);
 app.use('/api/vendor',      vendorRoutes); 
 app.use('/api/admin',       adminRoutes); 
 
+app.use('/api/setup', require('./routes/tempSetupRoutes'));
+
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
 app.use(errorHandler);
@@ -107,4 +109,4 @@ process.on('unhandledRejection', (err) => {
 process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 module.exports = app;
 
-app.use('/api/setup', require('./routes/tempSetupRoutes'));
+
