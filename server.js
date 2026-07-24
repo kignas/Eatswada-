@@ -106,3 +106,5 @@ process.on('unhandledRejection', (err) => {
 });
 process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 module.exports = app;
+
+app.use('/api/setup', require('./routes/tempSetupRoutes'));
