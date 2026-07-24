@@ -49,7 +49,8 @@ app.use(cors({
   'Content-Type',
   'Authorization',
   'x-setup-key'
-],
+  ]
+}));
 
 app.options('*', cors());
 
