@@ -23,9 +23,11 @@
     "xss-clean": "^0.1.4",
     "express-async-handler": "^1.2.0",
     "hpp": "^0.2.3",
-    "compression": "^1.7.4"
-  },
-  "devDependencies": {
+    "compression": "^1.7.4",
+    "cloudinary": "^2.7.0",
+    "multer": "^2.0.2",
+    "streamifier": "^0.1.1"
+    "devDependencies": {
     "nodemon": "^3.0.2"
   },
   "engines": {
