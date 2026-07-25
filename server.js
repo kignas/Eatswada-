@@ -92,7 +92,7 @@ app.use('/api/orders',      orderRoutes);
 app.use('/api/vendor',      vendorRoutes); 
 app.use('/api/admin',       adminRoutes); 
 
-app.use('/api/setup', require('./routes/tempSetupRoutes'));
+
 
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
