@@ -21,6 +21,8 @@ const orderRoutes      = require('./routes/orderRoutes');
 const vendorRoutes     = require('./routes/vendorRoutes'); 
 const adminRoutes      = require('./routes/adminRoutes');
 const authRoutes       = require('./routes/authRoutes');
+const uploadRoutes     = require('./routes/uploadRoutes');
+const categoryRoutes   = require('./routes/categoryRoutes');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 connectDB();
@@ -91,6 +93,8 @@ app.use('/api/cart',        cartRoutes);
 app.use('/api/orders',      orderRoutes);
 app.use('/api/vendor',      vendorRoutes); 
 app.use('/api/admin',       adminRoutes); 
+app.use('/api/upload',      uploadRoutes);
+app.use('/api/categories',  categoryRoutes);
 
 
 
@@ -112,5 +116,3 @@ process.on('unhandledRejection', (err) => {
 });
 process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 module.exports = app;
-
-
