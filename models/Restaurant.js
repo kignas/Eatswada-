@@ -204,9 +204,8 @@ restaurantSchema.index({ name: 'text', cuisineDisplay: 'text' });
  *  3. Derive the string display fields (time, distance) from their
  *     numeric counterparts so the frontend never sees stale display strings.
  */
-restaurantSchema.pre('save', function (next) {
+restaurantSchema.pre('validate', function (next) {
   // 1. Slug generation — only runs if name changed AND no slug exists yet.
-  //    This prevents regenerating the slug (and breaking existing URLs) on updates.
   if (this.isModified('name') && !this.slug) {
     this.slug = this.name
       .toLowerCase()
@@ -221,10 +220,7 @@ restaurantSchema.pre('save', function (next) {
   }
 
   // 3. Derive human-readable display strings from numeric fields.
-  if (
-    this.isModified('estimatedDeliveryMin') ||
-    this.isModified('estimatedDeliveryMax')
-  ) {
+  if (this.isModified('estimatedDeliveryMin') || this.isModified('estimatedDeliveryMax')) {
     this.time = `${this.estimatedDeliveryMin}-${this.estimatedDeliveryMax} mins`;
   }
 
