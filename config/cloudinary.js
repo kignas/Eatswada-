@@ -19,4 +19,6 @@ cloudinary.config({
   secure: true,
 });
 
+console.log('SECRET FINGERPRINT (live process):', require('crypto').createHash('sha1').update(process.env.CLOUDINARY_API_SECRET || '').digest('hex').slice(0, 8));
+
 module.exports = cloudinary;
