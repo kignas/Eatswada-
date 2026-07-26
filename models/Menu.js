@@ -52,6 +52,10 @@ const menuItemSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isRecommended: {
+      type: Boolean,
+      default: false,
+    },
     // 🚨 UPDATED: Changed from 'isAvailable' to 'inStock' so the Vendor Toggle works!
     inStock: {
       type: Boolean,
