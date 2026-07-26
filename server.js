@@ -23,6 +23,7 @@ const adminRoutes      = require('./routes/adminRoutes');
 const authRoutes       = require('./routes/authRoutes');
 const uploadRoutes     = require('./routes/uploadRoutes');
 const categoryRoutes   = require('./routes/categoryRoutes');
+const menuRoutes       = require('./routes/menuRoutes');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 connectDB();
@@ -95,6 +96,7 @@ app.use('/api/vendor',      vendorRoutes);
 app.use('/api/admin',       adminRoutes); 
 app.use('/api/upload',      uploadRoutes);
 app.use('/api/categories',  categoryRoutes);
+app.use('/api/menu',        menuRoutes);
 
 
 
