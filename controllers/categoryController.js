@@ -40,7 +40,10 @@ const createCategory = asyncHandler(async (req, res) => {
     finalOrder = last ? last.order + 1 : 0;
   }
 
-  const category = await Category.create({ name, image, order: finalOrder });
+  const payload = { name, order: finalOrder };
+  if (image) payload.image = image; // omit '' so the schema default placeholder applies
+
+  const category = await Category.create(payload);
   res.status(201).json({ success: true, data: category });
 });
 
@@ -51,7 +54,7 @@ const updateCategory = asyncHandler(async (req, res) => {
   const { name, image, order } = req.body;
   const category = await Category.findByIdAndUpdate(
     req.params.id,
-    { ...(name !== undefined && { name }), ...(image !== undefined && { image }), ...(order !== undefined && { order }) },
+    { ...(name !== undefined && { name }), ...(image && { image }), ...(order !== undefined && { order }) },
     { new: true, runValidators: true }
   );
   if (!category) return res.status(404).json({ success: false, message: 'Category not found' });
