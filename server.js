@@ -26,7 +26,7 @@ const categoryRoutes   = require('./routes/categoryRoutes');
 const menuRoutes       = require('./routes/menuRoutes');
 
 // ── Connect to MongoDB ────────────────────────────────────────
-connectDB();
+// (connection is awaited below, right before the server starts listening)
 
 // 🚨 APP IS CREATED HERE FIRST! 🚨
 const app = express();
@@ -35,13 +35,7 @@ app.set("trust proxy", 1);
 
 // ── Middleware ────────────────────────────────────────────────
 app.use(compression());
-app.use(
-  helmet({
-    crossOriginResourcePolicy: {
-      policy: "cross-origin",
-    },
-  })
-);
+app.use(helmet());
 
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
 app.use(cors({
@@ -112,15 +106,20 @@ app.use(errorHandler);
 
 // ── Start Server ──────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log('╔══════════════════════════════════════════════╗');
-  console.log(`║  🍔  Nearbite API running on port ${PORT}       ║`);
-  console.log('╚══════════════════════════════════════════════╝');
+let server;
+
+connectDB().then(() => {
+  server = app.listen(PORT, '0.0.0.0', () => {
+    console.log('╔══════════════════════════════════════════════╗');
+    console.log(`║  🍔  Nearbite API running on port ${PORT}       ║`);
+    console.log('╚══════════════════════════════════════════════╝');
+  });
+
+  process.on('unhandledRejection', (err) => {
+    console.error(`❌ Unhandled Rejection: ${err.message}`);
+    server.close(() => process.exit(1));
+  });
+  process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 });
 
-process.on('unhandledRejection', (err) => {
-  console.error(`❌ Unhandled Rejection: ${err.message}`);
-  server.close(() => process.exit(1));
-});
-process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
 module.exports = app;
