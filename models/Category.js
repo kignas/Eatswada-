@@ -28,7 +28,7 @@ const categorySchema = new mongoose.Schema(
 
     image: {
       type: String,
-      default: '',
+      default: 'https://images.unsplash.com/photo-1504674900247-0877df9cc836',
     },
 
     // Display sequence on the homepage. Lower numbers show first.
