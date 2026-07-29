@@ -131,15 +131,7 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 exports.getVendorMenu = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
   const items = await Menu.find(restaurantOwnershipFilter(req)).sort({ sortOrder: 1, createdAt: -1 });
-
-  const grouped = {};
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    const cat  = (typeof item.category === 'string' && item.category.trim()) ? item.category.trim() : 'Uncategorised';
-    if (!grouped[cat]) grouped[cat] = [];
-    grouped[cat].push(item);
-  }
-  res.status(200).json({ success: true, data: grouped });
+  res.status(200).json({ success: true, data: items });
 });
 
 exports.addMenuItem = asyncHandler(async (req, res) => {
