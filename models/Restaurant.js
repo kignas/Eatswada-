@@ -12,6 +12,8 @@ const mongoose = require('mongoose');
  *  - ratingCount is now a Number (was String "100+" which violated Rule #4).
  *  - owner is required — a restaurant without an owner breaks vendor queries.
  *  - isActive is the soft-delete flag. Hard deletes are banned.
+ *  - availability.isOpen is the source of truth for open/closed; the legacy
+ *    top-level isOpen mirrors it (kept for existing queries elsewhere).
  */
 const restaurantSchema = new mongoose.Schema(
   {
@@ -134,9 +136,50 @@ const restaurantSchema = new mongoose.Schema(
     },
 
     // isOpen: real-time open/close (e.g. outside operating hours).
+    // ⚠️ LEGACY / DERIVED — kept only for backward compatibility with existing
+    // queries (getRestaurantById, getCategories, searchRestaurants, sort, etc.).
+    // Source of truth going forward is `availability.isOpen` below; this field
+    // is mirrored from it in the pre-validate hook, and must be set manually
+    // alongside `availability.isOpen` in any controller code that uses
+    // findByIdAndUpdate (which skips document middleware) — see restaurantController.js.
     isOpen: {
       type: Boolean,
       default: true,
+    },
+
+    // ── Restaurant Availability ──
+    // Scalable structure: supports Open / Closed Today / Temporarily Closed now,
+    // and leaves room for automatic business-hours support later (autoHours/
+    // opensAt/closesAt are stored today but not yet evaluated anywhere).
+    availability: {
+      // Manual real-time toggle. This is the source of truth for open/closed.
+      isOpen: {
+        type: Boolean,
+        default: true,
+      },
+      // Future feature flag: when true, isOpen will eventually be computed
+      // from opensAt/closesAt instead of being toggled manually. Not evaluated yet.
+      autoHours: {
+        type: Boolean,
+        default: false,
+      },
+      // "HH:MM" 24-hour format, e.g. "09:00". Reserved for future auto-hours use.
+      opensAt: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      closesAt: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      // Populated only when isOpen is false, to distinguish *why*.
+      closedReason: {
+        type: String,
+        enum: ['', 'closed_today', 'temporarily_closed'],
+        default: '',
+      },
     },
 
     // isActive: soft-delete flag. NEVER hard-delete a restaurant.
@@ -227,6 +270,15 @@ restaurantSchema.pre('validate', function (next) {
   if (this.isModified('distanceMeters')) {
     const km = (this.distanceMeters / 1000).toFixed(1);
     this.distance = `${km} km`;
+  }
+
+  // 4. Mirror the new availability.isOpen into the legacy top-level isOpen
+  //    field, so existing filters/queries elsewhere in the app that still
+  //    read the top-level field keep working unchanged.
+  //    NOTE: this only fires on .save()/.create() (document middleware).
+  //    Controllers using findByIdAndUpdate must set both fields explicitly.
+  if (this.isModified('availability.isOpen') || this.isModified('availability')) {
+    this.isOpen = this.availability.isOpen;
   }
 
   next();
