@@ -16,7 +16,10 @@ const canManageRestaurant = (user, restaurant) => {
 
 const getRestaurants = asyncHandler(async (req, res) => {
   const { veg, category, search, sort = 'rating', page = 1, limit = 20 } = req.query;
-  const filter = {}; 
+  
+  // 🔧 FIX: Ensure the homepage only fetches restaurants that are active and currently open.
+  const filter = { isOpen: true, isActive: true }; 
+  
   if (veg === 'true') filter.isVeg = true;
   if (category) filter.categories = { $in: [category] };
   if (search) filter.$text = { $search: search };
