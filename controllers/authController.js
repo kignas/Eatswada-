@@ -116,6 +116,65 @@ exports.adminLogin = asyncHandler(async (req, res) => {
   });
 });
 
+exports.riderLogin = asyncHandler(async (req, res) => {
+  const { phone, email, password } = req.body;
+
+  if ((!phone && !email) || !password) {
+    return res.status(400).json({
+      success: false,
+      message: "Phone (or email) and password are required."
+    });
+  }
+
+  // Password is select:false in your User model
+  const query = { role: "rider" };
+  if (phone) query.phone = String(phone).trim();
+  else query.email = String(email).toLowerCase().trim();
+
+  const rider = await User.findOne(query).select("+password");
+
+  if (!rider || !rider.password) {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid credentials."
+    });
+  }
+
+  if (!rider.isActive) {
+    return res.status(403).json({
+      success: false,
+      message: "Your account has been disabled. Please contact support."
+    });
+  }
+
+  const isMatch = await bcrypt.compare(password, rider.password);
+
+  if (!isMatch) {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid credentials."
+    });
+  }
+
+  rider.lastLogin = new Date();
+  await rider.save();
+
+  res.json({
+    success: true,
+    token: generateToken(rider._id),
+    user: {
+      _id: rider._id,
+      name: rider.name,
+      email: rider.email,
+      phone: rider.phone,
+      role: rider.role,
+      avatar: rider.avatar,
+      isActive: rider.isActive,
+      riderDetails: rider.riderDetails
+    }
+  });
+});
+
 /**
  * createVendor — ADMIN ONLY.
  *
