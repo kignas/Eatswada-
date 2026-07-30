@@ -17,8 +17,13 @@ const canManageRestaurant = (user, restaurant) => {
 const getRestaurants = asyncHandler(async (req, res) => {
   const { veg, category, search, sort = 'rating', page = 1, limit = 20 } = req.query;
   
-  // 🔧 FIX: Ensure the homepage only fetches restaurants that are active and currently open.
-  const filter = { isOpen: true, isActive: true }; 
+  // 🔧 FIX (Restaurant Availability): only exclude soft-deleted restaurants here.
+  // Closed restaurants (isOpen: false) must still come back — the customer
+  // homepage keeps them visible in the list, grayed out via availability /
+  // closedReason, instead of hiding them. Filtering by isOpen at the query
+  // level made that impossible since closed restaurants never reached the
+  // frontend at all.
+  const filter = { isActive: true }; 
   
   if (veg === 'true') filter.isVeg = true;
   if (category) filter.categories = { $in: [category] };
