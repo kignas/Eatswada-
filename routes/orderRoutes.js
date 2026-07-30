@@ -4,9 +4,10 @@ const router  = express.Router();
 const {
   createOrder, getOrders, getOrderById,
   cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
+  assignRider,
 } = require('../controllers/orderController');
 
-const { protect } = require('../middleware/authMiddleware');
+const { protect, authorize } = require('../middleware/authMiddleware');
 
 // ==========================================
 // 1. ADMIN ROUTE (Must be at the top!)
@@ -27,5 +28,8 @@ router.get('/:id', protect, getOrderById);
 router.put('/:id/status', protect, updateOrderStatus);
 router.put('/:id/cancel', protect, cancelOrder);
 router.put('/:id/rate', protect, rateOrder);
+
+// Rider assignment — ADMIN ONLY.
+router.put('/:id/assign-rider', protect, authorize('admin', 'ceo'), assignRider);
 
 module.exports = router;
