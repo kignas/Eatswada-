@@ -203,13 +203,13 @@ const assignRider = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  createOrder, getOrders, getOrderById,
-  cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
-  createGuestOrder, // <--- ADDED THE NEW FUNCTION HERE
-  assignRider,
-};
-module.exports = {
-  createOrder, getOrders, getOrderById,
-  cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
-  createGuestOrder // <--- ADDED THE NEW FUNCTION HERE
+  createOrder, 
+  getOrders, 
+  getOrderById,
+  cancelOrder, 
+  rateOrder, 
+  updateOrderStatus, 
+  getAllOrders,
+  createGuestOrder,
+  assignRider
 };
