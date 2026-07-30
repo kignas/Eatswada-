@@ -6,8 +6,10 @@ const User         = require('../models/User');
 const Order        = require('../models/Order');
 const Restaurant   = require('../models/Restaurant');
 const generateToken = require('../utils/generateToken');
+const { uploadToCloudinary } = require('../utils/riderUpload');
 
 const ADMIN_ROLES = ['admin', 'ceo'];
+const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
 
 function assertAdmin(req, res) {
   if (!req.user || !ADMIN_ROLES.includes(req.user.role)) {
@@ -355,4 +357,247 @@ exports.toggleVendorStatus = asyncHandler(async (req, res) => {
     message: vendor.isActive ? 'Vendor reactivated.' : 'Vendor deactivated.',
     data: { id: vendor._id, isActive: vendor.isActive },
   });
+});
+
+/* ─────────────────────────────────────────────────────────────
+ *  RIDER MANAGEMENT
+ *  Riders are User documents with role: 'rider' and a nested
+ *  riderDetails object (see models/User.js). Login lives in
+ *  authController.riderLogin — this is admin CRUD only.
+ * ───────────────────────────────────────────────────────────── */
+
+// Order statuses where a rider is actively mid-delivery — used to block
+// deletion and to block silently reassigning the order to someone else.
+const RIDER_ACTIVE_STATUSES = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery'];
+
+exports.createRider = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+
+  const { name, email, phone, password, vehicleType, vehicleNumber, deliveryZone } = req.body;
+
+  if (!name?.trim() || !email || !phone || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'name, email, phone, and password are required.',
+    });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+  }
+  if (!VEHICLE_TYPES.includes(vehicleType)) {
+    return res.status(400).json({
+      success: false,
+      message: `vehicleType must be one of: ${VEHICLE_TYPES.join(', ')}.`,
+    });
+  }
+  if (!vehicleNumber?.trim()) {
+    return res.status(400).json({ success: false, message: 'vehicleNumber is required.' });
+  }
+  if (!deliveryZone?.trim()) {
+    return res.status(400).json({ success: false, message: 'deliveryZone is required.' });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedPhone = phone.trim();
+  const normalizedVehicleNumber = vehicleNumber.trim().toUpperCase();
+
+  const existing = await User.findOne({ $or: [{ email: normalizedEmail }, { phone: normalizedPhone }] });
+  if (existing) {
+    return res.status(409).json({ success: false, message: 'A user with this email or phone number already exists.' });
+  }
+
+  const vehicleClash = await User.findOne({ role: 'rider', 'riderDetails.vehicleNumber': normalizedVehicleNumber });
+  if (vehicleClash) {
+    return res.status(409).json({ success: false, message: 'A rider with this vehicle number already exists.' });
+  }
+
+  // Profile picture is optional at creation time — a rider can also upload
+  // / replace their own via PUT /api/riders/profile/photo after logging in.
+  let avatarUrl = '';
+  if (req.file) {
+    const result = await uploadToCloudinary(req.file.buffer, req.file.mimetype, 'nearbite/riders');
+    avatarUrl = result.secure_url;
+  }
+
+  let rider;
+  try {
+    rider = await User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      phone: normalizedPhone,
+      password, // hashed by the User pre('save') hook — do not hash here
+      role: 'rider',
+      avatar: avatarUrl,
+      isActive: true,
+      isPhoneVerified: true,
+      riderDetails: {
+        vehicleType,
+        vehicleNumber: normalizedVehicleNumber,
+        deliveryZone: deliveryZone.trim(),
+        isOnline: false,
+      },
+    });
+  } catch (err) {
+    return res.status(400).json({ success: false, message: `Could not create rider: ${err.message}` });
+  }
+
+  res.status(201).json({
+    success: true,
+    message: 'Rider account created successfully.',
+    data: rider,
+  });
+});
+
+exports.getRiders = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const { search, status, online, zone, page = 1, limit = 20 } = req.query;
+  const filter = { role: 'rider' };
+  if (status === 'active') filter.isActive = true;
+  if (status === 'inactive') filter.isActive = false;
+  if (online === 'true') filter['riderDetails.isOnline'] = true;
+  if (online === 'false') filter['riderDetails.isOnline'] = false;
+  if (zone) filter['riderDetails.deliveryZone'] = { $regex: zone, $options: 'i' };
+  if (search) {
+    filter.$or = [
+      { name: { $regex: search, $options: 'i' } },
+      { phone: { $regex: search, $options: 'i' } },
+      { email: { $regex: search, $options: 'i' } },
+      { 'riderDetails.vehicleNumber': { $regex: search, $options: 'i' } },
+    ];
+  }
+  const skip = (Number(page) - 1) * Number(limit);
+  const [riders, total] = await Promise.all([
+    User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    User.countDocuments(filter),
+  ]);
+  res.json({
+    success: true,
+    data: { riders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) },
+  });
+});
+
+exports.getRiderById = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const rider = await User.findOne({ _id: req.params.id, role: 'rider' });
+  if (!rider) return res.status(404).json({ success: false, message: 'Rider not found.' });
+  res.json({ success: true, data: rider });
+});
+
+exports.updateRider = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const rider = await User.findOne({ _id: req.params.id, role: 'rider' });
+  if (!rider) return res.status(404).json({ success: false, message: 'Rider not found.' });
+
+  const { name, email, phone, password, vehicleType, vehicleNumber, deliveryZone } = req.body;
+
+  if (email !== undefined) {
+    const normalized = String(email).toLowerCase().trim();
+    if (normalized !== rider.email) {
+      const clash = await User.findOne({ email: normalized, _id: { $ne: rider._id } });
+      if (clash) return res.status(409).json({ success: false, message: 'Email is already in use by another account.' });
+      rider.email = normalized;
+    }
+  }
+
+  if (phone !== undefined) {
+    const normalized = String(phone).trim();
+    if (normalized !== rider.phone) {
+      const clash = await User.findOne({ phone: normalized, _id: { $ne: rider._id } });
+      if (clash) return res.status(409).json({ success: false, message: 'Phone number is already in use by another account.' });
+      rider.phone = normalized;
+    }
+  }
+
+  if (name !== undefined) rider.name = String(name).trim();
+
+  if (password !== undefined && password !== '') {
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    }
+    rider.password = password; // re-hashed by the User pre('save') hook
+  }
+
+  rider.riderDetails = rider.riderDetails || {};
+
+  if (vehicleType !== undefined) {
+    if (!VEHICLE_TYPES.includes(vehicleType)) {
+      return res.status(400).json({
+        success: false,
+        message: `vehicleType must be one of: ${VEHICLE_TYPES.join(', ')}.`,
+      });
+    }
+    rider.riderDetails.vehicleType = vehicleType;
+  }
+
+  if (vehicleNumber !== undefined) {
+    const normalized = String(vehicleNumber).trim().toUpperCase();
+    const clash = await User.findOne({
+      role: 'rider',
+      'riderDetails.vehicleNumber': normalized,
+      _id: { $ne: rider._id },
+    });
+    if (clash) return res.status(409).json({ success: false, message: 'A rider with this vehicle number already exists.' });
+    rider.riderDetails.vehicleNumber = normalized;
+  }
+
+  if (deliveryZone !== undefined) rider.riderDetails.deliveryZone = String(deliveryZone).trim();
+
+  if (req.file) {
+    const result = await uploadToCloudinary(req.file.buffer, req.file.mimetype, 'nearbite/riders');
+    rider.avatar = result.secure_url;
+  }
+
+  try {
+    await rider.save();
+  } catch (err) {
+    return res.status(400).json({ success: false, message: err.message });
+  }
+
+  res.json({
+    success: true,
+    message: 'Rider updated successfully.',
+    data: rider,
+  });
+});
+
+// Soft disable / enable — mirrors toggleVendorStatus. Order history (past
+// assignments) is preserved; the rider just can't log in / go online.
+exports.toggleRiderStatus = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const rider = await User.findOne({ _id: req.params.id, role: 'rider' });
+  if (!rider) return res.status(404).json({ success: false, message: 'Rider not found.' });
+
+  rider.isActive = !rider.isActive;
+  if (!rider.isActive) {
+    rider.riderDetails = rider.riderDetails || {};
+    rider.riderDetails.isOnline = false; // a disabled rider can't stay online / receive orders
+  }
+  await rider.save();
+
+  res.json({
+    success: true,
+    message: rider.isActive ? 'Rider reactivated.' : 'Rider disabled.',
+    data: { id: rider._id, isActive: rider.isActive },
+  });
+});
+
+// Hard delete — distinct from disable. Blocked while the rider has an order
+// currently in progress so a delivery never loses its rider mid-flight.
+// Completed/cancelled orders keep the (now-dangling) rider reference for
+// historical reporting, exactly like Restaurant keeps its order history.
+exports.deleteRider = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const rider = await User.findOne({ _id: req.params.id, role: 'rider' });
+  if (!rider) return res.status(404).json({ success: false, message: 'Rider not found.' });
+
+  const activeOrder = await Order.findOne({ rider: rider._id, riderStatus: { $in: RIDER_ACTIVE_STATUSES } });
+  if (activeOrder) {
+    return res.status(409).json({
+      success: false,
+      message: 'This rider has an order in progress and cannot be deleted. Reassign it first or wait for delivery to complete.',
+    });
+  }
+
+  await User.findByIdAndDelete(rider._id);
+  res.json({ success: true, message: 'Rider deleted permanently.' });
 });
