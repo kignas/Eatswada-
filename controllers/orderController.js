@@ -2,6 +2,7 @@ const Order      = require('../models/Order');
 const Cart       = require('../models/Cart');
 const Address    = require('../models/Address');
 const Restaurant = require('../models/Restaurant');
+const User       = require('../models/User');
 const asyncHandler = require('express-async-handler');
 
 // POST /api/orders  — create order from cart
@@ -145,6 +146,68 @@ const createGuestOrder = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data: order });
 });
 
+// ── ADMIN: assign a rider to an order ─────────────────────────
+// Note: this only sets order.status to 'cancelled'/'delivered' checks
+// against the *existing* status field. It does not call advanceStatus()
+// or touch order.status itself — assignment is purely a rider/riderStatus
+// change layered on top of your existing order lifecycle.
+
+// Once a rider has reached the restaurant (or later), swapping them out
+// is blocked — the order is already physically in someone's hands.
+const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
+
+// PUT /api/orders/:id/assign-rider  (ADMIN ONLY)
+const assignRider = asyncHandler(async (req, res) => {
+  const { riderId } = req.body;
+  if (!riderId) {
+    return res.status(400).json({ success: false, message: 'riderId is required' });
+  }
+
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+  if (['delivered', 'cancelled'].includes(order.status)) {
+    return res.status(409).json({
+      success: false,
+      message: `Cannot assign a rider — order is already ${order.status}.`,
+    });
+  }
+
+  if (order.rider && RIDER_LOCKED_FOR_REASSIGN.includes(order.riderStatus)) {
+    return res.status(409).json({
+      success: false,
+      message: 'Cannot reassign — this order is already being delivered by a rider.',
+    });
+  }
+
+  const rider = await User.findOne({ _id: riderId, role: 'rider' });
+  if (!rider) return res.status(404).json({ success: false, message: 'Rider not found' });
+  if (!rider.isActive) {
+    return res.status(409).json({ success: false, message: 'This rider is disabled and cannot be assigned.' });
+  }
+
+  order.rider = rider._id;
+  order.riderAssignedAt = new Date();
+  order.riderStatus = 'assigned';
+  order.riderEarning = order.riderEarning || order.deliveryFee || 0;
+  order.riderStatusHistory = order.riderStatusHistory || [];
+  order.riderStatusHistory.push({
+    status: 'assigned',
+    note: `Assigned to ${rider.name} by admin`,
+    at: new Date(),
+  });
+
+  await order.save();
+
+  res.json({ success: true, message: 'Rider assigned successfully.', data: order });
+});
+
+module.exports = {
+  createOrder, getOrders, getOrderById,
+  cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
+  createGuestOrder, // <--- ADDED THE NEW FUNCTION HERE
+  assignRider,
+};
 module.exports = {
   createOrder, getOrders, getOrderById,
   cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
