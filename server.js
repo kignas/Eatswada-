@@ -24,6 +24,8 @@ const authRoutes       = require('./routes/authRoutes');
 const uploadRoutes     = require('./routes/uploadRoutes');
 const categoryRoutes   = require('./routes/categoryRoutes');
 const menuRoutes       = require('./routes/menuRoutes');
+const riderRoutes      = require('./routes/riderRoutes');
+const adminRiderRoutes = require('./routes/adminRiderRoutes');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 // (connection is awaited below, right before the server starts listening)
@@ -88,7 +90,7 @@ app.get('/', (req, res) => {
 });
 
 app.use('/api/users',       authLimiter, userRoutes);
-app.use('/api/auth', authLimiter, authRoutes);
+app.use('/api/auth',        authLimiter, authRoutes);
 app.use('/api/restaurants', restaurantRoutes);
 app.use('/api/cart',        cartRoutes);
 app.use('/api/orders',      orderRoutes);
@@ -97,6 +99,8 @@ app.use('/api/admin',       adminRoutes);
 app.use('/api/upload',      uploadRoutes);
 app.use('/api/categories',  categoryRoutes);
 app.use('/api/menu',        menuRoutes);
+app.use('/api/riders',      riderRoutes);
+app.use('/api/admin/riders', adminRiderRoutes);
 
 
 
