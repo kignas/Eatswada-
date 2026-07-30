@@ -96,9 +96,40 @@ const orderSchema = new mongoose.Schema(
       comment: { type: String, maxlength: 400 },
       givenAt: Date,
     },
+
+    // --- RIDER INTEGRATION ---
+    rider: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+      index: true,
+    },
+    riderAssignedAt: {
+      type: Date,
+      default: null,
+    },
+    riderStatus: {
+      type: String,
+      enum: ['unassigned', 'assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'],
+      default: 'unassigned',
+    },
+    riderStatusHistory: [
+      {
+        status: String,
+        note: String,
+        at: { type: Date, default: Date.now },
+      },
+    ],
+    riderEarning: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
+
+// Rider integration compound index
+orderSchema.index({ rider: 1, riderStatus: 1 });
 
 /* ── Pre-save: generate order number ── */
 orderSchema.pre('save', function (next) {
