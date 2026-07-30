@@ -30,6 +30,7 @@ const userSchema = new mongoose.Schema(
       select: false,
     },
     avatar: {
+      // Reused as the profile picture URL for every role, including riders.
       type: String,
       default: '',
     },
@@ -46,6 +47,7 @@ const userSchema = new mongoose.Schema(
       default: null,
     },
     isActive: {
+      // Reused as the rider Active / Inactive flag (same pattern as vendor).
       type: Boolean,
       default: true,
     },
@@ -82,9 +84,41 @@ const userSchema = new mongoose.Schema(
       expiresAt: { type: Date,   select: false },
     },
     lastLogin: Date,
+
+    // ── RIDER-SPECIFIC FIELDS ──────────────────────────────────
+    // Nested under one path so non-rider documents (user/vendor/admin)
+    // are completely unaffected — this whole object is simply absent
+    // for them, exactly like restaurantId is unused for non-vendors.
+    riderDetails: {
+      vehicleType: {
+        type: String,
+        enum: ['bike', 'scooter', 'bicycle', 'car'],
+      },
+      vehicleNumber: {
+        type: String,
+        trim: true,
+        uppercase: true,
+      },
+      deliveryZone: {
+        type: String,
+        trim: true,
+      },
+      isOnline: {
+        type: Boolean,
+        default: false,
+      },
+    },
   },
   { timestamps: true }
 );
+
+// Speeds up admin "find riders in zone X who are online" queries used when
+// assigning an order to a rider.
+userSchema.index({ role: 1, 'riderDetails.isOnline': 1, 'riderDetails.deliveryZone': 1 });
+
+// No two riders should share a plate number. Sparse so it's simply ignored
+// for every document that doesn't have riderDetails.vehicleNumber set.
+userSchema.index({ 'riderDetails.vehicleNumber': 1 }, { unique: true, sparse: true });
 
 /* ── Pre-save: hash password if modified ── */
 userSchema.pre('save', async function (next) {
