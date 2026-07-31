@@ -8,6 +8,7 @@ const {
   getVendorOrders,
   acceptOrder,
   rejectOrder,
+  updateOrderStatus, // ← RESTORED: Import back from vendorController
   getVendorMenu,
   addMenuItem,
   updateMenuItem,
@@ -15,9 +16,6 @@ const {
   getRestaurantProfile,
   updateRestaurantStatus,
 } = require('../controllers/vendorController');
-
-// FIX: Import updateOrderStatus from orderController so auto-assignment triggers
-const { updateOrderStatus } = require('../controllers/orderController');
 
 /* ─────────────────────────────────────────────────────────────
  *  RESTAURANT
@@ -40,21 +38,17 @@ router.put('/status', protect, updateRestaurantStatus);
 //                                        omitted = every order (unchanged default behaviour)
 router.get('/orders', protect, getVendorOrders);
 
-// PUT  /api/vendor/orders/:id/accept  — accept a newly placed order                    ← NEW
+// PUT  /api/vendor/orders/:id/accept  — accept a newly placed order
 router.put('/orders/:id/accept', protect, role('vendor'), acceptOrder);
 
-// PUT  /api/vendor/orders/:id/reject  — reject a newly placed order, body: { reason }  ← NEW
+// PUT  /api/vendor/orders/:id/reject  — reject a newly placed order, body: { reason }
 router.put('/orders/:id/reject', protect, role('vendor'), rejectOrder);
 
-// PUT  /api/vendor/orders/:id/status  — advance one step: confirmed→preparing,
-//                                        preparing→out_for_delivery                     ← NEW
+// PUT  /api/vendor/orders/:id/status  — advance one step: confirmed→preparing, preparing→out_for_delivery
 router.put('/orders/:id/status', protect, role('vendor'), updateOrderStatus);
 
 /* ─────────────────────────────────────────────────────────────
  *  MENU
- *  NOTE: /menu/:id/toggle-stock MUST come before /menu/:id
- *        so Express does not greedily match 'toggle-stock' as
- *        the :id parameter.
  * ───────────────────────────────────────────────────────────── */
 
 // GET  /api/vendor/menu                   — grouped-by-category menu
