@@ -4,6 +4,7 @@ const Address    = require('../models/Address');
 const Restaurant = require('../models/Restaurant');
 const User       = require('../models/User');
 const asyncHandler = require('express-async-handler');
+const { autoAssignRider } = require('../services/riderAssignmentService');
 
 // POST /api/orders  — create order from cart
 // POST /api/orders  — create order from frontend payload
@@ -98,9 +99,30 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
   order.advanceStatus(status, note || '');
+
+  // ── AUTOMATIC RIDER ASSIGNMENT ──────────────────────────────
+  // The moment a vendor pushes an order to "out_for_delivery" and it
+  // doesn't already have a rider (e.g. from a prior manual assignment),
+  // try to auto-assign the best available one. autoAssignRider() is
+  // guaranteed to never throw — see services/riderAssignmentService.js —
+  // so a bad lookup or zero online riders can never crash this request;
+  // the order just stays unassigned and can still be assigned manually
+  // later via PUT /api/orders/:id/assign-rider.
+  let riderAssignment = null;
+  if (status === 'out_for_delivery' && !order.rider) {
+    riderAssignment = await autoAssignRider(order); // mutates order.rider/riderStatus/etc in place
+  }
+
   await order.save();
 
-  res.json({ success: true, data: order });
+  res.json({
+    success: true,
+    data: order,
+    // Additive/optional — existing frontends reading only `data` are
+    // completely unaffected. A vendor dashboard can use this to surface
+    // "no rider available, please assign one manually" when present.
+    ...(riderAssignment ? { riderAssignment } : {}),
+  });
 });
 
 // GET /api/orders/admin/all  — admin view all orders
@@ -156,7 +178,9 @@ const createGuestOrder = asyncHandler(async (req, res) => {
 // is blocked — the order is already physically in someone's hands.
 const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
 
-// PUT /api/orders/:id/assign-rider  (ADMIN ONLY)
+// PUT /api/orders/:id/assign-rider  (ADMIN ONLY — manual override/fallback
+// for whenever auto-assignment in updateOrderStatus above couldn't find
+// anyone, or a vendor/admin wants to reassign).
 const assignRider = asyncHandler(async (req, res) => {
   const { riderId } = req.body;
   if (!riderId) {
