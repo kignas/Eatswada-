@@ -209,16 +209,9 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   order.riderStatusHistory = order.riderStatusHistory || [];
   order.riderStatusHistory.push({ status, note: note || '', at: new Date() });
 
-  // Keep the legacy order.status field in sync at the two points that
-  // existing Customer / Vendor / Admin views already understand — this is
-  // an additive, direct field update; it deliberately does NOT call
-  // order.advanceStatus() since that method's internals weren't available
-  // here. Swap this for advanceStatus() if it needs to stay the single
-  // source of truth for status transitions in your codebase.
+  // FIX: Using advanceStatus ensures deliveredAt is set so the vendor active tab clears it
   if (status === 'out_for_delivery' || status === 'delivered') {
-    order.status = status;
-    order.statusHistory = order.statusHistory || [];
-    order.statusHistory.push({ status, note: `Updated by rider (${req.user.name})` });
+    order.advanceStatus(status, `Updated by rider (${req.user.name})`);
   }
 
   await order.save();
