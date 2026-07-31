@@ -3,6 +3,9 @@ const Order           = require('../models/Order');
 const Menu            = require('../models/Menu');
 const Restaurant      = require('../models/Restaurant');
 
+// FIX: Import the auto-assignment service here
+const { autoAssignRider } = require('../services/riderAssignmentService'); 
+
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
     res.status(403).json({ success: false, message: 'Access denied. You are not a registered vendor.' });
@@ -11,27 +14,16 @@ function assertVendorPayload(req, res) {
   return true;
 }
 
-// Shared ownership filter. Kept as one helper instead of repeating the
-// $or in every handler — some existing documents were saved with a
-// `restaurantId` field before the schema settled on `restaurant`, so both
-// are checked. (No behaviour change from the previous per-handler copies.)
 function restaurantOwnershipFilter(req) {
   return { $or: [{ restaurant: req.user.restaurantId }, { restaurantId: req.user.restaurantId }] };
 }
 
 /* ─────────────────────────────────────────────────────────────
  *  ORDER STATUS GROUPS
- *  Mirrors the lifecycle defined on the Order model:
- *  placed → confirmed → preparing → out_for_delivery → delivered
- *  placed → cancelled (rejected by restaurant, or cancelled by user)
  * ───────────────────────────────────────────────────────────── */
 const QUEUE_STATUSES   = ['placed', 'confirmed', 'preparing', 'out_for_delivery'];
 const HISTORY_STATUSES = ['delivered', 'cancelled'];
 
-// Forward-only transitions a vendor may trigger through the generic
-// status endpoint. 'placed' is deliberately excluded — it can only leave
-// that state through the dedicated accept/reject endpoints below, since
-// those need their own reason/validation handling.
 const VENDOR_STATUS_TRANSITIONS = {
   confirmed: 'preparing',
   preparing: 'out_for_delivery',
@@ -44,8 +36,6 @@ const VENDOR_STATUS_TRANSITIONS = {
 exports.getVendorOrders = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
 
-  // Optional ?view=queue | ?view=history — omitted entirely, this behaves
-  // exactly as before and returns every order for the restaurant.
   const { view } = req.query;
   let statusFilter = {};
   if (view === 'queue')   statusFilter = { status: { $in: QUEUE_STATUSES } };
@@ -119,13 +109,24 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 
   const note = (typeof req.body.note === 'string' && req.body.note.trim()) || `Marked ${nextStatus} by restaurant`;
   order.advanceStatus(nextStatus, note);
+
+  // FIX: Trigger rider assignment when the vendor transitions the order to out_for_delivery
+  let riderAssignment = null;
+  if (nextStatus === 'out_for_delivery' && !order.rider) {
+    riderAssignment = await autoAssignRider(order);
+  }
+
   await order.save();
 
-  res.status(200).json({ success: true, data: order });
+  res.status(200).json({ 
+    success: true, 
+    data: order,
+    ...(riderAssignment ? { riderAssignment } : {}),
+  });
 });
 
 /* ─────────────────────────────────────────────────────────────
- *  MENU  (unchanged behaviour — only using the shared filter helper)
+ *  MENU 
  * ───────────────────────────────────────────────────────────── */
 
 exports.getVendorMenu = asyncHandler(async (req, res) => {
@@ -172,7 +173,7 @@ exports.toggleItemStock = asyncHandler(async (req, res) => {
 });
 
 /* ─────────────────────────────────────────────────────────────
- *  RESTAURANT  (unchanged)
+ *  RESTAURANT  
  * ───────────────────────────────────────────────────────────── */
 
 exports.getRestaurantProfile = asyncHandler(async (req, res) => {
