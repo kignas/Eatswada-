@@ -8,7 +8,6 @@ const {
   getVendorOrders,
   acceptOrder,
   rejectOrder,
-  updateOrderStatus,
   getVendorMenu,
   addMenuItem,
   updateMenuItem,
@@ -16,6 +15,9 @@ const {
   getRestaurantProfile,
   updateRestaurantStatus,
 } = require('../controllers/vendorController');
+
+// FIX: Import updateOrderStatus from orderController so auto-assignment triggers
+const { updateOrderStatus } = require('../controllers/orderController');
 
 /* ─────────────────────────────────────────────────────────────
  *  RESTAURANT
