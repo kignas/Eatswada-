@@ -1,34 +1,27 @@
+// File 3: controllers/riderController.js
 'use strict';
 
 const asyncHandler = require('express-async-handler');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { uploadToCloudinary } = require('../utils/riderUpload');
+const { handleReassignment } = require('../services/riderAssignmentService');
 
-/* ── Rider-owned delivery status flow ──
- * unassigned -> assigned -> accepted -> reached_restaurant -> picked_up -> out_for_delivery -> delivered
- * 'unassigned' / 'assigned' are set by the system (order creation / admin
- * assignment — see orderController.assignRider). Everything from 'accepted'
- * onward is driven by the rider, one step at a time, via
- * updateAssignedOrderStatus below.
- */
 const RIDER_STATUS_FLOW = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'];
 const ACTIVE_RIDER_STATUSES = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery'];
 const STATUS_LABELS = {
   accepted: 'Accepted',
+  rejected: 'Rejected',
   reached_restaurant: 'Reached Restaurant',
   picked_up: 'Picked Up',
   out_for_delivery: 'Out for Delivery',
   delivered: 'Delivered',
 };
 
-/* GET /api/riders/profile */
 exports.getMyProfile = asyncHandler(async (req, res) => {
-  // req.user is already the full, password-stripped User doc (set by `protect`).
   res.json({ success: true, data: req.user });
 });
 
-/* PUT /api/riders/profile */
 exports.updateMyProfile = asyncHandler(async (req, res) => {
   const rider = await User.findById(req.user._id);
   const { name, vehicleType, vehicleNumber, deliveryZone } = req.body;
@@ -62,7 +55,6 @@ exports.updateMyProfile = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Profile updated.', data: rider });
 });
 
-/* PUT /api/riders/profile/photo — multipart/form-data, field name "photo" */
 exports.updateMyPhoto = asyncHandler(async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, message: 'No image file provided (field name: "photo").' });
@@ -77,21 +69,31 @@ exports.updateMyPhoto = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Profile picture updated.', data: { avatar: rider.avatar } });
 });
 
-/* PUT /api/riders/status — online/offline toggle.
- * Body { isOnline: true|false } sets it explicitly; an empty body flips it. */
 exports.toggleOnline = asyncHandler(async (req, res) => {
   const rider = await User.findById(req.user._id);
   rider.riderDetails = rider.riderDetails || {};
 
+  const wasOnline = rider.riderDetails.isOnline;
   rider.riderDetails.isOnline =
-    typeof req.body.isOnline === 'boolean' ? req.body.isOnline : !rider.riderDetails.isOnline;
+    typeof req.body.isOnline === 'boolean' ? req.body.isOnline : !wasOnline;
 
   await rider.save();
+
+  // If the rider actively went offline, release any of their assigned tasks before pickup
+  if (wasOnline && !rider.riderDetails.isOnline) {
+    const activeOrders = await Order.find({ 
+      rider: rider._id, 
+      riderStatus: { $in: ['assigned', 'accepted', 'reached_restaurant'] } 
+    });
+    
+    for (const activeOrder of activeOrders) {
+      await handleReassignment(activeOrder._id, rider._id, `Auto-released: Rider ${rider.name} went offline.`);
+    }
+  }
+
   res.json({ success: true, data: { isOnline: rider.riderDetails.isOnline } });
 });
 
-/* GET /api/riders/orders — every order ever assigned to this rider.
- * Optional ?status=accepted|reached_restaurant|... filter. */
 exports.getAssignedOrders = asyncHandler(async (req, res) => {
   const { status, page = 1, limit = 20 } = req.query;
   const filter = { rider: req.user._id };
@@ -106,7 +108,6 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
 });
 
-/* GET /api/riders/orders/active — the single in-progress order, if any. */
 exports.getActiveOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({
     rider: req.user._id,
@@ -116,7 +117,6 @@ exports.getActiveOrder = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order || null });
 });
 
-/* GET /api/riders/orders/history — delivered or cancelled orders for this rider. */
 exports.getOrderHistory = asyncHandler(async (req, res) => {
   const { page = 1, limit = 20 } = req.query;
   const filter = {
@@ -133,14 +133,12 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
 });
 
-/* GET /api/riders/orders/:id — single assigned order detail. */
 exports.getAssignedOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   res.json({ success: true, data: order });
 });
 
-/* GET /api/riders/earnings — earnings summary (all time / today / week / month). */
 exports.getEarningsSummary = asyncHandler(async (req, res) => {
   const riderId = req.user._id;
   const now = new Date();
@@ -168,18 +166,28 @@ exports.getEarningsSummary = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { allTime, today, thisWeek, thisMonth } });
 });
 
-/* PUT /api/riders/orders/:id/status
- * Advances the rider-owned delivery status by exactly one step.
- * Body: { status: 'accepted'|'reached_restaurant'|'picked_up'|'out_for_delivery'|'delivered', note?: string } */
 exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   const { status, note } = req.body;
-  const validRiderStatuses = ['accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'];
+  const validRiderStatuses = ['accepted', 'rejected', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'];
 
   if (!validRiderStatuses.includes(status)) {
     return res.status(400).json({
       success: false,
       message: `Invalid status. Must be one of: ${validRiderStatuses.map((s) => STATUS_LABELS[s]).join(', ')}.`,
     });
+  }
+
+  if (status === 'rejected') {
+    const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
+    
+    const NO_REASSIGN_STATUSES = ['picked_up', 'out_for_delivery', 'delivered'];
+    if (NO_REASSIGN_STATUSES.includes(order.riderStatus)) {
+      return res.status(409).json({ success: false, message: 'Cannot reject an order after it has been picked up.' });
+    }
+
+    const result = await handleReassignment(order._id, req.user._id, `Rejected by rider (${req.user.name}). Note: ${note || ''}`);
+    return res.json({ success: true, message: 'Order rejected successfully.', data: result });
   }
 
   const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
@@ -189,6 +197,20 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
 
   if (order.status === 'cancelled') {
     return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
+  }
+
+  if (status === 'delivered' && !order.deliveryOtpVerified) {
+    return res.status(409).json({
+      success: false,
+      message: "Cannot mark as delivered — please verify the customer's delivery OTP first.",
+    });
+  }
+
+  if (status === 'accepted' && order.status !== 'waiting_for_rider') {
+    return res.status(409).json({
+      success: false,
+      message: `Cannot accept — order is currently "${order.status}", but must be "waiting_for_rider" first.`,
+    });
   }
 
   const currentIndex = RIDER_STATUS_FLOW.indexOf(order.riderStatus);
@@ -209,12 +231,84 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   order.riderStatusHistory = order.riderStatusHistory || [];
   order.riderStatusHistory.push({ status, note: note || '', at: new Date() });
 
-  // FIX: Using advanceStatus ensures deliveredAt is set so the vendor active tab clears it
-  if (status === 'out_for_delivery' || status === 'delivered') {
+  if (status === 'accepted') {
+    order.advanceStatus('assigned', `Accepted by rider (${req.user.name})`);
+  } else if (status === 'out_for_delivery' || status === 'delivered') {
     order.advanceStatus(status, `Updated by rider (${req.user.name})`);
   }
 
   await order.save();
 
   res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: order });
+});
+
+exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
+  const { otp } = req.body;
+
+  if (!otp || !/^\d{4}$/.test(String(otp).trim())) {
+    return res.status(400).json({ success: false, message: 'A 4-digit OTP is required.' });
+  }
+
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).select(
+    '+deliveryOtpHash +deliveryOtpSalt +deliveryOtpExpiresAt +deliveryOtpAttempts +deliveryOtpLockedUntil'
+  );
+
+  if (!order) {
+    return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
+  }
+
+  if (order.status === 'cancelled') {
+    return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
+  }
+
+  if (order.deliveryOtpVerified) {
+    order.clearOtpSecrets();
+    return res.json({ success: true, message: 'OTP already verified.', data: order });
+  }
+
+  if (order.status !== 'out_for_delivery') {
+    return res.status(409).json({
+      success: false,
+      message: `OTP verification is only allowed while the order is "Out for Delivery". Current status: "${order.status}".`,
+    });
+  }
+
+  const result = await order.verifyDeliveryOtp(String(otp).trim());
+
+  if (!result.ok) {
+    await order.save(); 
+
+    if (result.reason === 'locked' || result.reason === 'locked_now') {
+      const secondsLeft = Math.max(0, Math.ceil((result.lockedUntil - new Date()) / 1000));
+      return res.status(429).json({
+        success: false,
+        message: `Too many incorrect attempts. Try again in ${Math.ceil(secondsLeft / 60)} minute(s).`,
+        lockedUntil: result.lockedUntil,
+      });
+    }
+    if (result.reason === 'expired') {
+      return res.status(410).json({
+        success: false,
+        message: 'This delivery OTP has expired. Please contact support.',
+      });
+    }
+    if (result.reason === 'not_set') {
+      return res.status(409).json({
+        success: false,
+        message: 'No delivery OTP is set for this order. Please contact support.',
+      });
+    }
+    
+    return res.status(400).json({
+      success: false,
+      message: `Incorrect OTP. ${result.attemptsRemaining} attempt(s) remaining before a temporary lockout.`,
+      attemptsRemaining: result.attemptsRemaining,
+    });
+  }
+
+  order.advanceStatus('otp_verified', `Delivery OTP verified by rider (${req.user.name})`);
+  await order.save();
+
+  order.clearOtpSecrets();
+  res.json({ success: true, message: 'OTP verified — you can now complete the delivery.', data: order });
 });
