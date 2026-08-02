@@ -14,6 +14,7 @@ const {
   getAssignedOrderById,
   getEarningsSummary,
   updateAssignedOrderStatus,
+  verifyDeliveryOtp,
 } = require('../controllers/riderController');
 
 const { protect, authorize } = require('../middleware/authMiddleware');
@@ -38,5 +39,6 @@ router.get('/orders/history', getOrderHistory);
 router.get('/orders', getAssignedOrders);
 router.get('/orders/:id', getAssignedOrderById);
 router.put('/orders/:id/status', updateAssignedOrderStatus);
+router.post('/orders/:id/verify-otp', verifyDeliveryOtp);
 
 module.exports = router;
