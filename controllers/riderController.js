@@ -257,6 +257,12 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   }
 
+  // TEMP DEBUG — remove once the "Incorrect PIN" issue is confirmed fixed
+  console.log('Order:', order._id);
+  console.log('Received OTP:', otp);
+  console.log('Has Hash:', !!order.deliveryOtpHash);
+  console.log('Has Salt:', !!order.deliveryOtpSalt);
+
   if (order.status === 'cancelled') {
     return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
   }
@@ -274,6 +280,9 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
   }
 
   const result = await order.verifyDeliveryOtp(String(otp).trim());
+
+  // TEMP DEBUG — remove once the "Incorrect PIN" issue is confirmed fixed
+  console.log('Verification Result:', result);
 
   if (!result.ok) {
     await order.save(); 
