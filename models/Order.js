@@ -147,15 +147,21 @@ const orderSchema = new mongoose.Schema(
     },
 
     // --- DELIVERY OTP (customer hands this to the rider at the door) ---
-    // Only the salted hash is ever persisted. deliveryOtpVerified is
-    // deliberately NOT select:false — orderController/riderController read
-    // it straight off normally-fetched documents (no '+' select) to gate
-    // the "delivered" transition.
+    // deliveryOtp is the plaintext copy the customer's own order endpoints
+    // return (see getOrders/getOrderById in orderController.js) so the
+    // tracking page can show the same PIN on every visit, not just at
+    // creation. deliveryOtpHash/Salt are the separate copy the rider-side
+    // verifyDeliveryOtp() checks against — kept intentionally distinct so
+    // a compromised admin/vendor/rider query (default select) never
+    // surfaces either the hash or the plaintext by accident.
+    deliveryOtp:            { type: String, select: false },
     deliveryOtpHash:       { type: String, select: false },
     deliveryOtpSalt:       { type: String, select: false },
     deliveryOtpExpiresAt:  { type: Date,   select: false },
     deliveryOtpAttempts:   { type: Number, default: 0, select: false },
     deliveryOtpLockedUntil:{ type: Date,   select: false },
+    // NOT select:false — orderController/riderController read this straight
+    // off normally-fetched documents (no '+' select) to gate "delivered".
     deliveryOtpVerified:   { type: Boolean, default: false },
   },
   { timestamps: true }
@@ -184,6 +190,7 @@ orderSchema.pre('save', function (next) {
     // enough for the create-order controller to hand it back once.
     const plainOtp = generateOtpCode();
     const salt = crypto.randomBytes(16).toString('hex');
+    this.deliveryOtp = plainOtp;
     this.deliveryOtpSalt = salt;
     this.deliveryOtpHash = hashOtp(plainOtp, salt);
     this.deliveryOtpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
