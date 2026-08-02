@@ -1,5 +1,22 @@
 const mongoose = require('mongoose');
-const crypto = require('crypto');
+const crypto   = require('crypto');
+
+// ── Delivery OTP config ──────────────────────────────────────────
+// The 4-digit code matches the /^\d{4}$/ check in riderController's
+// verifyDeliveryOtp, and the field names (Hash/Salt/ExpiresAt/Attempts/
+// LockedUntil) match the '+select' list used there — keep both in sync
+// if any of this changes.
+const OTP_TTL_MS      = 3 * 60 * 60 * 1000; // 3h — must outlive the whole placed→out_for_delivery journey
+const MAX_OTP_ATTEMPTS = 5;
+const OTP_LOCKOUT_MS   = 15 * 60 * 1000;    // 15 min lockout after too many wrong attempts
+
+function generateOtpCode() {
+  return String(Math.floor(1000 + Math.random() * 9000)); // 4-digit
+}
+
+function hashOtp(code, salt) {
+  return crypto.createHash('sha256').update(`${code}:${salt}`).digest('hex');
+}
 
 const orderItemSchema = new mongoose.Schema({
   menuItem:  { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem' },
@@ -73,15 +90,15 @@ const orderSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
-        'placed',       // order placed, awaiting restaurant confirm
-        'confirmed',    // restaurant accepted
-        'preparing',    // kitchen is cooking
-        'waiting_for_rider', // kitchen done, looking for a rider
-        'assigned',     // rider accepted the delivery
-        'out_for_delivery', // on the way
-        'otp_verified', // customer's delivery OTP confirmed by rider
-        'delivered',    // completed
-        'cancelled',    // cancelled by user / restaurant
+        'placed',            // order placed, awaiting restaurant confirm
+        'confirmed',         // restaurant accepted
+        'preparing',         // kitchen is cooking
+        'waiting_for_rider', // preparing done, looking for a rider
+        'assigned',          // rider accepted the delivery
+        'out_for_delivery',  // on the way
+        'otp_verified',      // rider confirmed the customer's delivery PIN
+        'delivered',         // completed
+        'cancelled',         // cancelled by user / restaurant
       ],
       default: 'placed',
       index: true,
@@ -129,17 +146,17 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // --- DELIVERY OTP (rider hands off to customer) ---
-    // Hash/salt/expiry/attempts/lock are hidden by default (select: false) —
-    // controllers explicitly opt in with .select('+deliveryOtpHash ...') when
-    // they need to verify. deliveryOtpVerified stays selected because status
-    // checks read it directly without an explicit .select().
-    deliveryOtpHash: { type: String, select: false },
-    deliveryOtpSalt: { type: String, select: false },
-    deliveryOtpExpiresAt: { type: Date, select: false },
-    deliveryOtpAttempts: { type: Number, default: 0, select: false },
-    deliveryOtpLockedUntil: { type: Date, default: null, select: false },
-    deliveryOtpVerified: { type: Boolean, default: false },
+    // --- DELIVERY OTP (customer hands this to the rider at the door) ---
+    // Only the salted hash is ever persisted. deliveryOtpVerified is
+    // deliberately NOT select:false — orderController/riderController read
+    // it straight off normally-fetched documents (no '+' select) to gate
+    // the "delivered" transition.
+    deliveryOtpHash:       { type: String, select: false },
+    deliveryOtpSalt:       { type: String, select: false },
+    deliveryOtpExpiresAt:  { type: Date,   select: false },
+    deliveryOtpAttempts:   { type: Number, default: 0, select: false },
+    deliveryOtpLockedUntil:{ type: Date,   select: false },
+    deliveryOtpVerified:   { type: Boolean, default: false },
   },
   { timestamps: true }
 );
@@ -160,16 +177,16 @@ orderSchema.pre('save', function (next) {
     // Estimated delivery: 40 mins from now
     this.estimatedDelivery = new Date(Date.now() + 40 * 60 * 1000);
 
-    // Delivery OTP: 4-digit code the rider asks the customer for at
-    // hand-off. Only the salted hash is persisted; the plaintext is kept
-    // on the in-memory doc (not a schema path, so it's never written to
-    // Mongo and never appears in toJSON output) for the controller to
-    // read exactly once via order._plainDeliveryOtp before responding.
-    const plainOtp = Math.floor(1000 + Math.random() * 9000).toString();
+    // Delivery OTP: generated once, shown to the customer on the tracking
+    // page, and checked against the rider's entry at handoff. Only the
+    // salted hash is persisted; the plaintext lives on `_plainDeliveryOtp`
+    // (a plain, non-schema property — never saved to Mongo) just long
+    // enough for the create-order controller to hand it back once.
+    const plainOtp = generateOtpCode();
     const salt = crypto.randomBytes(16).toString('hex');
-    this.deliveryOtpHash = crypto.scryptSync(plainOtp, salt, 32).toString('hex');
     this.deliveryOtpSalt = salt;
-    this.deliveryOtpExpiresAt = new Date(this.estimatedDelivery.getTime() + 2 * 60 * 60 * 1000);
+    this.deliveryOtpHash = hashOtp(plainOtp, salt);
+    this.deliveryOtpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
     this.deliveryOtpAttempts = 0;
     this.deliveryOtpLockedUntil = null;
     this.deliveryOtpVerified = false;
@@ -188,8 +205,67 @@ orderSchema.methods.advanceStatus = function (newStatus, note = '') {
   return this;
 };
 
-/* ── Instance method: strip delivery-OTP secrets before a doc goes out
-   in an API response ── */
+/* ── Instance method: verify the rider-entered delivery OTP ──
+ * Must be called on a document fetched with the '+deliveryOtp*' fields
+ * selected (see riderController.verifyDeliveryOtp). Mutates attempt/lock
+ * state on `this` but does NOT save — the caller decides when to persist.
+ */
+orderSchema.methods.verifyDeliveryOtp = function (enteredOtp) {
+  const now = new Date();
+
+  if (this.deliveryOtpLockedUntil && this.deliveryOtpLockedUntil > now) {
+    return { ok: false, reason: 'locked', lockedUntil: this.deliveryOtpLockedUntil };
+  }
+
+  if (!this.deliveryOtpHash || !this.deliveryOtpSalt) {
+    return { ok: false, reason: 'not_set' };
+  }
+
+  if (this.deliveryOtpExpiresAt && this.deliveryOtpExpiresAt < now) {
+    return { ok: false, reason: 'expired' };
+  }
+
+  const receivedOtp   = String(enteredOtp).trim();
+  const receivedHash  = hashOtp(receivedOtp, this.deliveryOtpSalt);
+  const isMatch       = receivedHash === this.deliveryOtpHash;
+
+  // Debug trace requested during the "Incorrect PIN" investigation.
+  // Never logs the plaintext stored OTP (it isn't persisted anywhere —
+  // only its hash is) — logs the two hashes being compared instead, so a
+  // mismatch is still fully diagnosable (wrong order, stale salt, expiry,
+  // whitespace, etc.) without exposing the secret in logs.
+  console.log(
+    `[verifyDeliveryOtp] order=${this._id} status=${this.status} ` +
+    `receivedOtp="${receivedOtp}" storedHash=${this.deliveryOtpHash} ` +
+    `receivedHash=${receivedHash} match=${isMatch}`
+  );
+
+  if (isMatch) {
+    this.deliveryOtpVerified = true;
+    return { ok: true };
+  }
+
+  this.deliveryOtpAttempts = (this.deliveryOtpAttempts || 0) + 1;
+
+  if (this.deliveryOtpAttempts >= MAX_OTP_ATTEMPTS) {
+    this.deliveryOtpLockedUntil = new Date(Date.now() + OTP_LOCKOUT_MS);
+    return { ok: false, reason: 'locked_now', lockedUntil: this.deliveryOtpLockedUntil };
+  }
+
+  return {
+    ok: false,
+    reason: 'incorrect',
+    attemptsRemaining: MAX_OTP_ATTEMPTS - this.deliveryOtpAttempts,
+  };
+};
+
+/* ── Instance method: strip OTP secrets before a document goes in a response ──
+ * select:false keeps these out of *queries* by default, but any doc that
+ * explicitly '+selected' them (as verifyDeliveryOtp's lookup does) still
+ * carries them in memory. Call this right before res.json(...) whenever
+ * such a document — or a freshly-created one, which always has them — is
+ * about to be sent back.
+ */
 orderSchema.methods.clearOtpSecrets = function () {
   this.deliveryOtpHash = undefined;
   this.deliveryOtpSalt = undefined;
@@ -198,48 +274,6 @@ orderSchema.methods.clearOtpSecrets = function () {
   this.deliveryOtpLockedUntil = undefined;
   this._plainDeliveryOtp = undefined;
   return this;
-};
-
-/* ── Instance method: check an entered delivery OTP against the stored
-   hash. Mutates attempt/lock/verified state on `this` but does not
-   save — the caller is responsible for order.save(). ── */
-const OTP_MAX_ATTEMPTS = 5;
-const OTP_LOCK_DURATION_MS = 15 * 60 * 1000; // 15 minutes
-
-orderSchema.methods.verifyDeliveryOtp = async function (enteredOtp) {
-  if (this.deliveryOtpLockedUntil && this.deliveryOtpLockedUntil > new Date()) {
-    return { ok: false, reason: 'locked', lockedUntil: this.deliveryOtpLockedUntil };
-  }
-
-  if (!this.deliveryOtpHash || !this.deliveryOtpSalt) {
-    return { ok: false, reason: 'not_set' };
-  }
-
-  if (this.deliveryOtpExpiresAt && this.deliveryOtpExpiresAt < new Date()) {
-    return { ok: false, reason: 'expired' };
-  }
-
-  const enteredHash = crypto.scryptSync(String(enteredOtp), this.deliveryOtpSalt, 32).toString('hex');
-  const storedBuf = Buffer.from(this.deliveryOtpHash, 'hex');
-  const enteredBuf = Buffer.from(enteredHash, 'hex');
-  const matches = storedBuf.length === enteredBuf.length && crypto.timingSafeEqual(storedBuf, enteredBuf);
-
-  if (!matches) {
-    this.deliveryOtpAttempts = (this.deliveryOtpAttempts || 0) + 1;
-
-    if (this.deliveryOtpAttempts >= OTP_MAX_ATTEMPTS) {
-      this.deliveryOtpLockedUntil = new Date(Date.now() + OTP_LOCK_DURATION_MS);
-      return { ok: false, reason: 'locked_now', lockedUntil: this.deliveryOtpLockedUntil };
-    }
-
-    return { ok: false, reason: 'incorrect', attemptsRemaining: OTP_MAX_ATTEMPTS - this.deliveryOtpAttempts };
-  }
-
-  this.deliveryOtpVerified = true;
-  this.deliveryOtpAttempts = 0;
-  this.deliveryOtpLockedUntil = null;
-
-  return { ok: true };
 };
 
 module.exports = mongoose.model('Order', orderSchema);
