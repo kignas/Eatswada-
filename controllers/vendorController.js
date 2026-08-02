@@ -26,7 +26,7 @@ const HISTORY_STATUSES = ['delivered', 'cancelled'];
 
 const VENDOR_STATUS_TRANSITIONS = {
   confirmed: 'preparing',
-  preparing: 'out_for_delivery',
+  preparing: 'waiting_for_rider',
 };
 
 /* ─────────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 
   // FIX: Trigger rider assignment when the vendor transitions the order to out_for_delivery
   let riderAssignment = null;
-  if (nextStatus === 'out_for_delivery' && !order.rider) {
+  if (nextStatus === 'waiting_for_rider' && !order.rider) {
     riderAssignment = await autoAssignRider(order);
   }
 
