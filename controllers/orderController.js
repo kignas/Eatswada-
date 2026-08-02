@@ -1,13 +1,12 @@
+// File 2: controllers/orderController.js
 const Order      = require('../models/Order');
 const Cart       = require('../models/Cart');
 const Address    = require('../models/Address');
 const Restaurant = require('../models/Restaurant');
 const User       = require('../models/User');
 const asyncHandler = require('express-async-handler');
-const { autoAssignRider } = require('../services/riderAssignmentService');
+const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 
-// POST /api/orders  — create order from cart
-// POST /api/orders  — create order from frontend payload
 const createOrder = asyncHandler(async (req, res) => {
   const { items, restaurantId, restaurantName, subtotal, total, deliveryAddress } = req.body;
 
@@ -15,9 +14,8 @@ const createOrder = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Cart is empty' });
   }
 
-  // Create the order directly from the data the frontend sends!
   const order = await Order.create({
-    user:            req.user._id, // Secured by the JWT Token
+    user:            req.user._id, 
     restaurant:      restaurantId,
     restaurantName:  restaurantName,
     items:           items,
@@ -28,10 +26,16 @@ const createOrder = asyncHandler(async (req, res) => {
     total:           total,
   });
 
-  res.status(201).json({ success: true, data: order });
+  const deliveryOtp = order._plainDeliveryOtp;
+  order.clearOtpSecrets();
+
+  res.status(201).json({
+    success: true,
+    data: order,
+    deliveryOtp,
+  });
 });
 
-// GET /api/orders  — order history for user
 const getOrders = asyncHandler(async (req, res) => {
   const { status, page = 1, limit = 10 } = req.query;
   const filter = { user: req.user._id };
@@ -52,14 +56,12 @@ const getOrders = asyncHandler(async (req, res) => {
   });
 });
 
-// GET /api/orders/:id
 const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
   res.json({ success: true, data: order });
 });
 
-// PUT /api/orders/:id/cancel
 const cancelOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
@@ -73,7 +75,6 @@ const cancelOrder = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Order cancelled', data: order });
 });
 
-// PUT /api/orders/:id/rate
 const rateOrder = asyncHandler(async (req, res) => {
   const { score, comment } = req.body;
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
@@ -86,46 +87,73 @@ const rateOrder = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order });
 });
 
-// ── ADMIN / RESTAURANT: update order status ──────────────────
+const VENDOR_SETTABLE_STATUSES = ['confirmed', 'preparing', 'waiting_for_rider', 'delivered', 'cancelled'];
 
-// PUT /api/orders/:id/status
+const FORWARD_TRANSITIONS = {
+  placed:             ['confirmed'],
+  confirmed:          ['preparing'],
+  preparing:          ['waiting_for_rider'],
+  waiting_for_rider:  [], 
+  assigned:           [], 
+  out_for_delivery:   ['delivered'],
+  otp_verified:       ['delivered'],
+  delivered:          [], 
+  cancelled:          [], 
+};
+
+const CANCELLABLE_FROM = ['placed', 'confirmed', 'preparing', 'waiting_for_rider', 'assigned', 'out_for_delivery', 'otp_verified'];
+
+function allowedNextStatuses(currentStatus) {
+  const forward = FORWARD_TRANSITIONS[currentStatus] || [];
+  return CANCELLABLE_FROM.includes(currentStatus) ? [...forward, 'cancelled'] : forward;
+}
+
 const updateOrderStatus = asyncHandler(async (req, res) => {
   const { status, note } = req.body;
-  const validStatuses = ['confirmed','preparing','out_for_delivery','delivered','cancelled'];
-  if (!validStatuses.includes(status))
+  if (!VENDOR_SETTABLE_STATUSES.includes(status))
     return res.status(400).json({ success: false, message: 'Invalid status' });
 
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
+  const allowed = allowedNextStatuses(order.status);
+  if (!allowed.includes(status)) {
+    return res.status(409).json({
+      success: false,
+      message: allowed.length
+        ? `Cannot move order from "${order.status}" to "${status}". Allowed next status: ${allowed.join(', ')}.`
+        : `Cannot update order — it is currently "${order.status}", which cannot be changed from this endpoint.`,
+    });
+  }
+
+  if (status === 'delivered' && !order.deliveryOtpVerified) {
+    return res.status(409).json({
+      success: false,
+      message: 'Cannot mark this order as delivered until the delivery OTP has been verified.',
+    });
+  }
+
   order.advanceStatus(status, note || '');
 
-  // ── AUTOMATIC RIDER ASSIGNMENT ──────────────────────────────
-  // The moment a vendor pushes an order to "out_for_delivery" and it
-  // doesn't already have a rider (e.g. from a prior manual assignment),
-  // try to auto-assign the best available one. autoAssignRider() is
-  // guaranteed to never throw — see services/riderAssignmentService.js —
-  // so a bad lookup or zero online riders can never crash this request;
-  // the order just stays unassigned and can still be assigned manually
-  // later via PUT /api/orders/:id/assign-rider.
   let riderAssignment = null;
-  if (status === 'out_for_delivery' && !order.rider) {
-    riderAssignment = await autoAssignRider(order); // mutates order.rider/riderStatus/etc in place
+  if (status === 'waiting_for_rider' && !order.rider) {
+    riderAssignment = await autoAssignRider(order); 
   }
 
   await order.save();
 
+  // If auto-assigned successfully, schedule the 60-second acceptance timeout check
+  if (riderAssignment && riderAssignment.assigned) {
+    scheduleRiderTimeout(order._id, order.rider);
+  }
+
   res.json({
     success: true,
     data: order,
-    // Additive/optional — existing frontends reading only `data` are
-    // completely unaffected. A vendor dashboard can use this to surface
-    // "no rider available, please assign one manually" when present.
     ...(riderAssignment ? { riderAssignment } : {}),
   });
 });
 
-// GET /api/orders/admin/all  — admin view all orders
 const getAllOrders = asyncHandler(async (req, res) => {
   const { status, restaurant, page = 1, limit = 20 } = req.query;
   const filter = {};
@@ -151,12 +179,11 @@ const getAllOrders = asyncHandler(async (req, res) => {
   });
 });
 
-// POST /api/orders/guest  — Guest checkout (bypasses login and cart)
 const createGuestOrder = asyncHandler(async (req, res) => {
   const { items, deliveryAddress, restaurantId, restaurantName, subtotal, total } = req.body;
 
   const order = await Order.create({
-    user: '000000000000000000000000', // Dummy 24-character ID for a Guest
+    user: '000000000000000000000000', 
     restaurant: restaurantId,
     restaurantName: restaurantName,
     items: items,
@@ -165,22 +192,14 @@ const createGuestOrder = asyncHandler(async (req, res) => {
     total: total,
   });
 
-  res.status(201).json({ success: true, data: order });
+  const deliveryOtp = order._plainDeliveryOtp;
+  order.clearOtpSecrets();
+
+  res.status(201).json({ success: true, data: order, deliveryOtp });
 });
 
-// ── ADMIN: assign a rider to an order ─────────────────────────
-// Note: this only sets order.status to 'cancelled'/'delivered' checks
-// against the *existing* status field. It does not call advanceStatus()
-// or touch order.status itself — assignment is purely a rider/riderStatus
-// change layered on top of your existing order lifecycle.
-
-// Once a rider has reached the restaurant (or later), swapping them out
-// is blocked — the order is already physically in someone's hands.
 const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
 
-// PUT /api/orders/:id/assign-rider  (ADMIN ONLY — manual override/fallback
-// for whenever auto-assignment in updateOrderStatus above couldn't find
-// anyone, or a vendor/admin wants to reassign).
 const assignRider = asyncHandler(async (req, res) => {
   const { riderId } = req.body;
   if (!riderId) {
@@ -222,6 +241,9 @@ const assignRider = asyncHandler(async (req, res) => {
   });
 
   await order.save();
+
+  // If manually assigned by admin, schedule the 60-second acceptance timeout check
+  scheduleRiderTimeout(order._id, order.rider);
 
   res.json({ success: true, message: 'Rider assigned successfully.', data: order });
 });
