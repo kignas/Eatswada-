@@ -1,41 +1,23 @@
+// File 1: services/riderAssignmentService.js
 'use strict';
 
 /**
  * Rider Assignment Service
  * ─────────────────────────
  * Finds and assigns the best available rider to an order automatically.
- * Kept separate from orderController so the matching logic can be reused
- * (a background retry job, an admin "auto-assign" button, etc.) without
- * duplicating it.
- *
- * Contract: autoAssignRider() NEVER throws. Any internal failure (bad
- * lookup, missing zone data, DB hiccup) is caught and reported back as
- * { assigned: false, reason }, so a failure here can never crash the
- * order-status-update request that triggered it.
+ * Includes capabilities to handle timeouts, rejections, and auto-release.
  */
 
 const User = require('../models/User');
 const Order = require('../models/Order');
 const Restaurant = require('../models/Restaurant');
 
-// Every riderStatus that counts as "this rider is currently busy with a
-// delivery" — mirrors ACTIVE_RIDER_STATUSES in riderController.js.
 const ACTIVE_RIDER_STATUSES = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery'];
 
 function normalizeZone(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-/**
- * Best-effort resolution of a "zone" string to match riders against.
- * Tries the restaurant's own deliveryZone/area/city first (whichever of
- * those fields actually exists on your Restaurant schema — unknown fields
- * just come back undefined, no crash), then falls back to the delivery
- * address snapshot stored on the order itself.
- *
- * Returns '' (never throws) if nothing usable is found — callers should
- * treat '' as "no zone preference, treat all online riders equally".
- */
 async function resolveOrderZone(order) {
   if (order.restaurant) {
     try {
@@ -44,34 +26,29 @@ async function resolveOrderZone(order) {
         .lean();
       const zone = restaurant && (restaurant.deliveryZone || restaurant.area || restaurant.city);
       if (zone) return normalizeZone(zone);
-    } catch (err) {
-      // Swallow — fall back to the order's own address snapshot below.
-    }
+    } catch (err) {}
   }
   const fallback = (order.deliveryAddress && (order.deliveryAddress.area || order.deliveryAddress.city)) || '';
   return normalizeZone(fallback);
 }
 
 /**
- * Finds the single best available rider for an order. Never throws.
- * Resolves to { rider: null, zoneMatched: false } if no online rider exists.
- *
- * Selection rules:
- *  1. role: 'rider', isActive: true, riderDetails.isOnline: true
- *  2. riders in the order's zone are preferred over riders outside it —
- *     falls back to the full online pool if none match the zone, or if
- *     the zone couldn't be resolved (never leaves an order unassigned
- *     just because zone data is missing)
- *  3. within that pool, fewest currently-active deliveries wins
- *  4. ties are broken by whichever rider has been idle the longest
- *     (oldest `updatedAt` on their user doc)
+ * Finds the single best available rider for an order.
+ * @param {Object} order 
+ * @param {Array<String>} excludeRiderIds - IDs of riders who rejected or timed out
  */
-async function findBestAvailableRider(order) {
-  const onlineRiders = await User.find({
+async function findBestAvailableRider(order, excludeRiderIds = []) {
+  const query = {
     role: 'rider',
     isActive: true,
     'riderDetails.isOnline': true,
-  })
+  };
+
+  if (excludeRiderIds && excludeRiderIds.length > 0) {
+    query._id = { $nin: excludeRiderIds };
+  }
+
+  const onlineRiders = await User.find(query)
     .select('_id name riderDetails updatedAt')
     .lean();
 
@@ -95,31 +72,23 @@ async function findBestAvailableRider(order) {
   pool.sort((a, b) => {
     const loadA = loadMap.get(String(a._id)) || 0;
     const loadB = loadMap.get(String(b._id)) || 0;
-    if (loadA !== loadB) return loadA - loadB; // fewer active deliveries first
-    return new Date(a.updatedAt) - new Date(b.updatedAt); // longer-idle rider first
+    if (loadA !== loadB) return loadA - loadB; 
+    return new Date(a.updatedAt) - new Date(b.updatedAt); 
   });
 
   return { rider: pool[0], zoneMatched };
 }
 
 /**
- * Attempts to auto-assign the best available rider to `order`.
- * Mutates the given Mongoose order document in place (sets rider,
- * riderAssignedAt, riderStatus, riderStatusHistory, riderEarning) but
- * does NOT call order.save() — that stays the caller's responsibility so
- * it can be batched with whatever else is already being saved.
- *
- * Always resolves — never rejects.
- *
- * @returns {Promise<{assigned: boolean, rider: {_id, name}|null, reason: string}>}
+ * Attempts to auto-assign the best available rider.
  */
-async function autoAssignRider(order) {
+async function autoAssignRider(order, excludeRiderIds = []) {
   try {
     if (order.rider) {
       return { assigned: false, rider: null, reason: 'Order already has a rider assigned.' };
     }
 
-    const { rider, zoneMatched } = await findBestAvailableRider(order);
+    const { rider, zoneMatched } = await findBestAvailableRider(order, excludeRiderIds);
     if (!rider) {
       return { assigned: false, rider: null, reason: 'No online riders are currently available.' };
     }
@@ -143,10 +112,70 @@ async function autoAssignRider(order) {
         : 'Auto-assigned from wider pool (no same-zone rider was online).',
     };
   } catch (err) {
-    // Defensive catch-all — auto-assignment must never break the order
-    // status update that triggered it.
     return { assigned: false, rider: null, reason: `Auto-assignment failed: ${err.message}` };
   }
 }
 
-module.exports = { autoAssignRider, findBestAvailableRider, resolveOrderZone };
+/**
+ * Safely handles order release and reassignment caused by timeouts, rejections, or offline status.
+ * Uses atomic operations to prevent duplicate assignment from concurrent requests.
+ */
+async function handleReassignment(orderId, oldRiderId, reasonNote) {
+  // Prevent reassignment if the rider has already picked up the order
+  const NO_REASSIGN_STATUSES = ['picked_up', 'out_for_delivery', 'delivered'];
+
+  // Atomically unassign the rider to prevent concurrent race conditions
+  const lockedOrder = await Order.findOneAndUpdate(
+    { _id: orderId, rider: oldRiderId, riderStatus: { $nin: NO_REASSIGN_STATUSES } },
+    {
+      $unset: { rider: 1, riderAssignedAt: 1, riderEarning: 1 },
+      $set: { riderStatus: 'unassigned', status: 'waiting_for_rider' },
+      $push: { riderStatusHistory: { status: 'unassigned', note: reasonNote, at: new Date(), riderId: oldRiderId } }
+    },
+    { new: true }
+  );
+
+  if (!lockedOrder) {
+    return { assigned: false, reason: 'Order state changed concurrently or past reassignment stage.' };
+  }
+
+  // Retrieve riders who previously timed out or rejected this order so they aren't reassigned immediately
+  const excludedIds = lockedOrder.riderStatusHistory
+    .filter(h => h.status === 'unassigned' && h.riderId)
+    .map(h => String(h.riderId));
+  excludedIds.push(String(oldRiderId));
+
+  // Auto-assign the next available rider
+  const assignment = await autoAssignRider(lockedOrder, excludedIds);
+  if (assignment.assigned) {
+    await lockedOrder.save();
+    scheduleRiderTimeout(lockedOrder._id, lockedOrder.rider);
+  }
+  
+  return assignment;
+}
+
+/**
+ * Schedules a background timeout that releases the order if not accepted within 60 seconds.
+ */
+function scheduleRiderTimeout(orderId, riderId) {
+  setTimeout(async () => {
+    try {
+      const order = await Order.findById(orderId);
+      // Check if the order is still tied to the same rider and hasn't progressed past 'assigned'
+      if (order && order.rider && order.rider.toString() === riderId.toString() && order.riderStatus === 'assigned') {
+        await handleReassignment(orderId, riderId, 'Auto-released: Rider did not accept within 60 seconds.');
+      }
+    } catch (err) {
+      console.error('Timeout reassignment failed:', err);
+    }
+  }, 60 * 1000);
+}
+
+module.exports = { 
+  autoAssignRider, 
+  findBestAvailableRider, 
+  resolveOrderZone, 
+  handleReassignment, 
+  scheduleRiderTimeout 
+};
