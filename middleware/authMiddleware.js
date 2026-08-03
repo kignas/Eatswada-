@@ -32,7 +32,7 @@ const protect = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log('[protect] Token decoded OK, user id:', decoded.id);
+    
 
     // Select all fields except password.
     // '-otp' was intentionally removed — it caused a MongoDB path-collision
@@ -55,7 +55,7 @@ const protect = async (req, res, next) => {
       });
     }
 
-    console.log('[protect] Auth OK for user:', req.user._id, 'role:', req.user.role);
+    
     next();
   } catch (err) {
     // Log internally — do NOT expose err.message to the client in production.
