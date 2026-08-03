@@ -76,18 +76,29 @@ function withLiveDisplayData(orderDoc) {
 async function buildOrderItems(rawItems) {
   if (!Array.isArray(rawItems)) return [];
 
+  console.log("Incoming cart:", rawItems);
+
   const menuIds = rawItems
     .map((it) => it.menuItem || it.menuId || it.id || it._id)
     .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
 
+  console.log("Menu IDs:", menuIds);
+
   const menus = menuIds.length
     ? await Menu.find({ _id: { $in: menuIds } }).select('name price image isVeg')
     : [];
+
+  console.log("Menus found:", menus);
+
   const menuById = new Map(menus.map((m) => [String(m._id), m]));
 
   return rawItems.map((it) => {
+    console.log("Current item:", it);
+
     const menuId = it.menuItem || it.menuId || it.id || it._id;
     const menu = menuId ? menuById.get(String(menuId)) : null;
+
+    console.log("Matched menu:", menu);
 
     return {
       menuItem:       menu ? menu._id : (it.menuItem || undefined),
