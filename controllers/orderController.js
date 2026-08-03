@@ -43,7 +43,12 @@ const getOrders = asyncHandler(async (req, res) => {
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
-    Order.find(filter).select('+deliveryOtp').sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    Order.find(filter)
+      .select('+deliveryOtp')
+      .populate('rider', 'name phone')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit)),
     Order.countDocuments(filter),
   ]);
 
@@ -57,7 +62,9 @@ const getOrders = asyncHandler(async (req, res) => {
 });
 
 const getOrderById = asyncHandler(async (req, res) => {
-  const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).select('+deliveryOtp');
+  const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
+    .select('+deliveryOtp')
+    .populate('rider', 'name phone');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
   res.json({ success: true, data: order });
 });
