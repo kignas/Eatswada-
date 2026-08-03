@@ -19,7 +19,11 @@ function hashOtp(code, salt) {
 }
 
 const orderItemSchema = new mongoose.Schema({
-  menuItem:  { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem' },
+  // FIX: models/Menu.js registers its model as `mongoose.model('Menu', ...)`,
+  // not 'MenuItem'. With the old ref, `.populate('items.menuItem')` would
+  // throw MissingSchemaError the moment anything tried to use it — which is
+  // exactly why the current menu item image could never be looked up live.
+  menuItem:  { type: mongoose.Schema.Types.ObjectId, ref: 'Menu' },
   name:      { type: String, required: true },
   price:     { type: Number, required: true },
   image:     { type: String, default: '' },
