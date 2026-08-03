@@ -1,9 +1,11 @@
 // File 2: controllers/orderController.js
-const Order      = require('../models/Order');
-const Cart       = require('../models/Cart');
-const Address    = require('../models/Address');
-const Restaurant = require('../models/Restaurant');
-const User       = require('../models/User');
+const mongoose    = require('mongoose');
+const Order       = require('../models/Order');
+const Cart        = require('../models/Cart');
+const Address     = require('../models/Address');
+const Restaurant  = require('../models/Restaurant');
+const Menu        = require('../models/Menu');
+const User        = require('../models/User');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 
@@ -41,13 +43,62 @@ function withLiveDisplayData(orderDoc) {
       const liveMenuItem = item.menuItem && typeof item.menuItem === 'object' ? item.menuItem : null;
       return {
         ...item,
-        image: (liveMenuItem && liveMenuItem.image) || item.image || '',
+        // Priority: item.image (the checkout-time snapshot — correct for
+        // every order created after the fix in buildOrderItems) first,
+        // then the live Menu doc's image as a fallback for legacy orders
+        // saved before item.image was ever populated, then '' (the
+        // frontend renders an initials placeholder when this is empty).
+        image: item.image || (liveMenuItem && liveMenuItem.image) || '',
         menuItem: liveMenuItem ? liveMenuItem._id : item.menuItem,
       };
     });
   }
 
   return order;
+}
+
+/**
+ * Builds the `items` array that actually gets persisted on the order.
+ *
+ * Root cause of the empty item image: the client cart payload was being
+ * written straight to `Order.create({ items })` with no server-side
+ * enrichment, and the checkout UI never carried the menu photo through
+ * to that payload — so `image` landed in Mongo as "" on every order,
+ * and `menuItem` was never set at all.
+ *
+ * This looks each line item up against the live Menu document (however
+ * the client identified it — `menuItem`, `menuId`, `id`, or `_id`, since
+ * the cart payload shape isn't guaranteed) and stamps the *current* menu
+ * image and a real `menuItem` ref onto the item. `name`/`price`/`quantity`
+ * keep coming from the client cart, since those already save correctly
+ * and price must match what the customer was actually charged.
+ */
+async function buildOrderItems(rawItems) {
+  if (!Array.isArray(rawItems)) return [];
+
+  const menuIds = rawItems
+    .map((it) => it.menuItem || it.menuId || it.id || it._id)
+    .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
+
+  const menus = menuIds.length
+    ? await Menu.find({ _id: { $in: menuIds } }).select('name price image isVeg')
+    : [];
+  const menuById = new Map(menus.map((m) => [String(m._id), m]));
+
+  return rawItems.map((it) => {
+    const menuId = it.menuItem || it.menuId || it.id || it._id;
+    const menu = menuId ? menuById.get(String(menuId)) : null;
+
+    return {
+      menuItem:       menu ? menu._id : (it.menuItem || undefined),
+      name:           it.name || (menu && menu.name),
+      price:          it.price,
+      image:          (menu && menu.image) || it.image || '',
+      isVeg:          typeof it.isVeg === 'boolean' ? it.isVeg : (menu ? menu.isVeg : true),
+      quantity:       it.quantity,
+      customizations: it.customizations || {},
+    };
+  });
 }
 
 const createOrder = asyncHandler(async (req, res) => {
@@ -61,7 +112,7 @@ const createOrder = asyncHandler(async (req, res) => {
     user:            req.user._id, 
     restaurant:      restaurantId,
     restaurantName:  restaurantName,
-    items:           items,
+    items:           await buildOrderItems(items),
     deliveryAddress: deliveryAddress,
     subtotal:        subtotal,
     deliveryFee:     40,
@@ -243,7 +294,7 @@ const createGuestOrder = asyncHandler(async (req, res) => {
     user: '000000000000000000000000', 
     restaurant: restaurantId,
     restaurantName: restaurantName,
-    items: items,
+    items: await buildOrderItems(items),
     deliveryAddress: deliveryAddress,
     subtotal: subtotal,
     total: total,
