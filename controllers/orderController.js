@@ -7,6 +7,49 @@ const User       = require('../models/User');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 
+// ── Live-data population for order responses ────────────────────────
+// Orders store a *snapshot* of the restaurant name/image and each item's
+// image at checkout time (denormalized for speed/history). That snapshot
+// is what was going stale: it never changes even after a vendor renames
+// their restaurant or swaps a dish photo. These paths pull the current
+// Restaurant/Menu documents alongside the order so the API can prefer
+// live data over the frozen snapshot.
+const ORDER_POPULATE_PATHS = [
+  { path: 'restaurant', select: 'name image' },
+  { path: 'items.menuItem', select: 'image' },
+];
+
+/**
+ * Build the JSON an order response should send: live restaurant name/logo
+ * and live per-item image where available, falling back to the snapshot
+ * stored on the order itself when the referenced document is missing
+ * (soft-deleted restaurant, deleted menu item, or a legacy order created
+ * before these refs existed) — old orders keep rendering exactly as
+ * before, and nothing here is ever a hardcoded name or image.
+ */
+function withLiveDisplayData(orderDoc) {
+  const order = orderDoc.toObject({ virtuals: false });
+
+  if (order.restaurant && typeof order.restaurant === 'object') {
+    order.restaurantName = order.restaurant.name || order.restaurantName;
+    order.restaurantImage = order.restaurant.image || order.restaurantImage;
+    order.restaurant = order.restaurant._id; // keep the field shape (an id) existing clients expect
+  }
+
+  if (Array.isArray(order.items)) {
+    order.items = order.items.map((item) => {
+      const liveMenuItem = item.menuItem && typeof item.menuItem === 'object' ? item.menuItem : null;
+      return {
+        ...item,
+        image: (liveMenuItem && liveMenuItem.image) || item.image || '',
+        menuItem: liveMenuItem ? liveMenuItem._id : item.menuItem,
+      };
+    });
+  }
+
+  return order;
+}
+
 const createOrder = asyncHandler(async (req, res) => {
   const { items, restaurantId, restaurantName, subtotal, total, deliveryAddress } = req.body;
 
@@ -28,10 +71,11 @@ const createOrder = asyncHandler(async (req, res) => {
 
   const deliveryOtp = order._plainDeliveryOtp;
   order.clearOtpSecrets();
+  await order.populate(ORDER_POPULATE_PATHS);
 
   res.status(201).json({
     success: true,
-    data: order,
+    data: withLiveDisplayData(order),
     deliveryOtp,
   });
 });
@@ -45,6 +89,7 @@ const getOrders = asyncHandler(async (req, res) => {
   const [orders, total] = await Promise.all([
     Order.find(filter)
       .select('+deliveryOtp')
+      .populate(ORDER_POPULATE_PATHS)
       .populate('rider', 'name phone')
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -57,16 +102,17 @@ const getOrders = asyncHandler(async (req, res) => {
     page: Number(page),
     pages: Math.ceil(total / Number(limit)),
     total,
-    data: orders,
+    data: orders.map(withLiveDisplayData),
   });
 });
 
 const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
     .select('+deliveryOtp')
+    .populate(ORDER_POPULATE_PATHS)
     .populate('rider', 'name phone');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-  res.json({ success: true, data: order });
+  res.json({ success: true, data: withLiveDisplayData(order) });
 });
 
 const cancelOrder = asyncHandler(async (req, res) => {
@@ -78,8 +124,9 @@ const cancelOrder = asyncHandler(async (req, res) => {
   order.advanceStatus('cancelled', req.body.reason || 'Cancelled by customer');
   order.cancelReason = req.body.reason || 'Cancelled by customer';
   await order.save();
+  await order.populate(ORDER_POPULATE_PATHS);
 
-  res.json({ success: true, message: 'Order cancelled', data: order });
+  res.json({ success: true, message: 'Order cancelled', data: withLiveDisplayData(order) });
 });
 
 const rateOrder = asyncHandler(async (req, res) => {
@@ -91,7 +138,8 @@ const rateOrder = asyncHandler(async (req, res) => {
 
   order.rating = { score, comment, givenAt: new Date() };
   await order.save();
-  res.json({ success: true, data: order });
+  await order.populate(ORDER_POPULATE_PATHS);
+  res.json({ success: true, data: withLiveDisplayData(order) });
 });
 
 const VENDOR_SETTABLE_STATUSES = ['confirmed', 'preparing', 'waiting_for_rider', 'delivered', 'cancelled'];
@@ -148,6 +196,7 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   }
 
   await order.save();
+  await order.populate(ORDER_POPULATE_PATHS);
 
   // If auto-assigned successfully, schedule the 60-second acceptance timeout check
   if (riderAssignment && riderAssignment.assigned) {
@@ -156,7 +205,7 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    data: order,
+    data: withLiveDisplayData(order),
     ...(riderAssignment ? { riderAssignment } : {}),
   });
 });
@@ -171,6 +220,7 @@ const getAllOrders = asyncHandler(async (req, res) => {
   const [orders, total] = await Promise.all([
     Order.find(filter)
       .populate('user', 'name phone')
+      .populate(ORDER_POPULATE_PATHS)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(Number(limit)),
@@ -182,7 +232,7 @@ const getAllOrders = asyncHandler(async (req, res) => {
     page: Number(page),
     pages: Math.ceil(total / Number(limit)),
     total,
-    data: orders,
+    data: orders.map(withLiveDisplayData),
   });
 });
 
@@ -201,8 +251,9 @@ const createGuestOrder = asyncHandler(async (req, res) => {
 
   const deliveryOtp = order._plainDeliveryOtp;
   order.clearOtpSecrets();
+  await order.populate(ORDER_POPULATE_PATHS);
 
-  res.status(201).json({ success: true, data: order, deliveryOtp });
+  res.status(201).json({ success: true, data: withLiveDisplayData(order), deliveryOtp });
 });
 
 const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
@@ -248,11 +299,12 @@ const assignRider = asyncHandler(async (req, res) => {
   });
 
   await order.save();
+  await order.populate(ORDER_POPULATE_PATHS);
 
   // If manually assigned by admin, schedule the 60-second acceptance timeout check
   scheduleRiderTimeout(order._id, order.rider);
 
-  res.json({ success: true, message: 'Rider assigned successfully.', data: order });
+  res.json({ success: true, message: 'Rider assigned successfully.', data: withLiveDisplayData(order) });
 });
 
 module.exports = {
