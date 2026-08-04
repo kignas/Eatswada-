@@ -39,11 +39,12 @@ app.set("trust proxy", 1);
 app.use(compression());
 app.use(helmet());
 
+// 🚨 UPDATED CORS CONFIGURATION FOR VERCEL 🚨
 app.use(cors({
   origin: [
     'http://localhost:5500', 
     'http://127.0.0.1:5500', 
-    'https://nearbite-three.vercel.app' // Your live Vercel frontend URL!
+    'https://nearbite-three.vercel.app' // Your live frontend URL!
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -94,8 +95,6 @@ app.use('/api/categories',  categoryRoutes);
 app.use('/api/menu',        menuRoutes);
 app.use('/api/riders',      riderRoutes);
 app.use('/api/admin/riders', adminRiderRoutes);
-
-
 
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
