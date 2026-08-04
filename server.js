@@ -39,22 +39,15 @@ app.set("trust proxy", 1);
 app.use(compression());
 app.use(helmet());
 
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
 app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-      cb(null, true);
-    } else {
-      cb(new Error(`CORS: origin ${origin} not allowed`));
-    }
-  },
+  origin: [
+    'http://localhost:5500', 
+    'http://127.0.0.1:5500', 
+    'https://nearbite-three.vercel.app' // Your live Vercel frontend URL!
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: [
-  'Content-Type',
-  'Authorization',
-  'x-setup-key'
-  ]
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-setup-key']
 }));
 
 app.options('*', cors());
