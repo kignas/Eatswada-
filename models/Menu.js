@@ -86,3 +86,6 @@ menuItemSchema.index({ name: 'text', description: 'text' });
 
 // Exported as 'Menu' to match your controller imports
 module.exports = mongoose.model('Menu', menuItemSchema);
+
+// --- DATABASE INDEXES FOR PERFORMANCE ---
+menuSchema.index({ restaurant: 1, isAvailable: 1 }); // Instantly loads active menu items for a specific restaurant
