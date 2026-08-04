@@ -88,4 +88,4 @@ menuItemSchema.index({ name: 'text', description: 'text' });
 module.exports = mongoose.model('Menu', menuItemSchema);
 
 // --- DATABASE INDEXES FOR PERFORMANCE ---
-menuSchema.index({ restaurant: 1, isAvailable: 1 }); // Instantly loads active menu items for a specific restaurant
+menuItemSchema.index({ restaurantId: 1, inStock: 1 }); // Corrected schema and field names!
