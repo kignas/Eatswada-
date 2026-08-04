@@ -9,10 +9,14 @@ const User        = require('../models/User');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 
+
+// To this:
 const ORDER_POPULATE_PATHS = [
-  { path: 'restaurant', select: 'name image' },
+  { path: 'restaurant', select: 'name image phone contactNumber' }, // Added phone fields
   { path: 'items.menuItem', select: 'image' },
+  { path: 'user', select: 'name phone' } // Added customer profile
 ];
+
 
 function withLiveDisplayData(orderDoc) {
   const order = orderDoc.toObject({ virtuals: false });
