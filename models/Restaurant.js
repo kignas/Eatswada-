@@ -286,3 +286,7 @@ restaurantSchema.pre('validate', function (next) {
 
 
 module.exports = mongoose.model('Restaurant', restaurantSchema);
+
+// --- DATABASE INDEXES FOR PERFORMANCE ---
+restaurantSchema.index({ isAvailable: 1 }); // Speeds up the home page restaurant feed
+
