@@ -118,10 +118,17 @@ const createOrder = asyncHandler(async (req, res) => {
 
     const restaurant = await Restaurant.findById(restaurantId).select('name');
 
+// Inside createOrder, change the Order.create block:
+
     const order = await Order.create({
       user:            req.user._id, 
       restaurant:      restaurantId,
       restaurantName:  restaurant ? restaurant.name : 'Unknown',
+      
+      // ADD THESE TWO LINES:
+      customerName:    req.user.name,
+      customerPhone:   req.user.phone,
+
       items:           enrichedItems,
       deliveryAddress: deliveryAddress,
       subtotal:        subtotal,
@@ -129,6 +136,7 @@ const createOrder = asyncHandler(async (req, res) => {
       platformFee:     platformFee,
       total:           calculatedTotal,
     });
+
 
     const deliveryOtp = order._plainDeliveryOtp;
     order.clearOtpSecrets();
