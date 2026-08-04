@@ -9,33 +9,18 @@ const User        = require('../models/User');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 
-// ── Live-data population for order responses ────────────────────────
-// Orders store a *snapshot* of the restaurant name/image and each item's
-// image at checkout time (denormalized for speed/history). That snapshot
-// is what was going stale: it never changes even after a vendor renames
-// their restaurant or swaps a dish photo. These paths pull the current
-// Restaurant/Menu documents alongside the order so the API can prefer
-// live data over the frozen snapshot.
 const ORDER_POPULATE_PATHS = [
   { path: 'restaurant', select: 'name image' },
   { path: 'items.menuItem', select: 'image' },
 ];
 
-/**
- * Build the JSON an order response should send: live restaurant name/logo
- * and live per-item image where available, falling back to the snapshot
- * stored on the order itself when the referenced document is missing
- * (soft-deleted restaurant, deleted menu item, or a legacy order created
- * before these refs existed) — old orders keep rendering exactly as
- * before, and nothing here is ever a hardcoded name or image.
- */
 function withLiveDisplayData(orderDoc) {
   const order = orderDoc.toObject({ virtuals: false });
 
   if (order.restaurant && typeof order.restaurant === 'object') {
     order.restaurantName = order.restaurant.name || order.restaurantName;
     order.restaurantImage = order.restaurant.image || order.restaurantImage;
-    order.restaurant = order.restaurant._id; // keep the field shape (an id) existing clients expect
+    order.restaurant = order.restaurant._id; 
   }
 
   if (Array.isArray(order.items)) {
@@ -43,11 +28,6 @@ function withLiveDisplayData(orderDoc) {
       const liveMenuItem = item.menuItem && typeof item.menuItem === 'object' ? item.menuItem : null;
       return {
         ...item,
-        // Priority: item.image (the checkout-time snapshot — correct for
-        // every order created after the fix in buildOrderItems) first,
-        // then the live Menu doc's image as a fallback for legacy orders
-        // saved before item.image was ever populated, then '' (the
-        // frontend renders an initials placeholder when this is empty).
         image: item.image || (liveMenuItem && liveMenuItem.image) || '',
         menuItem: liveMenuItem ? liveMenuItem._id : item.menuItem,
       };
@@ -58,88 +38,106 @@ function withLiveDisplayData(orderDoc) {
 }
 
 /**
- * Builds the `items` array that actually gets persisted on the order.
- *
- * Root cause of the empty item image: the client cart payload was being
- * written straight to `Order.create({ items })` with no server-side
- * enrichment, and the checkout UI never carried the menu photo through
- * to that payload — so `image` landed in Mongo as "" on every order,
- * and `menuItem` was never set at all.
- *
- * This looks each line item up against the live Menu document (however
- * the client identified it — `menuItem`, `menuId`, `id`, or `_id`, since
- * the cart payload shape isn't guaranteed) and stamps the *current* menu
- * image and a real `menuItem` ref onto the item. `name`/`price`/`quantity`
- * keep coming from the client cart, since those already save correctly
- * and price must match what the customer was actually charged.
+ * REWRITTEN: Server-Side Pricing Engine
+ * We no longer trust the client's price, subtotal, or restaurantId.
+ * We fetch the actual prices from the database using the Menu IDs.
  */
-async function buildOrderItems(rawItems) {
-  if (!Array.isArray(rawItems)) return [];
-
-  console.log("Incoming cart:", rawItems);
+async function buildOrderItemsAndCalculate(rawItems) {
+  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    return { items: [], subtotal: 0, restaurantId: null };
+  }
 
   const menuIds = rawItems
     .map((it) => it.menuItem || it.menuId || it.id || it._id)
     .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
 
-  console.log("Menu IDs:", menuIds);
-
   const menus = menuIds.length
-    ? await Menu.find({ _id: { $in: menuIds } }).select('name price image isVeg')
+    ? await Menu.find({ _id: { $in: menuIds } }).select('name price image isVeg restaurant')
     : [];
 
-  console.log("Menus found:", menus);
+  if (menus.length === 0) {
+    throw new Error('None of the items in the cart exist in the database.');
+  }
+
+  // Security Check: Ensure all items belong to the same restaurant
+  const restaurantIds = new Set(menus.map(m => String(m.restaurant)));
+  if (restaurantIds.size > 1) {
+    throw new Error('Cart contains items from multiple restaurants. Please clear your cart.');
+  }
+  const verifiedRestaurantId = Array.from(restaurantIds)[0];
 
   const menuById = new Map(menus.map((m) => [String(m._id), m]));
+  let calculatedSubtotal = 0;
 
-  return rawItems.map((it) => {
-    console.log("Current item:", it);
-
+  const items = rawItems.reduce((acc, it) => {
     const menuId = it.menuItem || it.menuId || it.id || it._id;
     const menu = menuId ? menuById.get(String(menuId)) : null;
 
-    console.log("Matched menu:", menu);
+    if (menu) {
+      const qty = Number(it.quantity) || 1;
+      const itemTotal = menu.price * qty;
+      calculatedSubtotal += itemTotal;
 
-    return {
-      menuItem:       menu ? menu._id : (it.menuItem || undefined),
-      name:           it.name || (menu && menu.name),
-      price:          it.price,
-      image:          (menu && menu.image) || it.image || '',
-      isVeg:          typeof it.isVeg === 'boolean' ? it.isVeg : (menu ? menu.isVeg : true),
-      quantity:       it.quantity,
-      customizations: it.customizations || {},
-    };
-  });
+      acc.push({
+        menuItem:       menu._id,
+        name:           menu.name, 
+        price:          menu.price, 
+        image:          menu.image || '',
+        isVeg:          menu.isVeg,
+        quantity:       qty,
+        customizations: it.customizations || {},
+      });
+    }
+    return acc;
+  }, []);
+
+  return { 
+    items, 
+    subtotal: calculatedSubtotal, 
+    restaurantId: verifiedRestaurantId 
+  };
 }
 
 const createOrder = asyncHandler(async (req, res) => {
-  const { items, restaurantId, restaurantName, subtotal, total, deliveryAddress } = req.body;
+  const { items, deliveryAddress } = req.body; 
 
   if (!items || items.length === 0) {
     return res.status(400).json({ success: false, message: 'Cart is empty' });
   }
 
-  const order = await Order.create({
-    user:            req.user._id, 
-    restaurant:      restaurantId,
-    restaurantName:  restaurantName,
-    items:           await buildOrderItems(items),
-    deliveryAddress: deliveryAddress,
-    subtotal:        subtotal,
-    deliveryFee:     40,
-    platformFee:     5,
-    total:           total,
-  });
+  try {
+    const { items: enrichedItems, subtotal, restaurantId } = await buildOrderItemsAndCalculate(items);
 
-  const deliveryOtp = order._plainDeliveryOtp;
-  order.clearOtpSecrets();
-  await order.populate(ORDER_POPULATE_PATHS);
+    const deliveryFee = 40; 
+    const platformFee = 5;
+    const calculatedTotal = subtotal + deliveryFee + platformFee;
 
-  res.status(201).json({
-    success: true,
-    data: withLiveDisplayData(order),
-    deliveryOtp,
-  });
+    const restaurant = await Restaurant.findById(restaurantId).select('name');
+
+    const order = await Order.create({
+      user:            req.user._id, 
+      restaurant:      restaurantId,
+      restaurantName:  restaurant ? restaurant.name : 'Unknown',
+      items:           enrichedItems,
+      deliveryAddress: deliveryAddress,
+      subtotal:        subtotal,
+      deliveryFee:     deliveryFee,
+      platformFee:     platformFee,
+      total:           calculatedTotal,
+    });
+
+    const deliveryOtp = order._plainDeliveryOtp;
+    order.clearOtpSecrets();
+    await order.populate(ORDER_POPULATE_PATHS);
+
+    res.status(201).json({
+      success: true,
+      data: withLiveDisplayData(order),
+      deliveryOtp,
+    });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
 });
 
 const getOrders = asyncHandler(async (req, res) => {
@@ -233,6 +231,14 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
+  // SECURITY FIX: Vendor Authorization Check (BOLA)
+  if (req.user.role === 'vendor' && String(order.restaurant) !== String(req.user.restaurantId)) {
+    return res.status(403).json({ 
+      success: false, 
+      message: 'Unauthorized: You can only update orders for your own restaurant.' 
+    });
+  }
+
   const allowed = allowedNextStatuses(order.status);
   if (!allowed.includes(status)) {
     return res.status(409).json({
@@ -260,7 +266,6 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   await order.save();
   await order.populate(ORDER_POPULATE_PATHS);
 
-  // If auto-assigned successfully, schedule the 60-second acceptance timeout check
   if (riderAssignment && riderAssignment.assigned) {
     scheduleRiderTimeout(order._id, order.rider);
   }
@@ -277,6 +282,11 @@ const getAllOrders = asyncHandler(async (req, res) => {
   const filter = {};
   if (status)     filter.status     = status;
   if (restaurant) filter.restaurant = restaurant;
+
+  // SECURITY FIX: Restrict vendors to only seeing their own orders
+  if (req.user.role === 'vendor') {
+    filter.restaurant = req.user.restaurantId;
+  }
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
@@ -299,23 +309,37 @@ const getAllOrders = asyncHandler(async (req, res) => {
 });
 
 const createGuestOrder = asyncHandler(async (req, res) => {
-  const { items, deliveryAddress, restaurantId, restaurantName, subtotal, total } = req.body;
+  const { items, deliveryAddress } = req.body;
 
-  const order = await Order.create({
-    user: '000000000000000000000000', 
-    restaurant: restaurantId,
-    restaurantName: restaurantName,
-    items: await buildOrderItems(items),
-    deliveryAddress: deliveryAddress,
-    subtotal: subtotal,
-    total: total,
-  });
+  try {
+    const { items: enrichedItems, subtotal, restaurantId } = await buildOrderItemsAndCalculate(items);
 
-  const deliveryOtp = order._plainDeliveryOtp;
-  order.clearOtpSecrets();
-  await order.populate(ORDER_POPULATE_PATHS);
+    const deliveryFee = 40;
+    const platformFee = 5;
+    const calculatedTotal = subtotal + deliveryFee + platformFee;
 
-  res.status(201).json({ success: true, data: withLiveDisplayData(order), deliveryOtp });
+    const restaurant = await Restaurant.findById(restaurantId).select('name');
+
+    const order = await Order.create({
+      user: '000000000000000000000000', 
+      restaurant: restaurantId,
+      restaurantName: restaurant ? restaurant.name : 'Unknown',
+      items: enrichedItems,
+      deliveryAddress: deliveryAddress,
+      subtotal: subtotal,
+      deliveryFee: deliveryFee,
+      platformFee: platformFee,
+      total: calculatedTotal,
+    });
+
+    const deliveryOtp = order._plainDeliveryOtp;
+    order.clearOtpSecrets();
+    await order.populate(ORDER_POPULATE_PATHS);
+
+    res.status(201).json({ success: true, data: withLiveDisplayData(order), deliveryOtp });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
 });
 
 const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
@@ -363,7 +387,6 @@ const assignRider = asyncHandler(async (req, res) => {
   await order.save();
   await order.populate(ORDER_POPULATE_PATHS);
 
-  // If manually assigned by admin, schedule the 60-second acceptance timeout check
   scheduleRiderTimeout(order._id, order.rider);
 
   res.json({ success: true, message: 'Rider assigned successfully.', data: withLiveDisplayData(order) });
