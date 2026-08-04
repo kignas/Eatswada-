@@ -22,15 +22,18 @@ const addToCart = asyncHandler(async (req, res) => {
 
   let cart = await Cart.findOne({ user: req.user._id });
 
-  // If cart belongs to a different restaurant, clear it first (Swiggy/Zomato behaviour)
-  if (cart && cart.restaurant && String(cart.restaurant) !== String(menuItem.restaurant._id)) {
-    cart.items = [];
-    cart.restaurant = null;
-    cart.restaurantName = '';
-  }
-
   if (!cart) {
     cart = new Cart({ user: req.user._id });
+  }
+
+  // SECURITY FIX: Prevent multi-restaurant carts.
+  // Reject the request and tell the frontend to ask the user if they want to clear their cart.
+  if (cart.restaurant && cart.items.length > 0 && String(cart.restaurant) !== String(menuItem.restaurant._id)) {
+    return res.status(409).json({ 
+      success: false, 
+      message: 'Your cart contains items from another restaurant. Please clear your cart first.',
+      requiresClear: true 
+    });
   }
 
   cart.restaurant     = menuItem.restaurant._id;
@@ -127,4 +130,3 @@ const setPaymentMethod = asyncHandler(async (req, res) => {
 });
 
 module.exports = { getCart, addToCart, updateCartItem, removeFromCart, clearCart, setDeliveryAddress, setPaymentMethod };
-  
