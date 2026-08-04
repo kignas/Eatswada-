@@ -288,3 +288,8 @@ orderSchema.methods.clearOtpSecrets = function () {
 };
 
 module.exports = mongoose.model('Order', orderSchema);
+// --- DATABASE INDEXES FOR PERFORMANCE ---
+orderSchema.index({ user: 1, createdAt: -1 }); // Speeds up customer order history
+orderSchema.index({ restaurant: 1, status: 1 }); // Speeds up vendor active order dashboard
+orderSchema.index({ rider: 1, riderStatus: 1 }); // Speeds up rider active order fetching
+
