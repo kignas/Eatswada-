@@ -103,10 +103,29 @@ async function buildOrderItemsAndCalculate(rawItems) {
 }
 
 const createOrder = asyncHandler(async (req, res) => {
+  // Extract all possible variations of the restaurant ID your frontend might send
   const { items, deliveryAddress } = req.body; 
+  const payloadResId = req.body.restaurant || req.body.restaurantId || req.body.resId;
 
-  if (!items || items.length === 0) {
+  // 1. STRICT VALIDATION: Prevent Mongoose CastErrors instantly
+  if (!payloadResId || !mongoose.Types.ObjectId.isValid(payloadResId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid or missing Restaurant ID. Your cart data may be corrupted. Please clear your cart and try again.'
+    });
+  }
+
+  if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ success: false, message: 'Cart is empty' });
+  }
+
+  // 2. ITEM SANITIZATION: Ensure no "undefined" menu items slipped through
+  const hasCorruptedItems = items.some(it => !it.menuItem || !mongoose.Types.ObjectId.isValid(it.menuItem));
+  if (hasCorruptedItems) {
+    return res.status(400).json({
+      success: false,
+      message: 'Corrupted items detected in your cart. Please clear your cart and try again.'
+    });
   }
 
   try {
@@ -118,14 +137,11 @@ const createOrder = asyncHandler(async (req, res) => {
 
     const restaurant = await Restaurant.findById(restaurantId).select('name');
 
-// Inside createOrder, change the Order.create block:
-
     const order = await Order.create({
       user:            req.user._id, 
       restaurant:      restaurantId,
       restaurantName:  restaurant ? restaurant.name : 'Unknown',
       
-      // ADD THESE TWO LINES:
       customerName:    req.user.name,
       customerPhone:   req.user.phone,
 
@@ -137,7 +153,6 @@ const createOrder = asyncHandler(async (req, res) => {
       total:           calculatedTotal,
     });
 
-
     const deliveryOtp = order._plainDeliveryOtp;
     order.clearOtpSecrets();
     await order.populate(ORDER_POPULATE_PATHS);
@@ -147,6 +162,61 @@ const createOrder = asyncHandler(async (req, res) => {
       data: withLiveDisplayData(order),
       deliveryOtp,
     });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+const createGuestOrder = asyncHandler(async (req, res) => {
+  const { items, deliveryAddress } = req.body;
+  const payloadResId = req.body.restaurant || req.body.restaurantId || req.body.resId;
+
+  // 1. STRICT VALIDATION FOR GUESTS
+  if (!payloadResId || !mongoose.Types.ObjectId.isValid(payloadResId)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid or missing Restaurant ID. Your cart data may be corrupted. Please clear your cart and try again.'
+    });
+  }
+
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ success: false, message: 'Cart is empty' });
+  }
+
+  const hasCorruptedItems = items.some(it => !it.menuItem || !mongoose.Types.ObjectId.isValid(it.menuItem));
+  if (hasCorruptedItems) {
+    return res.status(400).json({
+      success: false,
+      message: 'Corrupted items detected in your cart. Please clear your cart and try again.'
+    });
+  }
+
+  try {
+    const { items: enrichedItems, subtotal, restaurantId } = await buildOrderItemsAndCalculate(items);
+
+    const deliveryFee = 40;
+    const platformFee = 5;
+    const calculatedTotal = subtotal + deliveryFee + platformFee;
+
+    const restaurant = await Restaurant.findById(restaurantId).select('name');
+
+    const order = await Order.create({
+      user: '000000000000000000000000', 
+      restaurant: restaurantId,
+      restaurantName: restaurant ? restaurant.name : 'Unknown',
+      items: enrichedItems,
+      deliveryAddress: deliveryAddress,
+      subtotal: subtotal,
+      deliveryFee: deliveryFee,
+      platformFee: platformFee,
+      total: calculatedTotal,
+    });
+
+    const deliveryOtp = order._plainDeliveryOtp;
+    order.clearOtpSecrets();
+    await order.populate(ORDER_POPULATE_PATHS);
+
+    res.status(201).json({ success: true, data: withLiveDisplayData(order), deliveryOtp });
   } catch (error) {
     return res.status(400).json({ success: false, message: error.message });
   }
