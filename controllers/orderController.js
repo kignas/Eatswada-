@@ -390,29 +390,6 @@ const getAllOrders = asyncHandler(async (req, res) => {
   });
 });
 
-const createGuestOrder = asyncHandler(async (req, res) => {
-  const { items, deliveryAddress } = req.body;
-
-  try {
-    const { items: enrichedItems, subtotal, restaurantId } = await buildOrderItemsAndCalculate(items);
-
-    const deliveryFee = 40;
-    const platformFee = 5;
-    const calculatedTotal = subtotal + deliveryFee + platformFee;
-
-    const restaurant = await Restaurant.findById(restaurantId).select('name');
-
-    const order = await Order.create({
-      user: '000000000000000000000000', 
-      restaurant: restaurantId,
-      restaurantName: restaurant ? restaurant.name : 'Unknown',
-      items: enrichedItems,
-      deliveryAddress: deliveryAddress,
-      subtotal: subtotal,
-      deliveryFee: deliveryFee,
-      platformFee: platformFee,
-      total: calculatedTotal,
-    });
 
     const deliveryOtp = order._plainDeliveryOtp;
     order.clearOtpSecrets();
