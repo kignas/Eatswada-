@@ -56,7 +56,11 @@ async function buildOrderItemsAndCalculate(rawItems) {
     .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
 
   const menus = menuIds.length
-    ? await Menu.find({ _id: { $in: menuIds } }).select('name price image isVeg restaurant')
+    // 🔧 FIX: Menu schema's field is `restaurantId`, not `restaurant` (see Menu.js).
+    // Selecting/reading the wrong name meant this was always undefined, which
+    // turned into the literal string "undefined" below and crashed
+    // Restaurant.findById() with a CastError on every single order.
+    ? await Menu.find({ _id: { $in: menuIds } }).select('name price image isVeg restaurantId')
     : [];
 
   if (menus.length === 0) {
@@ -64,7 +68,7 @@ async function buildOrderItemsAndCalculate(rawItems) {
   }
 
   // Security Check: Ensure all items belong to the same restaurant
-  const restaurantIds = new Set(menus.map(m => String(m.restaurant)));
+  const restaurantIds = new Set(menus.map(m => String(m.restaurantId)));
   if (restaurantIds.size > 1) {
     throw new Error('Cart contains items from multiple restaurants. Please clear your cart.');
   }
@@ -388,17 +392,6 @@ const getAllOrders = asyncHandler(async (req, res) => {
     total,
     data: orders.map(withLiveDisplayData),
   });
-});
-
-
-    const deliveryOtp = order._plainDeliveryOtp;
-    order.clearOtpSecrets();
-    await order.populate(ORDER_POPULATE_PATHS);
-
-    res.status(201).json({ success: true, data: withLiveDisplayData(order), deliveryOtp });
-  } catch (error) {
-    return res.status(400).json({ success: false, message: error.message });
-  }
 });
 
 const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
