@@ -39,12 +39,18 @@ app.set("trust proxy", 1);
 app.use(compression());
 app.use(helmet());
 
-// 🚨 UPDATED CORS CONFIGURATION FOR VERCEL 🚨
+// 🚨 UPDATED CORS CONFIGURATION FOR VERCEL + GITHUB PAGES 🚨
 app.use(cors({
   origin: [
     'http://localhost:5500', 
     'http://127.0.0.1:5500', 
-    'https://nearbite-three.vercel.app' // Your live frontend URL!
+    'https://nearbite-three.vercel.app', // Your live customer frontend URL!
+    // 🔧 FIX: Vendor, Rider, and CEO portals are hosted on GitHub Pages at
+    // kignas.github.io/Vendor, /Rider, /Ceo. That origin was missing here,
+    // so the browser blocked every request from all three portals before
+    // it ever reached the server — surfacing as "Can't reach the server"
+    // on every login page, even when the backend was up.
+    'https://kignas.github.io'
   ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
