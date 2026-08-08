@@ -58,6 +58,13 @@ const orderSchema = new mongoose.Schema(
     restaurantName: { type: String, required: true },
     restaurantImage: { type: String, default: '' },
 
+    // Customer contact snapshot. These are captured at order creation so
+    // historical orders still have the customer's name/phone even if the
+    // profile changes later. Populated `user` remains the source for older
+    // orders that were created before these fields existed.
+    customerName:  { type: String, default: '' },
+    customerPhone: { type: String, default: '' },
+
     items: [orderItemSchema],
 
     // Address snapshot (do NOT ref — address can be deleted later)
