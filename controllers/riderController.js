@@ -1,62 +1,54 @@
-// File 3: controllers/riderController.js
 'use strict';
 
 const asyncHandler = require('express-async-handler');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { uploadToCloudinary } = require('../utils/riderUpload');
-const { handleReassignment } = require('../services/riderAssignmentService');
 
+/* ── Rider-owned delivery status flow ──
+ * unassigned -> assigned -> accepted -> reached_restaurant -> picked_up -> out_for_delivery -> delivered
+ * 'unassigned' / 'assigned' are set by the system (order creation / admin
+ * assignment — see orderController.assignRider). Everything from 'accepted'
+ * onward is driven by the rider, one step at a time, via
+ * updateAssignedOrderStatus below.
+ *
+ * Once riderStatus/order.status reach 'out_for_delivery', the rider must
+ * call verifyDeliveryOtp (below) with the code the customer received at
+ * checkout before 'delivered' will be accepted — see the OTP gate inside
+ * updateAssignedOrderStatus. A successful verification moves order.status
+ * (not riderStatus) to 'otp_verified' and sets order.deliveryOtpVerified.
+ */
 const RIDER_STATUS_FLOW = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'];
 const ACTIVE_RIDER_STATUSES = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery'];
 const STATUS_LABELS = {
   accepted: 'Accepted',
-  rejected: 'Rejected',
   reached_restaurant: 'Reached Restaurant',
   picked_up: 'Picked Up',
   out_for_delivery: 'Out for Delivery',
   delivered: 'Delivered',
 };
 
-const RIDER_ORDER_POPULATE = [
+// Customer + restaurant owner contact details are populated for rider screens.
+// The delivery address remains the order snapshot so it cannot change after checkout.
+const RIDER_CONTACT_POPULATE = [
   { path: 'user', select: 'name phone' },
   {
     path: 'restaurant',
     select: 'name address owner',
-    populate: { path: 'owner', select: 'name phone' },
+    populate: {
+      path: 'owner',
+      select: 'name phone',
+    },
   },
 ];
 
-function serializeRiderOrder(orderDoc) {
-  if (!orderDoc) return null;
-  const order = orderDoc.toObject({ virtuals: false });
-  const customer = order.user && typeof order.user === 'object' ? order.user : null;
-  const restaurant = order.restaurant && typeof order.restaurant === 'object' ? order.restaurant : null;
-  const owner = restaurant?.owner && typeof restaurant.owner === 'object' ? restaurant.owner : null;
-
-  order.customerName = order.customerName || customer?.name || 'Customer';
-  order.customerPhone = order.customerPhone || customer?.phone || '';
-  order.customer = { _id: customer?._id || order.user, name: order.customerName, phone: order.customerPhone };
-
-  order.restaurantName = order.restaurantName || restaurant?.name || 'Restaurant';
-  order.restaurantAddress = restaurant?.address || '';
-  // The restaurant owner's verified account phone is the restaurant contact.
-  order.restaurantPhone = owner?.phone || restaurant?.phone || restaurant?.contactNumber || '';
-  order.restaurantOwnerName = owner?.name || '';
-
-  return order;
-}
-
-async function populateRiderOrder(order) {
-  if (!order) return null;
-  await order.populate(RIDER_ORDER_POPULATE);
-  return order;
-}
-
+/* GET /api/riders/profile */
 exports.getMyProfile = asyncHandler(async (req, res) => {
+  // req.user is already the full, password-stripped User doc (set by `protect`).
   res.json({ success: true, data: req.user });
 });
 
+/* PUT /api/riders/profile */
 exports.updateMyProfile = asyncHandler(async (req, res) => {
   const rider = await User.findById(req.user._id);
   const { name, vehicleType, vehicleNumber, deliveryZone } = req.body;
@@ -90,6 +82,7 @@ exports.updateMyProfile = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Profile updated.', data: rider });
 });
 
+/* PUT /api/riders/profile/photo — multipart/form-data, field name "photo" */
 exports.updateMyPhoto = asyncHandler(async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, message: 'No image file provided (field name: "photo").' });
@@ -104,31 +97,21 @@ exports.updateMyPhoto = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Profile picture updated.', data: { avatar: rider.avatar } });
 });
 
+/* PUT /api/riders/status — online/offline toggle.
+ * Body { isOnline: true|false } sets it explicitly; an empty body flips it. */
 exports.toggleOnline = asyncHandler(async (req, res) => {
   const rider = await User.findById(req.user._id);
   rider.riderDetails = rider.riderDetails || {};
 
-  const wasOnline = rider.riderDetails.isOnline;
   rider.riderDetails.isOnline =
-    typeof req.body.isOnline === 'boolean' ? req.body.isOnline : !wasOnline;
+    typeof req.body.isOnline === 'boolean' ? req.body.isOnline : !rider.riderDetails.isOnline;
 
   await rider.save();
-
-  // If the rider actively went offline, release any of their assigned tasks before pickup
-  if (wasOnline && !rider.riderDetails.isOnline) {
-    const activeOrders = await Order.find({ 
-      rider: rider._id, 
-      riderStatus: { $in: ['assigned', 'accepted', 'reached_restaurant'] } 
-    });
-    
-    for (const activeOrder of activeOrders) {
-      await handleReassignment(activeOrder._id, rider._id, `Auto-released: Rider ${rider.name} went offline.`);
-    }
-  }
-
   res.json({ success: true, data: { isOnline: rider.riderDetails.isOnline } });
 });
 
+/* GET /api/riders/orders — every order ever assigned to this rider.
+ * Optional ?status=accepted|reached_restaurant|... filter. */
 exports.getAssignedOrders = asyncHandler(async (req, res) => {
   const { status, page = 1, limit = 20 } = req.query;
   const filter = { rider: req.user._id };
@@ -136,22 +119,30 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
-    Order.find(filter).populate(RIDER_ORDER_POPULATE).sort({ riderAssignedAt: -1 }).skip(skip).limit(Number(limit)),
+    Order.find(filter)
+      .populate(RIDER_CONTACT_POPULATE)
+      .sort({ riderAssignedAt: -1 })
+      .skip(skip)
+      .limit(Number(limit)),
     Order.countDocuments(filter),
   ]);
 
-  res.json({ success: true, data: { orders: orders.map(serializeRiderOrder), total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
+  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
 });
 
+/* GET /api/riders/orders/active — the single in-progress order, if any. */
 exports.getActiveOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({
     rider: req.user._id,
     riderStatus: { $in: ACTIVE_RIDER_STATUSES },
-  }).populate(RIDER_ORDER_POPULATE).sort({ riderAssignedAt: -1 });
+  })
+    .populate(RIDER_CONTACT_POPULATE)
+    .sort({ riderAssignedAt: -1 });
 
-  res.json({ success: true, data: serializeRiderOrder(order) });
+  res.json({ success: true, data: order || null });
 });
 
+/* GET /api/riders/orders/history — delivered or cancelled orders for this rider. */
 exports.getOrderHistory = asyncHandler(async (req, res) => {
   const { page = 1, limit = 20 } = req.query;
   const filter = {
@@ -161,19 +152,26 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
-    Order.find(filter).populate(RIDER_ORDER_POPULATE).sort({ updatedAt: -1 }).skip(skip).limit(Number(limit)),
+    Order.find(filter)
+      .populate(RIDER_CONTACT_POPULATE)
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(Number(limit)),
     Order.countDocuments(filter),
   ]);
 
-  res.json({ success: true, data: { orders: orders.map(serializeRiderOrder), total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
+  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
 });
 
+/* GET /api/riders/orders/:id — single assigned order detail. */
 exports.getAssignedOrderById = asyncHandler(async (req, res) => {
-  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).populate(RIDER_ORDER_POPULATE);
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id })
+    .populate(RIDER_CONTACT_POPULATE);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
-  res.json({ success: true, data: serializeRiderOrder(order) });
+  res.json({ success: true, data: order });
 });
 
+/* GET /api/riders/earnings — earnings summary (all time / today / week / month). */
 exports.getEarningsSummary = asyncHandler(async (req, res) => {
   const riderId = req.user._id;
   const now = new Date();
@@ -201,9 +199,12 @@ exports.getEarningsSummary = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { allTime, today, thisWeek, thisMonth } });
 });
 
+/* PUT /api/riders/orders/:id/status
+ * Advances the rider-owned delivery status by exactly one step.
+ * Body: { status: 'accepted'|'reached_restaurant'|'picked_up'|'out_for_delivery'|'delivered', note?: string } */
 exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   const { status, note } = req.body;
-  const validRiderStatuses = ['accepted', 'rejected', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'];
+  const validRiderStatuses = ['accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'];
 
   if (!validRiderStatuses.includes(status)) {
     return res.status(400).json({
@@ -212,20 +213,8 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  if (status === 'rejected') {
-    const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
-    
-    const NO_REASSIGN_STATUSES = ['picked_up', 'out_for_delivery', 'delivered'];
-    if (NO_REASSIGN_STATUSES.includes(order.riderStatus)) {
-      return res.status(409).json({ success: false, message: 'Cannot reject an order after it has been picked up.' });
-    }
-
-    const result = await handleReassignment(order._id, req.user._id, `Rejected by rider (${req.user.name}). Note: ${note || ''}`);
-    return res.json({ success: true, message: 'Order rejected successfully.', data: result });
-  }
-
-  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id })
+    .populate(RIDER_CONTACT_POPULATE);
   if (!order) {
     return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   }
@@ -234,6 +223,10 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
   }
 
+  // ── DELIVERY OTP GATE ──────────────────────────────────────
+  // Requirement: delivery cannot be completed until the customer's OTP
+  // has been verified. See verifyDeliveryOtp below, which sets this flag
+  // once the rider confirms the code with the customer.
   if (status === 'delivered' && !order.deliveryOtpVerified) {
     return res.status(409).json({
       success: false,
@@ -241,6 +234,15 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     });
   }
 
+  // ── STRICT ORDER-STATUS TRANSITION VALIDATION ─────────────────
+  // riderStatus itself is already gated one step at a time by
+  // RIDER_STATUS_FLOW below. This additionally guards the order-level
+  // side effect that 'accepted' triggers (order.status -> 'assigned'):
+  // a rider can only accept once the vendor has actually pushed the
+  // order to 'waiting_for_rider' (see orderController.updateOrderStatus).
+  // Without this, an order manually assigned via PUT
+  // /api/orders/:id/assign-rider before that point could let order.status
+  // skip straight from e.g. 'preparing' to 'assigned'.
   if (status === 'accepted' && order.status !== 'waiting_for_rider') {
     return res.status(409).json({
       success: false,
@@ -266,18 +268,29 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   order.riderStatusHistory = order.riderStatusHistory || [];
   order.riderStatusHistory.push({ status, note: note || '', at: new Date() });
 
+  // FIX: Using advanceStatus ensures deliveredAt is set so the vendor active tab clears it
   if (status === 'accepted') {
+    // Rider has accepted the job — order leaves 'waiting_for_rider' and
+    // moves to 'assigned' at the order level. riderStatus itself still
+    // records the finer-grained 'accepted' step below.
     order.advanceStatus('assigned', `Accepted by rider (${req.user.name})`);
   } else if (status === 'out_for_delivery' || status === 'delivered') {
     order.advanceStatus(status, `Updated by rider (${req.user.name})`);
   }
 
   await order.save();
-  await populateRiderOrder(order);
 
-  res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: serializeRiderOrder(order) });
+  res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: order });
 });
 
+/* PUT /api/riders/orders/:id/verify-otp
+ * Body: { otp: '1234' }
+ *
+ * Verifies the customer's delivery OTP. Required before a rider can mark
+ * an order 'delivered' (see the OTP gate inside updateAssignedOrderStatus
+ * above). Only allowed while the order is 'out_for_delivery'. Enforces a
+ * per-order failed-attempt limit and temporary lockout — see
+ * Order.OTP_CONFIG (currently 5 attempts / 15-minute lockout). */
 exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
   const { otp } = req.body;
 
@@ -285,6 +298,8 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'A 4-digit OTP is required.' });
   }
 
+  // deliveryOtp* fields are `select: false` on the model — explicitly
+  // request them here since verifyDeliveryOtp() needs to read/mutate them.
   const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).select(
     '+deliveryOtpHash +deliveryOtpSalt +deliveryOtpExpiresAt +deliveryOtpAttempts +deliveryOtpLockedUntil'
   );
@@ -292,12 +307,6 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
   if (!order) {
     return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   }
-
-  // TEMP DEBUG — remove once the "Incorrect PIN" issue is confirmed fixed
-  console.log('Order:', order._id);
-  console.log('Received OTP:', otp);
-  console.log('Has Hash:', !!order.deliveryOtpHash);
-  console.log('Has Salt:', !!order.deliveryOtpSalt);
 
   if (order.status === 'cancelled') {
     return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
@@ -308,6 +317,8 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
     return res.json({ success: true, message: 'OTP already verified.', data: order });
   }
 
+  // Requirement: OTP verification is only allowed while the order is
+  // 'out_for_delivery'.
   if (order.status !== 'out_for_delivery') {
     return res.status(409).json({
       success: false,
@@ -317,11 +328,8 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
 
   const result = await order.verifyDeliveryOtp(String(otp).trim());
 
-  // TEMP DEBUG — remove once the "Incorrect PIN" issue is confirmed fixed
-  console.log('Verification Result:', result);
-
   if (!result.ok) {
-    await order.save(); 
+    await order.save(); // persist the updated attempt count / lockout
 
     if (result.reason === 'locked' || result.reason === 'locked_now') {
       const secondsLeft = Math.max(0, Math.ceil((result.lockedUntil - new Date()) / 1000));
@@ -343,7 +351,7 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
         message: 'No delivery OTP is set for this order. Please contact support.',
       });
     }
-    
+    // 'mismatch'
     return res.status(400).json({
       success: false,
       message: `Incorrect OTP. ${result.attemptsRemaining} attempt(s) remaining before a temporary lockout.`,
@@ -351,10 +359,13 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
     });
   }
 
+  // Success — moves order.status from 'out_for_delivery' to 'otp_verified'.
+  // riderStatus is untouched here; the rider's next call is still
+  // PUT /orders/:id/status { status: 'delivered' }, which the OTP gate
+  // above will now allow.
   order.advanceStatus('otp_verified', `Delivery OTP verified by rider (${req.user.name})`);
   await order.save();
-  await populateRiderOrder(order);
 
   order.clearOtpSecrets();
-  res.json({ success: true, message: 'OTP verified — you can now complete the delivery.', data: serializeRiderOrder(order) });
+  res.json({ success: true, message: 'OTP verified — you can now complete the delivery.', data: order });
 });
