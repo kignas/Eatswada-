@@ -12,9 +12,13 @@ const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssi
 
 // To this:
 const ORDER_POPULATE_PATHS = [
-  { path: 'restaurant', select: 'name image phone contactNumber' }, // Added phone fields
+  {
+    path: 'restaurant',
+    select: 'name image address owner',
+    populate: { path: 'owner', select: 'name phone' },
+  },
   { path: 'items.menuItem', select: 'image' },
-  { path: 'user', select: 'name phone' } // Added customer profile
+  { path: 'user', select: 'name phone' },
 ];
 
 
@@ -24,7 +28,23 @@ function withLiveDisplayData(orderDoc) {
   if (order.restaurant && typeof order.restaurant === 'object') {
     order.restaurantName = order.restaurant.name || order.restaurantName;
     order.restaurantImage = order.restaurant.image || order.restaurantImage;
-    order.restaurant = order.restaurant._id; 
+    order.restaurantAddress = order.restaurant.address || '';
+    order.restaurantPhone = order.restaurant.owner?.phone || order.restaurant.phone || order.restaurant.contactNumber || '';
+    order.restaurantOwnerName = order.restaurant.owner?.name || '';
+    order.restaurant = order.restaurant._id;
+  }
+
+  // New orders have snapshot fields; older orders fall back to the populated
+  // customer User document. This keeps the API backward compatible.
+  if (order.user && typeof order.user === 'object') {
+    order.customerName = order.customerName || order.user.name || '';
+    order.customerPhone = order.customerPhone || order.user.phone || '';
+    order.customer = {
+      _id: order.user._id,
+      name: order.customerName,
+      phone: order.customerPhone,
+    };
+    order.user = order.user._id;
   }
 
   if (Array.isArray(order.items)) {

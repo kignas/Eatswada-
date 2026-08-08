@@ -18,6 +18,31 @@ function restaurantOwnershipFilter(req) {
   return { $or: [{ restaurant: req.user.restaurantId }, { restaurantId: req.user.restaurantId }] };
 }
 
+const VENDOR_ORDER_POPULATE = [
+  { path: 'user', select: 'name phone' },
+  {
+    path: 'restaurant',
+    select: 'name address owner',
+    populate: { path: 'owner', select: 'name phone' },
+  },
+];
+
+function serializeVendorOrder(orderDoc) {
+  const order = orderDoc.toObject({ virtuals: false });
+  const customer = order.user && typeof order.user === 'object' ? order.user : null;
+  const restaurant = order.restaurant && typeof order.restaurant === 'object' ? order.restaurant : null;
+  const owner = restaurant?.owner && typeof restaurant.owner === 'object' ? restaurant.owner : null;
+
+  order.customerName = order.customerName || customer?.name || 'Customer';
+  order.customerPhone = order.customerPhone || customer?.phone || '';
+  order.customer = { _id: customer?._id || order.user, name: order.customerName, phone: order.customerPhone };
+  order.restaurantAddress = restaurant?.address || '';
+  order.restaurantPhone = owner?.phone || restaurant?.phone || restaurant?.contactNumber || '';
+  order.restaurantOwnerName = owner?.name || '';
+
+  return order;
+}
+
 /* ─────────────────────────────────────────────────────────────
  *  ORDER STATUS GROUPS
  * ───────────────────────────────────────────────────────────── */
@@ -44,9 +69,11 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
   const orders = await Order.find({
     ...restaurantOwnershipFilter(req),
     ...statusFilter,
-  }).sort({ createdAt: -1 });
+  })
+    .populate(VENDOR_ORDER_POPULATE)
+    .sort({ createdAt: -1 });
 
-  res.status(200).json({ success: true, data: orders });
+  res.status(200).json({ success: true, data: orders.map(serializeVendorOrder) });
 });
 
 exports.acceptOrder = asyncHandler(async (req, res) => {

@@ -18,6 +18,41 @@ const STATUS_LABELS = {
   delivered: 'Delivered',
 };
 
+const RIDER_ORDER_POPULATE = [
+  { path: 'user', select: 'name phone' },
+  {
+    path: 'restaurant',
+    select: 'name address owner',
+    populate: { path: 'owner', select: 'name phone' },
+  },
+];
+
+function serializeRiderOrder(orderDoc) {
+  if (!orderDoc) return null;
+  const order = orderDoc.toObject({ virtuals: false });
+  const customer = order.user && typeof order.user === 'object' ? order.user : null;
+  const restaurant = order.restaurant && typeof order.restaurant === 'object' ? order.restaurant : null;
+  const owner = restaurant?.owner && typeof restaurant.owner === 'object' ? restaurant.owner : null;
+
+  order.customerName = order.customerName || customer?.name || 'Customer';
+  order.customerPhone = order.customerPhone || customer?.phone || '';
+  order.customer = { _id: customer?._id || order.user, name: order.customerName, phone: order.customerPhone };
+
+  order.restaurantName = order.restaurantName || restaurant?.name || 'Restaurant';
+  order.restaurantAddress = restaurant?.address || '';
+  // The restaurant owner's verified account phone is the restaurant contact.
+  order.restaurantPhone = owner?.phone || restaurant?.phone || restaurant?.contactNumber || '';
+  order.restaurantOwnerName = owner?.name || '';
+
+  return order;
+}
+
+async function populateRiderOrder(order) {
+  if (!order) return null;
+  await order.populate(RIDER_ORDER_POPULATE);
+  return order;
+}
+
 exports.getMyProfile = asyncHandler(async (req, res) => {
   res.json({ success: true, data: req.user });
 });
@@ -101,20 +136,20 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
-    Order.find(filter).sort({ riderAssignedAt: -1 }).skip(skip).limit(Number(limit)),
+    Order.find(filter).populate(RIDER_ORDER_POPULATE).sort({ riderAssignedAt: -1 }).skip(skip).limit(Number(limit)),
     Order.countDocuments(filter),
   ]);
 
-  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
+  res.json({ success: true, data: { orders: orders.map(serializeRiderOrder), total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
 });
 
 exports.getActiveOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({
     rider: req.user._id,
     riderStatus: { $in: ACTIVE_RIDER_STATUSES },
-  }).sort({ riderAssignedAt: -1 });
+  }).populate(RIDER_ORDER_POPULATE).sort({ riderAssignedAt: -1 });
 
-  res.json({ success: true, data: order || null });
+  res.json({ success: true, data: serializeRiderOrder(order) });
 });
 
 exports.getOrderHistory = asyncHandler(async (req, res) => {
@@ -126,17 +161,17 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
-    Order.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(Number(limit)),
+    Order.find(filter).populate(RIDER_ORDER_POPULATE).sort({ updatedAt: -1 }).skip(skip).limit(Number(limit)),
     Order.countDocuments(filter),
   ]);
 
-  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
+  res.json({ success: true, data: { orders: orders.map(serializeRiderOrder), total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
 });
 
 exports.getAssignedOrderById = asyncHandler(async (req, res) => {
-  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).populate(RIDER_ORDER_POPULATE);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
-  res.json({ success: true, data: order });
+  res.json({ success: true, data: serializeRiderOrder(order) });
 });
 
 exports.getEarningsSummary = asyncHandler(async (req, res) => {
@@ -238,8 +273,9 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   }
 
   await order.save();
+  await populateRiderOrder(order);
 
-  res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: order });
+  res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: serializeRiderOrder(order) });
 });
 
 exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
@@ -317,7 +353,8 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
 
   order.advanceStatus('otp_verified', `Delivery OTP verified by rider (${req.user.name})`);
   await order.save();
+  await populateRiderOrder(order);
 
   order.clearOtpSecrets();
-  res.json({ success: true, message: 'OTP verified — you can now complete the delivery.', data: order });
+  res.json({ success: true, message: 'OTP verified — you can now complete the delivery.', data: serializeRiderOrder(order) });
 });
