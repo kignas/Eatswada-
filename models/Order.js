@@ -75,25 +75,25 @@ const orderSchema = new mongoose.Schema(
       landmark: String,
       city:     String,
       pincode:  String,
-      // Snapshot of the exact customer pin used for this order.
-      location: {
-        type: {
-          type: String,
-          enum: ['Point'],
-        },
-        coordinates: {
-          type: [Number],
-        },
+      // GeoJSON coordinates snapshot: [longitude, latitude].
+      // Stored with the order so later address edits cannot change the
+      // distance/fee of an already-created order.
+      coordinates: {
+        type: [Number],
+        default: undefined,
       },
     },
 
-    // Server-calculated delivery distance and fee. These are snapshots so
-    // changing a customer's saved address later cannot change an old order.
-    deliveryDistanceKm: { type: Number, default: 0, min: 0 },
-    deliveryFee: { type: Number, default: 40, min: 0 },
+    // Server-calculated delivery distance at order creation.
+    deliveryDistanceKm: {
+      type: Number,
+      default: null,
+      min: 0,
+    },
 
-    // Pricing (matches cart.html bill summary)
+    // Pricing — all values are calculated server-side at order creation.
     subtotal:    { type: Number, required: true },
+    deliveryFee: { type: Number, default: 30, min: 0 },
     platformFee: { type: Number, default: 5 },
     discount:    { type: Number, default: 0 },
     total:       { type: Number, required: true },
@@ -194,6 +194,8 @@ const orderSchema = new mongoose.Schema(
 
 // Rider integration compound index
 orderSchema.index({ rider: 1, riderStatus: 1 });
+orderSchema.index({ user: 1, createdAt: -1 });
+orderSchema.index({ restaurant: 1, status: 1 });
 
 /* ── Pre-save: generate order number ── */
 orderSchema.pre('save', function (next) {

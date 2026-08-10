@@ -45,25 +45,14 @@ const addressSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    // Google Maps / device-selected location.
-    // GeoJSON coordinates are always [longitude, latitude].
+    // GeoJSON point for future distance-based queries
     location: {
       type: {
         type: String,
         enum: ['Point'],
-        default: 'Point',
       },
       coordinates: {
-        type: [Number],
-        validate: {
-          validator: function (value) {
-            if (!Array.isArray(value) || value.length !== 2) return false;
-            const [lng, lat] = value.map(Number);
-            return Number.isFinite(lng) && Number.isFinite(lat) &&
-              lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90;
-          },
-          message: 'Location must contain [longitude, latitude].',
-        },
+        type: [Number], // [longitude, latitude]
       },
     },
   },
