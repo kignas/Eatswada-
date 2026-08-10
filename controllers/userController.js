@@ -4,25 +4,6 @@ const generateToken = require('../utils/generateToken');
 const { sendOTP, generateOTPCode } = require('../utils/sendOTP');
 const asyncHandler  = require('express-async-handler');
 
-function normalizeLocation(location) {
-  if (!location) return undefined;
-  const coordinates = Array.isArray(location.coordinates)
-    ? location.coordinates.map(Number)
-    : null;
-
-  if (!coordinates || coordinates.length !== 2 ||
-      !coordinates.every(Number.isFinite)) {
-    throw new Error('Location must contain [longitude, latitude].');
-  }
-
-  const [lng, lat] = coordinates;
-  if (lng < -180 || lng > 180 || lat < -90 || lat > 90) {
-    throw new Error('Location coordinates are out of range.');
-  }
-
-  return { type: 'Point', coordinates: [lng, lat] };
-}
-
 const sendOTPHandler = asyncHandler(async (req, res) => {
   const { phone } = req.body;
   const otp = generateOTPCode();
@@ -97,62 +78,53 @@ const getAddresses = asyncHandler(async (req, res) => {
 });
 
 const addAddress = asyncHandler(async (req, res) => {
-  const { tag, house, area, landmark, city, pincode, isDefault, location } = req.body;
+  const { tag, house, area, landmark, city, pincode, isDefault, latitude, longitude, coordinates } = req.body;
 
-  let normalizedLocation;
-  try {
-    normalizedLocation = normalizeLocation(location);
-  } catch (error) {
-    return res.status(400).json({ success: false, message: error.message });
+  let geoCoordinates = null;
+  if (Array.isArray(coordinates) && coordinates.length === 2) {
+    geoCoordinates = [Number(coordinates[0]), Number(coordinates[1])];
+  } else if (Number.isFinite(Number(longitude)) && Number.isFinite(Number(latitude))) {
+    geoCoordinates = [Number(longitude), Number(latitude)];
   }
-
-  if (isDefault) {
-    await Address.updateMany({ user: req.user._id }, { isDefault: false });
+  if (!geoCoordinates || !Number.isFinite(geoCoordinates[0]) || !Number.isFinite(geoCoordinates[1]) ||
+      geoCoordinates[0] < -180 || geoCoordinates[0] > 180 || geoCoordinates[1] < -90 || geoCoordinates[1] > 90) {
+    return res.status(400).json({ success: false, message: 'A valid Google Maps/GPS location is required.' });
   }
-
+  if (isDefault) await Address.updateMany({ user: req.user._id }, { isDefault: false });
   const address = await Address.create({
-    user: req.user._id,
-    tag,
-    house,
-    area,
-    landmark,
-    city,
-    pincode,
-    location: normalizedLocation,
+    user: req.user._id, tag, house, area, landmark, city, pincode,
+    location: { type: 'Point', coordinates: geoCoordinates },
     isDefault: !!isDefault,
   });
-
   await User.findByIdAndUpdate(req.user._id, {
     $push: { addresses: address._id },
     ...(isDefault && { defaultAddress: address._id }),
   });
-
   res.status(201).json({ success: true, data: address });
 });
 
 const updateAddress = asyncHandler(async (req, res) => {
   const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
   if (!address) return res.status(404).json({ success: false, message: 'Address not found' });
+  const fields = ['tag','house','area','landmark','city','pincode'];
+  fields.forEach(f => { if (req.body[f] !== undefined) address[f] = req.body[f]; });
 
-  const fields = ['tag', 'house', 'area', 'landmark', 'city', 'pincode'];
-  fields.forEach(f => {
-    if (req.body[f] !== undefined) address[f] = req.body[f];
-  });
+  if (req.body.coordinates !== undefined || req.body.latitude !== undefined || req.body.longitude !== undefined) {
+    let coords = Array.isArray(req.body.coordinates)
+      ? [Number(req.body.coordinates[0]), Number(req.body.coordinates[1])]
+      : [Number(req.body.longitude), Number(req.body.latitude)];
 
-  if (req.body.location !== undefined) {
-    try {
-      address.location = normalizeLocation(req.body.location);
-    } catch (error) {
-      return res.status(400).json({ success: false, message: error.message });
+    if (!Number.isFinite(coords[0]) || !Number.isFinite(coords[1]) ||
+        coords[0] < -180 || coords[0] > 180 || coords[1] < -90 || coords[1] > 90) {
+      return res.status(400).json({ success: false, message: 'A valid Google Maps/GPS location is required.' });
     }
+    address.location = { type: 'Point', coordinates: coords };
   }
-
-  if (req.body.isDefault === true) {
+  if (req.body.isDefault) {
     await Address.updateMany({ user: req.user._id }, { isDefault: false });
     address.isDefault = true;
     await User.findByIdAndUpdate(req.user._id, { defaultAddress: address._id });
   }
-
   await address.save();
   res.json({ success: true, data: address });
 });

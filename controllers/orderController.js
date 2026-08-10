@@ -1,12 +1,13 @@
 // File 2: controllers/orderController.js
+const mongoose    = require('mongoose');
 const Order      = require('../models/Order');
 const Cart       = require('../models/Cart');
 const Address    = require('../models/Address');
 const Restaurant = require('../models/Restaurant');
+const Menu       = require('../models/Menu');
 const User       = require('../models/User');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
-const { calculateDistanceKm, getDeliveryFee } = require('../utils/deliveryPricing');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -68,127 +69,287 @@ function withLiveDisplayData(orderDoc) {
   return order;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────
+// Server-authoritative delivery + order pricing
+// Maynaguri launch rule:
+//   < 10 km   => ₹30
+//   10–15 km  => ₹40
+//   > 15 km   => ₹50
+// The browser may display an estimate, but these values are calculated
+// again here from database data and customer coordinates.
+// ─────────────────────────────────────────────────────────────────────
+const DELIVERY_RULES = Object.freeze({
+  UNDER_10_KM: 30,
+  FROM_10_TO_15_KM: 40,
+  ABOVE_15_KM: 50,
+});
+
+const PLATFORM_FEE = 5;
+const MAX_DELIVERY_RADIUS_KM = 15;
+
+function validCoordinates(coords) {
+  return Array.isArray(coords) &&
+    coords.length === 2 &&
+    Number.isFinite(Number(coords[0])) &&
+    Number.isFinite(Number(coords[1])) &&
+    Number(coords[0]) >= -180 && Number(coords[0]) <= 180 &&
+    Number(coords[1]) >= -90 && Number(coords[1]) <= 90;
+}
+
+function isPlaceholderRestaurantLocation(coords) {
+  // Restaurant.js currently has Kolkata as a legacy placeholder default.
+  // Nearbite launches in Maynaguri, so never use that placeholder for pricing.
+  return Array.isArray(coords) &&
+    Math.abs(Number(coords[0]) - 88.3832) < 0.000001 &&
+    Math.abs(Number(coords[1]) - 22.5726) < 0.000001;
+}
+
+function haversineKm(from, to) {
+  const [lon1, lat1] = from.map(Number);
+  const [lon2, lat2] = to.map(Number);
+  const toRad = value => value * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function calculateDeliveryFee(distanceKm) {
+  if (distanceKm < 10) return DELIVERY_RULES.UNDER_10_KM;
+  if (distanceKm <= 15) return DELIVERY_RULES.FROM_10_TO_15_KM;
+  return DELIVERY_RULES.ABOVE_15_KM;
+}
+
+function normalizeCustomerCoordinates(deliveryAddress) {
+  if (!deliveryAddress || typeof deliveryAddress !== 'object') return null;
+
+  if (validCoordinates(deliveryAddress.coordinates)) {
+    return [Number(deliveryAddress.coordinates[0]), Number(deliveryAddress.coordinates[1])];
+  }
+
+  // Support the address.html version currently saving latitude/longitude.
+  if (Number.isFinite(Number(deliveryAddress.longitude)) &&
+      Number.isFinite(Number(deliveryAddress.latitude))) {
+    return [Number(deliveryAddress.longitude), Number(deliveryAddress.latitude)];
+  }
+
+  // Also accept a nested GeoJSON-style location from future address UI.
+  if (deliveryAddress.location && validCoordinates(deliveryAddress.location.coordinates)) {
+    return [
+      Number(deliveryAddress.location.coordinates[0]),
+      Number(deliveryAddress.location.coordinates[1]),
+    ];
+  }
+
+  return null;
+}
+
+function normalizeCustomizationSelection(selection) {
+  if (!selection || typeof selection !== 'object') return [];
+  const values = Array.isArray(selection)
+    ? selection
+    : Object.values(selection);
+  return values.map(value => {
+    if (typeof value === 'string') return value;
+    return value?.label || value?.value || value?.name || '';
+  }).filter(Boolean);
+}
+
+function calculateItemServerPrice(menuItem, requestedCustomizations) {
+  let price = Number(menuItem.price);
+
+  // Only add customization prices that actually exist on the Menu document.
+  // This prevents a client from inventing an extraPrice.
+  const selectedLabels = new Set(normalizeCustomizationSelection(requestedCustomizations));
+
+  if (selectedLabels.size && Array.isArray(menuItem.customizations)) {
+    for (const group of menuItem.customizations) {
+      for (const option of (group.options || [])) {
+        if (selectedLabels.has(option.label)) {
+          price += Number(option.extraPrice || 0);
+        }
+      }
+    }
+  }
+
+  return price;
+}
+
+async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress }) {
+  if (!Array.isArray(items) || items.length === 0) {
+    const error = new Error('Cart is empty');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
+    const error = new Error('Invalid restaurant');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const restaurant = await Restaurant.findOne({
+    _id: restaurantId,
+    isActive: true,
+  }).select('name image owner location availability isOpen platformFee');
+
+  if (!restaurant) {
+    const error = new Error('Restaurant not found or unavailable');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const restaurantCoords = restaurant.location?.coordinates;
+  if (!validCoordinates(restaurantCoords) || isPlaceholderRestaurantLocation(restaurantCoords)) {
+    const error = new Error(
+      'This restaurant does not have a verified map location yet. Please try another restaurant.'
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const customerCoords = normalizeCustomerCoordinates(deliveryAddress);
+  if (!customerCoords) {
+    const error = new Error(
+      'Please select your delivery location using GPS/Google Maps before placing the order.'
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const distanceKm = haversineKm(restaurantCoords, customerCoords);
+
+  // This launch is explicitly limited to a 15 km delivery radius.
+  if (distanceKm > MAX_DELIVERY_RADIUS_KM) {
+    const error = new Error(
+      `This address is ${distanceKm.toFixed(1)} km away. Nearbite currently delivers only within 15 km.`
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const menuIds = items.map(item => item?.menuItem || item?.menuId || item?.id || item?._id);
+  if (menuIds.some(id => !mongoose.Types.ObjectId.isValid(id))) {
+    const error = new Error('One or more cart items are invalid or outdated. Please refresh your cart.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const uniqueIds = [...new Set(menuIds.map(String))];
+  const menuDocs = await Menu.find({
+    _id: { $in: uniqueIds },
+    restaurantId: restaurant._id,
+  }).lean();
+
+  const menuMap = new Map(menuDocs.map(item => [String(item._id), item]));
+  const serverItems = [];
+  let subtotal = 0;
+
+  for (const requested of items) {
+    const rawId = requested?.menuItem || requested?.menuId || requested?.id || requested?._id;
+    const menuItem = menuMap.get(String(rawId));
+
+    if (!menuItem) {
+      const error = new Error('A cart item no longer belongs to this restaurant. Please refresh your cart.');
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (menuItem.inStock === false) {
+      const error = new Error(`${menuItem.name} is currently out of stock.`);
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const quantity = Number(requested.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+      const error = new Error(`Invalid quantity for ${menuItem.name}.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const unitPrice = calculateItemServerPrice(menuItem, requested.customizations);
+    const lineTotal = unitPrice * quantity;
+    subtotal += lineTotal;
+
+    serverItems.push({
+      menuItem: menuItem._id,
+      name: menuItem.name,
+      price: unitPrice,
+      image: menuItem.image || '',
+      isVeg: !!menuItem.isVeg,
+      quantity,
+      customizations: requested.customizations || {},
+    });
+  }
+
+  const deliveryFee = calculateDeliveryFee(distanceKm);
+  const platformFee = Number.isFinite(Number(restaurant.platformFee))
+    ? Number(restaurant.platformFee)
+    : PLATFORM_FEE;
+
+  const total = subtotal + deliveryFee + platformFee;
+
+  return {
+    restaurant,
+    serverItems,
+    subtotal,
+    deliveryFee,
+    platformFee,
+    total,
+    distanceKm: Number(distanceKm.toFixed(2)),
+    customerCoords,
+  };
+}
+
 const createOrder = asyncHandler(async (req, res) => {
   const {
     items,
     restaurantId,
-    restaurantName,
-    subtotal,
-    discount = 0,
-    addressId,
-    deliveryAddress: bodyAddress,
+    deliveryAddress,
+    paymentMethod = 'upi',
   } = req.body;
 
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ success: false, message: 'Cart is empty' });
-  }
+  const pricing = await buildAuthoritativeOrderPricing({
+    items,
+    restaurantId,
+    deliveryAddress,
+  });
 
-  if (!restaurantId) {
-    return res.status(400).json({ success: false, message: 'Restaurant is required' });
-  }
-
-  const [restaurant, user] = await Promise.all([
-    Restaurant.findById(restaurantId).select('name image owner location'),
-    User.findById(req.user._id).populate('defaultAddress'),
-  ]);
-
-  if (!restaurant) {
-    return res.status(404).json({ success: false, message: 'Restaurant not found' });
-  }
-
-  // Prefer an explicitly selected saved address; otherwise use the user's
-  // default address. A raw address object is accepted for compatibility with
-  // the existing checkout, but it must contain a Google Maps/device pin.
-  let selectedAddress = null;
-  if (addressId) {
-    selectedAddress = await Address.findOne({ _id: addressId, user: req.user._id });
-    if (!selectedAddress) {
-      return res.status(404).json({ success: false, message: 'Selected address not found' });
-    }
-  } else if (user?.defaultAddress) {
-    selectedAddress = user.defaultAddress;
-  }
-
-  const rawAddress = selectedAddress
-    ? selectedAddress.toObject()
-    : bodyAddress;
-
-  if (!rawAddress) {
-    return res.status(400).json({
-      success: false,
-      message: 'Delivery address is required. Please select or save an address first.',
-    });
-  }
-
-  const customerCoordinates =
-    rawAddress.location?.coordinates ||
-    (Array.isArray(rawAddress.coordinates) ? rawAddress.coordinates : null);
-
-  if (!Array.isArray(customerCoordinates) || customerCoordinates.length !== 2) {
-    return res.status(400).json({
-      success: false,
-      message: 'Please select your delivery location on Google Maps before ordering.',
-    });
-  }
-
-  const restaurantCoordinates = restaurant.location?.coordinates;
-  if (!Array.isArray(restaurantCoordinates) || restaurantCoordinates.length !== 2 ||
-      restaurantCoordinates.every(value => Number(value) === 0)) {
-    return res.status(409).json({
-      success: false,
-      message: 'This restaurant does not have a valid map location yet. Please contact support.',
-    });
-  }
-
-  let deliveryDistanceKm;
-  try {
-    deliveryDistanceKm = calculateDistanceKm(restaurantCoordinates, customerCoordinates);
-  } catch (error) {
-    return res.status(400).json({ success: false, message: error.message });
-  }
-
-  const deliveryFee = getDeliveryFee(deliveryDistanceKm);
-  const platformFee = 5;
-  const numericSubtotal = Number(subtotal);
-
-  if (!Number.isFinite(numericSubtotal) || numericSubtotal < 0) {
-    return res.status(400).json({ success: false, message: 'Invalid subtotal' });
-  }
-
-  const numericDiscount = Math.max(0, Number(discount) || 0);
-  const calculatedTotal = Math.max(
-    0,
-    numericSubtotal + deliveryFee + platformFee - numericDiscount
-  );
+  // Never trust client-provided restaurantName, item prices, subtotal,
+  // deliveryFee, platformFee, or total.
+  const customer = await User.findById(req.user._id).select('name phone').lean();
 
   const addressSnapshot = {
-    tag: rawAddress.tag || 'Home',
-    house: rawAddress.house || '',
-    area: rawAddress.area || '',
-    landmark: rawAddress.landmark || '',
-    city: rawAddress.city || '',
-    pincode: rawAddress.pincode || '',
-    location: {
-      type: 'Point',
-      coordinates: [Number(customerCoordinates[0]), Number(customerCoordinates[1])],
-    },
+    tag: deliveryAddress?.tag || 'Home',
+    house: deliveryAddress?.house || '',
+    area: deliveryAddress?.area || '',
+    landmark: deliveryAddress?.landmark || '',
+    city: deliveryAddress?.city || 'Maynaguri',
+    pincode: deliveryAddress?.pincode || '',
+    coordinates: pricing.customerCoords,
   };
 
   const order = await Order.create({
     user: req.user._id,
-    restaurant: restaurant._id,
-    restaurantName: restaurant.name || restaurantName || '',
-    restaurantImage: restaurant.image || '',
-    customerName: user?.name || '',
-    customerPhone: user?.phone || '',
-    items,
+    restaurant: pricing.restaurant._id,
+    restaurantName: pricing.restaurant.name,
+    restaurantImage: pricing.restaurant.image || '',
+    customerName: customer?.name || '',
+    customerPhone: customer?.phone || '',
+    items: pricing.serverItems,
     deliveryAddress: addressSnapshot,
-    deliveryDistanceKm: Number(deliveryDistanceKm.toFixed(2)),
-    subtotal: numericSubtotal,
-    deliveryFee,
-    platformFee,
-    discount: numericDiscount,
-    total: calculatedTotal,
+    deliveryDistanceKm: pricing.distanceKm,
+    subtotal: pricing.subtotal,
+    deliveryFee: pricing.deliveryFee,
+    platformFee: pricing.platformFee,
+    total: pricing.total,
+    paymentMethod,
+    paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
   });
 
   const deliveryOtp = order._plainDeliveryOtp;
@@ -197,7 +358,10 @@ const createOrder = asyncHandler(async (req, res) => {
 
   res.status(201).json({
     success: true,
-    data: withLiveDisplayData(order),
+    data: {
+      ...withLiveDisplayData(order),
+      deliveryDistanceKm: pricing.distanceKm,
+    },
     deliveryOtp,
   });
 });
@@ -359,23 +523,10 @@ const getAllOrders = asyncHandler(async (req, res) => {
 });
 
 const createGuestOrder = asyncHandler(async (req, res) => {
-  const { items, deliveryAddress, restaurantId, restaurantName, subtotal, total } = req.body;
-
-  const order = await Order.create({
-    user: '000000000000000000000000', 
-    restaurant: restaurantId,
-    restaurantName: restaurantName,
-    items: items,
-    deliveryAddress: deliveryAddress,
-    subtotal: subtotal,
-    total: total,
+  return res.status(410).json({
+    success: false,
+    message: 'Guest ordering is disabled. Please verify your phone number before placing an order.',
   });
-
-  const deliveryOtp = order._plainDeliveryOtp;
-  order.clearOtpSecrets();
-  await order.populate(ORDER_POPULATE_PATHS);
-
-  res.status(201).json({ success: true, data: withLiveDisplayData(order), deliveryOtp });
 });
 
 const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
