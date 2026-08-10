@@ -4,6 +4,25 @@ const generateToken = require('../utils/generateToken');
 const { sendOTP, generateOTPCode } = require('../utils/sendOTP');
 const asyncHandler  = require('express-async-handler');
 
+function normalizeLocation(location) {
+  if (!location) return undefined;
+  const coordinates = Array.isArray(location.coordinates)
+    ? location.coordinates.map(Number)
+    : null;
+
+  if (!coordinates || coordinates.length !== 2 ||
+      !coordinates.every(Number.isFinite)) {
+    throw new Error('Location must contain [longitude, latitude].');
+  }
+
+  const [lng, lat] = coordinates;
+  if (lng < -180 || lng > 180 || lat < -90 || lat > 90) {
+    throw new Error('Location coordinates are out of range.');
+  }
+
+  return { type: 'Point', coordinates: [lng, lat] };
+}
+
 const sendOTPHandler = asyncHandler(async (req, res) => {
   const { phone } = req.body;
   const otp = generateOTPCode();
@@ -78,29 +97,62 @@ const getAddresses = asyncHandler(async (req, res) => {
 });
 
 const addAddress = asyncHandler(async (req, res) => {
-  const { tag, house, area, landmark, city, pincode, isDefault } = req.body;
-  if (isDefault) await Address.updateMany({ user: req.user._id }, { isDefault: false });
+  const { tag, house, area, landmark, city, pincode, isDefault, location } = req.body;
+
+  let normalizedLocation;
+  try {
+    normalizedLocation = normalizeLocation(location);
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+
+  if (isDefault) {
+    await Address.updateMany({ user: req.user._id }, { isDefault: false });
+  }
+
   const address = await Address.create({
-    user: req.user._id, tag, house, area, landmark, city, pincode,
+    user: req.user._id,
+    tag,
+    house,
+    area,
+    landmark,
+    city,
+    pincode,
+    location: normalizedLocation,
     isDefault: !!isDefault,
   });
+
   await User.findByIdAndUpdate(req.user._id, {
     $push: { addresses: address._id },
     ...(isDefault && { defaultAddress: address._id }),
   });
+
   res.status(201).json({ success: true, data: address });
 });
 
 const updateAddress = asyncHandler(async (req, res) => {
   const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
   if (!address) return res.status(404).json({ success: false, message: 'Address not found' });
-  const fields = ['tag','house','area','landmark','city','pincode'];
-  fields.forEach(f => { if (req.body[f] !== undefined) address[f] = req.body[f]; });
-  if (req.body.isDefault) {
+
+  const fields = ['tag', 'house', 'area', 'landmark', 'city', 'pincode'];
+  fields.forEach(f => {
+    if (req.body[f] !== undefined) address[f] = req.body[f];
+  });
+
+  if (req.body.location !== undefined) {
+    try {
+      address.location = normalizeLocation(req.body.location);
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error.message });
+    }
+  }
+
+  if (req.body.isDefault === true) {
     await Address.updateMany({ user: req.user._id }, { isDefault: false });
     address.isDefault = true;
     await User.findByIdAndUpdate(req.user._id, { defaultAddress: address._id });
   }
+
   await address.save();
   res.json({ success: true, data: address });
 });

@@ -6,6 +6,7 @@ const Restaurant = require('../models/Restaurant');
 const User       = require('../models/User');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
+const { calculateDistanceKm, getDeliveryFee } = require('../utils/deliveryPricing');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -68,22 +69,126 @@ function withLiveDisplayData(orderDoc) {
 }
 
 const createOrder = asyncHandler(async (req, res) => {
-  const { items, restaurantId, restaurantName, subtotal, total, deliveryAddress } = req.body;
+  const {
+    items,
+    restaurantId,
+    restaurantName,
+    subtotal,
+    discount = 0,
+    addressId,
+    deliveryAddress: bodyAddress,
+  } = req.body;
 
-  if (!items || items.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ success: false, message: 'Cart is empty' });
   }
 
+  if (!restaurantId) {
+    return res.status(400).json({ success: false, message: 'Restaurant is required' });
+  }
+
+  const [restaurant, user] = await Promise.all([
+    Restaurant.findById(restaurantId).select('name image owner location'),
+    User.findById(req.user._id).populate('defaultAddress'),
+  ]);
+
+  if (!restaurant) {
+    return res.status(404).json({ success: false, message: 'Restaurant not found' });
+  }
+
+  // Prefer an explicitly selected saved address; otherwise use the user's
+  // default address. A raw address object is accepted for compatibility with
+  // the existing checkout, but it must contain a Google Maps/device pin.
+  let selectedAddress = null;
+  if (addressId) {
+    selectedAddress = await Address.findOne({ _id: addressId, user: req.user._id });
+    if (!selectedAddress) {
+      return res.status(404).json({ success: false, message: 'Selected address not found' });
+    }
+  } else if (user?.defaultAddress) {
+    selectedAddress = user.defaultAddress;
+  }
+
+  const rawAddress = selectedAddress
+    ? selectedAddress.toObject()
+    : bodyAddress;
+
+  if (!rawAddress) {
+    return res.status(400).json({
+      success: false,
+      message: 'Delivery address is required. Please select or save an address first.',
+    });
+  }
+
+  const customerCoordinates =
+    rawAddress.location?.coordinates ||
+    (Array.isArray(rawAddress.coordinates) ? rawAddress.coordinates : null);
+
+  if (!Array.isArray(customerCoordinates) || customerCoordinates.length !== 2) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please select your delivery location on Google Maps before ordering.',
+    });
+  }
+
+  const restaurantCoordinates = restaurant.location?.coordinates;
+  if (!Array.isArray(restaurantCoordinates) || restaurantCoordinates.length !== 2 ||
+      restaurantCoordinates.every(value => Number(value) === 0)) {
+    return res.status(409).json({
+      success: false,
+      message: 'This restaurant does not have a valid map location yet. Please contact support.',
+    });
+  }
+
+  let deliveryDistanceKm;
+  try {
+    deliveryDistanceKm = calculateDistanceKm(restaurantCoordinates, customerCoordinates);
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+
+  const deliveryFee = getDeliveryFee(deliveryDistanceKm);
+  const platformFee = 5;
+  const numericSubtotal = Number(subtotal);
+
+  if (!Number.isFinite(numericSubtotal) || numericSubtotal < 0) {
+    return res.status(400).json({ success: false, message: 'Invalid subtotal' });
+  }
+
+  const numericDiscount = Math.max(0, Number(discount) || 0);
+  const calculatedTotal = Math.max(
+    0,
+    numericSubtotal + deliveryFee + platformFee - numericDiscount
+  );
+
+  const addressSnapshot = {
+    tag: rawAddress.tag || 'Home',
+    house: rawAddress.house || '',
+    area: rawAddress.area || '',
+    landmark: rawAddress.landmark || '',
+    city: rawAddress.city || '',
+    pincode: rawAddress.pincode || '',
+    location: {
+      type: 'Point',
+      coordinates: [Number(customerCoordinates[0]), Number(customerCoordinates[1])],
+    },
+  };
+
   const order = await Order.create({
-    user:            req.user._id, 
-    restaurant:      restaurantId,
-    restaurantName:  restaurantName,
-    items:           items,
-    deliveryAddress: deliveryAddress,
-    subtotal:        subtotal,
-    deliveryFee:     40,
-    platformFee:     5,
-    total:           total,
+    user: req.user._id,
+    restaurant: restaurant._id,
+    restaurantName: restaurant.name || restaurantName || '',
+    restaurantImage: restaurant.image || '',
+    customerName: user?.name || '',
+    customerPhone: user?.phone || '',
+    items,
+    deliveryAddress: addressSnapshot,
+    deliveryDistanceKm: Number(deliveryDistanceKm.toFixed(2)),
+    subtotal: numericSubtotal,
+    deliveryFee,
+    platformFee,
+    discount: numericDiscount,
+    total: calculatedTotal,
   });
 
   const deliveryOtp = order._plainDeliveryOtp;
