@@ -20,6 +20,11 @@ const { uploadToCloudinary } = require('../utils/riderUpload');
  */
 const RIDER_STATUS_FLOW = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery', 'delivered'];
 const ACTIVE_RIDER_STATUSES = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery'];
+// Keep restaurant contact data available to every rider order endpoint.
+// The Order model stores restaurant as an ObjectId ref, so the rider UI
+// cannot show the restaurant phone unless this reference is populated.
+const RIDER_RESTAURANT_POPULATE =
+  'name phone contactNumber phoneNumber mobile address location';
 const STATUS_LABELS = {
   accepted: 'Accepted',
   reached_restaurant: 'Reached Restaurant',
@@ -27,20 +32,6 @@ const STATUS_LABELS = {
   out_for_delivery: 'Out for Delivery',
   delivered: 'Delivered',
 };
-
-// Customer + restaurant owner contact details are populated for rider screens.
-// The delivery address remains the order snapshot so it cannot change after checkout.
-const RIDER_CONTACT_POPULATE = [
-  { path: 'user', select: 'name phone' },
-  {
-    path: 'restaurant',
-    select: 'name address owner',
-    populate: {
-      path: 'owner',
-      select: 'name phone',
-    },
-  },
-];
 
 /* GET /api/riders/profile */
 exports.getMyProfile = asyncHandler(async (req, res) => {
@@ -120,7 +111,7 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
     Order.find(filter)
-      .populate(RIDER_CONTACT_POPULATE)
+      .populate('restaurant', RIDER_RESTAURANT_POPULATE)
       .sort({ riderAssignedAt: -1 })
       .skip(skip)
       .limit(Number(limit)),
@@ -136,7 +127,7 @@ exports.getActiveOrder = asyncHandler(async (req, res) => {
     rider: req.user._id,
     riderStatus: { $in: ACTIVE_RIDER_STATUSES },
   })
-    .populate(RIDER_CONTACT_POPULATE)
+    .populate('restaurant', RIDER_RESTAURANT_POPULATE)
     .sort({ riderAssignedAt: -1 });
 
   res.json({ success: true, data: order || null });
@@ -153,7 +144,7 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
     Order.find(filter)
-      .populate(RIDER_CONTACT_POPULATE)
+      .populate('restaurant', RIDER_RESTAURANT_POPULATE)
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(Number(limit)),
@@ -166,7 +157,7 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
 /* GET /api/riders/orders/:id — single assigned order detail. */
 exports.getAssignedOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, rider: req.user._id })
-    .populate(RIDER_CONTACT_POPULATE);
+    .populate('restaurant', RIDER_RESTAURANT_POPULATE);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   res.json({ success: true, data: order });
 });
@@ -213,8 +204,7 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id })
-    .populate(RIDER_CONTACT_POPULATE);
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
   if (!order) {
     return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   }
