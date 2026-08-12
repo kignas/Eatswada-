@@ -38,11 +38,32 @@ const statusEventSchema = new mongoose.Schema({
   note:      { type: String, default: '' },
 }, { _id: false });
 
+// ── Sequential public IDs ─────────────────────────────────────────
+// Separate from MongoDB's _id. Counters are incremented atomically so
+// simultaneous orders cannot receive the same public ID.
+const counterSchema = new mongoose.Schema({
+  _id: { type: String, required: true },
+  seq: { type: Number, required: true, default: 0 },
+});
+
+const OrderCounter =
+  mongoose.models.OrderCounter ||
+  mongoose.model('OrderCounter', counterSchema);
+
 const orderSchema = new mongoose.Schema(
   {
+    // Public customer-facing order ID, e.g. NB100001.
     orderNumber: {
       type: String,
       unique: true,
+      index: true,
+    },
+
+    // Public delivery/shipment ID, e.g. SH500001.
+    shipmentId: {
+      type: String,
+      unique: true,
+      index: true,
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -198,11 +219,23 @@ orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ restaurant: 1, status: 1 });
 
 /* ── Pre-save: generate order number ── */
-orderSchema.pre('save', function (next) {
+orderSchema.pre('save', async function (next) {
   if (this.isNew) {
-    const ts   = Date.now().toString(36).toUpperCase();
-    const rand = Math.random().toString(36).substr(2, 4).toUpperCase();
-    this.orderNumber = `NB-${ts}-${rand}`;
+    // Atomic counters prevent duplicate public IDs when two orders arrive together.
+    const orderCounter = await OrderCounter.findOneAndUpdate(
+      { _id: 'orderNumber' },
+      { $inc: { seq: 1 } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    const shipmentCounter = await OrderCounter.findOneAndUpdate(
+      { _id: 'shipmentId' },
+      { $inc: { seq: 1 } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    this.orderNumber = `NB${100000 + orderCounter.seq}`;
+    this.shipmentId = `SH${500000 + shipmentCounter.seq}`;
 
     // Push initial status event
     this.statusHistory.push({ status: 'placed', note: 'Order placed by customer' });
