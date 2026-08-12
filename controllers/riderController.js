@@ -28,20 +28,6 @@ const STATUS_LABELS = {
   delivered: 'Delivered',
 };
 
-// Always return the verified restaurant GPS location to the rider.
-// Restaurant.location is GeoJSON: [longitude, latitude].
-function riderOrderQuery(query) {
-  return query.populate({
-    path: 'restaurant',
-    select: 'name image address location owner',
-    populate: {
-      path: 'owner',
-      select: 'name phone',
-    },
-  });
-}
-
-
 /* GET /api/riders/profile */
 exports.getMyProfile = asyncHandler(async (req, res) => {
   // req.user is already the full, password-stripped User doc (set by `protect`).
@@ -119,7 +105,7 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
-    riderOrderQuery(Order.find(filter).sort({ riderAssignedAt: -1 }).skip(skip).limit(Number(limit))),
+    Order.find(filter).sort({ riderAssignedAt: -1 }).skip(skip).limit(Number(limit)).populate('restaurant', 'name image address location'),
     Order.countDocuments(filter),
   ]);
 
@@ -128,10 +114,10 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
 
 /* GET /api/riders/orders/active — the single in-progress order, if any. */
 exports.getActiveOrder = asyncHandler(async (req, res) => {
-  const order = await riderOrderQuery(Order.findOne({
+  const order = await Order.findOne({
     rider: req.user._id,
     riderStatus: { $in: ACTIVE_RIDER_STATUSES },
-  }).sort({ riderAssignedAt: -1 }));
+  }).sort({ riderAssignedAt: -1 }).populate('restaurant', 'name image address location');
 
   res.json({ success: true, data: order || null });
 });
@@ -146,7 +132,7 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
 
   const skip = (Number(page) - 1) * Number(limit);
   const [orders, total] = await Promise.all([
-    riderOrderQuery(Order.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(Number(limit))),
+    Order.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(Number(limit)).populate('restaurant', 'name image address location'),
     Order.countDocuments(filter),
   ]);
 
@@ -155,7 +141,7 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
 
 /* GET /api/riders/orders/:id — single assigned order detail. */
 exports.getAssignedOrderById = asyncHandler(async (req, res) => {
-  const order = await riderOrderQuery(Order.findOne({ _id: req.params.id, rider: req.user._id }));
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).populate('restaurant', 'name image address location');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   res.json({ success: true, data: order });
 });
@@ -202,7 +188,7 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  const order = await riderOrderQuery(Order.findOne({ _id: req.params.id, rider: req.user._id }));
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).populate('restaurant', 'name image address location');
   if (!order) {
     return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
   }
@@ -288,7 +274,7 @@ exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
 
   // deliveryOtp* fields are `select: false` on the model — explicitly
   // request them here since verifyDeliveryOtp() needs to read/mutate them.
-  const order = await riderOrderQuery(Order.findOne({ _id: req.params.id, rider: req.user._id })).select(
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).populate('restaurant', 'name image address location').select(
     '+deliveryOtpHash +deliveryOtpSalt +deliveryOtpExpiresAt +deliveryOtpAttempts +deliveryOtpLockedUntil'
   );
 
