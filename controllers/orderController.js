@@ -39,6 +39,12 @@ const ORDER_POPULATE_PATHS = [
 function withLiveDisplayData(orderDoc) {
   const order = orderDoc.toObject({ virtuals: false });
 
+  // Public identifiers are intentionally exposed explicitly so customer,
+  // admin/vendor and rider UIs can display the same production-style IDs.
+  // MongoDB _id remains available internally and is NOT replaced.
+  order.publicOrderId = order.orderNumber || '';
+  order.publicShipmentId = order.shipmentId || '';
+
   if (order.restaurant && typeof order.restaurant === 'object') {
     const liveRestaurant = order.restaurant;
 
@@ -360,6 +366,10 @@ const createOrder = asyncHandler(async (req, res) => {
     success: true,
     data: {
       ...withLiveDisplayData(order),
+      orderNumber: order.orderNumber,
+      shipmentId: order.shipmentId,
+      publicOrderId: order.orderNumber,
+      publicShipmentId: order.shipmentId,
       deliveryDistanceKm: pricing.distanceKm,
     },
     deliveryOtp,
