@@ -79,14 +79,14 @@ function withLiveDisplayData(orderDoc) {
 // ─────────────────────────────────────────────────────────────────────
 // Server-authoritative delivery + order pricing
 // Maynaguri launch rule:
-//   < 10 km   => ₹30
+//   < 10 km   => ₹35
 //   10–15 km  => ₹40
 //   > 15 km   => ₹50
 // The browser may display an estimate, but these values are calculated
 // again here from database data and customer coordinates.
 // ─────────────────────────────────────────────────────────────────────
 const DELIVERY_RULES = Object.freeze({
-  UNDER_10_KM: 30,
+  UNDER_10_KM: 35,
   FROM_10_TO_15_KM: 40,
   ABOVE_15_KM: 50,
 });
@@ -185,7 +185,64 @@ function calculateItemServerPrice(menuItem, requestedCustomizations) {
   return price;
 }
 
-async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress }) {
+// Resolves which delivery address/coordinates an order should use.
+//
+// Preferred path: addressId points at a saved Address document owned by
+// this user — its stored GPS coordinates are used, NOT anything the client
+// claims in deliveryAddress.location/coordinates. This closes a gap where
+// a client could previously submit arbitrary coordinates in deliveryAddress
+// to influence the distance-based fee.
+//
+// Fallback path (addressId absent): the legacy deliveryAddress object the
+// client sends directly. Kept only for backward compatibility with older
+// app builds that predate addressId support — coordinates on this path are
+// NOT verified against any saved address.
+async function resolveDeliveryAddress({ addressId, deliveryAddress, userId }) {
+  if (addressId) {
+    if (!mongoose.Types.ObjectId.isValid(addressId)) {
+      const error = new Error('Invalid delivery address selected.');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const addressDoc = await Address.findOne({ _id: addressId, user: userId }).lean();
+    if (!addressDoc) {
+      const error = new Error('Selected delivery address was not found on your account.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const coords = validCoordinates(addressDoc.location?.coordinates)
+      ? [Number(addressDoc.location.coordinates[0]), Number(addressDoc.location.coordinates[1])]
+      : null;
+
+    return {
+      coords,
+      snapshot: {
+        tag: addressDoc.tag || 'Home',
+        house: addressDoc.house || '',
+        area: addressDoc.area || '',
+        landmark: addressDoc.landmark || '',
+        city: addressDoc.city || 'Maynaguri',
+        pincode: addressDoc.pincode || '',
+      },
+    };
+  }
+
+  return {
+    coords: normalizeCustomerCoordinates(deliveryAddress),
+    snapshot: {
+      tag: deliveryAddress?.tag || 'Home',
+      house: deliveryAddress?.house || '',
+      area: deliveryAddress?.area || '',
+      landmark: deliveryAddress?.landmark || '',
+      city: deliveryAddress?.city || 'Maynaguri',
+      pincode: deliveryAddress?.pincode || '',
+    },
+  };
+}
+
+async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress, addressId, userId }) {
   if (!Array.isArray(items) || items.length === 0) {
     const error = new Error('Cart is empty');
     error.statusCode = 400;
@@ -218,7 +275,12 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
     throw error;
   }
 
-  const customerCoords = normalizeCustomerCoordinates(deliveryAddress);
+  const { coords: customerCoords, snapshot: addressSnapshot } = await resolveDeliveryAddress({
+    addressId,
+    deliveryAddress,
+    userId,
+  });
+
   if (!customerCoords) {
     const error = new Error(
       'Please select your delivery location using GPS/Google Maps before placing the order.'
@@ -309,6 +371,7 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
     total,
     distanceKm: Number(distanceKm.toFixed(2)),
     customerCoords,
+    addressSnapshot,
   };
 }
 
@@ -317,6 +380,7 @@ const createOrder = asyncHandler(async (req, res) => {
     items,
     restaurantId,
     deliveryAddress,
+    addressId,
     paymentMethod = 'upi',
   } = req.body;
 
@@ -324,19 +388,18 @@ const createOrder = asyncHandler(async (req, res) => {
     items,
     restaurantId,
     deliveryAddress,
+    addressId,
+    userId: req.user._id,
   });
 
   // Never trust client-provided restaurantName, item prices, subtotal,
-  // deliveryFee, platformFee, or total.
+  // deliveryFee, platformFee, or total. Address text/coordinates now also
+  // come from pricing.addressSnapshot/customerCoords, resolved server-side
+  // from the saved Address document when addressId is supplied.
   const customer = await User.findById(req.user._id).select('name phone').lean();
 
   const addressSnapshot = {
-    tag: deliveryAddress?.tag || 'Home',
-    house: deliveryAddress?.house || '',
-    area: deliveryAddress?.area || '',
-    landmark: deliveryAddress?.landmark || '',
-    city: deliveryAddress?.city || 'Maynaguri',
-    pincode: deliveryAddress?.pincode || '',
+    ...pricing.addressSnapshot,
     coordinates: pricing.customerCoords,
   };
 
