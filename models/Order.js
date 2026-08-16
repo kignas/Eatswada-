@@ -114,8 +114,7 @@ const orderSchema = new mongoose.Schema(
 
     // Pricing — all values are calculated server-side at order creation.
     subtotal:    { type: Number, required: true },
-    deliveryFee: { type: Number, default: 35, min: 0 },
-    platformFee: { type: Number, default: 5 },
+    deliveryFee: { type: Number, default: 30, min: 0 },
     discount:    { type: Number, default: 0 },
     total:       { type: Number, required: true },
 
