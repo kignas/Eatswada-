@@ -46,6 +46,17 @@ const restaurantSchema = new mongoose.Schema(
       default: '',
     },
 
+    // Up to 4 customer-facing restaurant photos. `image` remains the
+    // backward-compatible primary/cover image and is kept in sync with images[0].
+    images: {
+      type: [String],
+      default: [],
+      validate: {
+        validator: (arr) => Array.isArray(arr) && arr.length <= 4,
+        message: 'A restaurant can have at most 4 images.',
+      },
+    },
+
     cuisine: {
       type: [String],
       required: [true, 'At least one cuisine type is required'],
@@ -122,6 +133,20 @@ const restaurantSchema = new mongoose.Schema(
       type: Number,
       default: 200,
       min: 0,
+    },
+
+    freeDeliveryEnabled: {
+      type: Boolean,
+      default: true,
+    },
+
+    // Maximum customer-to-restaurant delivery radius controlled by Admin.
+    // Actual order distance is calculated from customer + restaurant GPS.
+    deliveryRadiusKm: {
+      type: Number,
+      default: 15,
+      min: 0,
+      max: 100,
     },
 
     platformFee: {
@@ -260,6 +285,16 @@ restaurantSchema.pre('validate', function (next) {
   // 2. Keep cuisineDisplay in sync with the cuisine array.
   if (this.isModified('cuisine') && Array.isArray(this.cuisine)) {
     this.cuisineDisplay = this.cuisine.join(', ');
+  }
+
+  // Keep the legacy primary image synchronized with the first gallery image.
+  if (this.isModified('images')) {
+    this.images = (Array.isArray(this.images) ? this.images : [])
+      .filter(Boolean)
+      .slice(0, 4);
+    this.image = this.images[0] || this.image || '';
+  } else if (this.isModified('image') && this.image && (!Array.isArray(this.images) || !this.images.length)) {
+    this.images = [this.image];
   }
 
   // 3. Derive human-readable display strings from numeric fields.
