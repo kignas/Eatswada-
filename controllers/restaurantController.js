@@ -126,7 +126,21 @@ const getCategories = asyncHandler(async (req, res) => {
   res.json({ success: true, data: cats });
 });
 
+const normalizeRestaurantImages = (body) => {
+  const incoming = Array.isArray(body.images) ? body.images : [];
+  const images = incoming
+    .map(v => String(v || '').trim())
+    .filter(Boolean)
+    .slice(0, 4);
+
+  if (!images.length && body.image) images.push(String(body.image).trim());
+  body.images = images;
+  body.image = images[0] || '';
+  return body;
+};
+
 const createRestaurant = asyncHandler(async (req, res) => {
+  normalizeRestaurantImages(req.body);
   if (!req.body.cuisine && req.body.cuisineDisplay) req.body.cuisine = [req.body.cuisineDisplay]; 
   else if (!req.body.cuisine) req.body.cuisine = ['General'];
   if (!req.body.slug && req.body.name) req.body.slug = req.body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '-' + Date.now();
@@ -145,6 +159,7 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   // A vendor editing their own restaurant can't reassign it to someone else.
   if (req.user.role !== 'admin') delete req.body.owner;
 
+  normalizeRestaurantImages(req.body);
   const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });

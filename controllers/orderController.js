@@ -256,7 +256,7 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
   const restaurant = await Restaurant.findOne({
     _id: restaurantId,
     isActive: true,
-  }).select('name image owner location availability isOpen');
+  }).select('name image owner location availability isOpen deliveryRadiusKm freeDeliveryEnabled freeDeliveryAbove');
 
   if (!restaurant) {
     const error = new Error('Restaurant not found or unavailable');
@@ -289,10 +289,16 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
 
   const distanceKm = haversineKm(restaurantCoords, customerCoords);
 
-  // This launch is explicitly limited to a 15 km delivery radius.
-  if (distanceKm > MAX_DELIVERY_RADIUS_KM) {
+  // Keep the platform-wide launch cap, while allowing Admin to configure a
+  // smaller delivery radius per restaurant.
+  const configuredRadius = Number(restaurant.deliveryRadiusKm);
+  const effectiveRadius = Number.isFinite(configuredRadius) && configuredRadius > 0
+    ? Math.min(configuredRadius, MAX_DELIVERY_RADIUS_KM)
+    : MAX_DELIVERY_RADIUS_KM;
+
+  if (distanceKm > effectiveRadius) {
     const error = new Error(
-      `This address is ${distanceKm.toFixed(1)} km away. Nearbite currently delivers only within 15 km.`
+      `This address is ${distanceKm.toFixed(1)} km away. This restaurant delivers only within ${effectiveRadius.toFixed(1).replace(/\.0$/, '')} km.`
     );
     error.statusCode = 400;
     throw error;
@@ -353,7 +359,12 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
     });
   }
 
-  const deliveryFee = calculateDeliveryFee(distanceKm);
+  const baseDeliveryFee = calculateDeliveryFee(distanceKm);
+  const freeDeliveryEnabled = restaurant.freeDeliveryEnabled !== false;
+  const freeDeliveryAbove = Number(restaurant.freeDeliveryAbove || 0);
+  const deliveryFee = freeDeliveryEnabled && freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove
+    ? 0
+    : baseDeliveryFee;
   const total = subtotal + deliveryFee;
 
   return {
