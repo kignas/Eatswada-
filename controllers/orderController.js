@@ -79,19 +79,17 @@ function withLiveDisplayData(orderDoc) {
 // ─────────────────────────────────────────────────────────────────────
 // Server-authoritative delivery + order pricing
 // Maynaguri launch rule:
-//   < 10 km   => ₹35
+//   < 10 km   => ₹30
 //   10–15 km  => ₹40
 //   > 15 km   => ₹50
 // The browser may display an estimate, but these values are calculated
 // again here from database data and customer coordinates.
 // ─────────────────────────────────────────────────────────────────────
 const DELIVERY_RULES = Object.freeze({
-  UNDER_10_KM: 35,
+  UNDER_10_KM: 30,
   FROM_10_TO_15_KM: 40,
   ABOVE_15_KM: 50,
 });
-
-const PLATFORM_FEE = 5;
 const MAX_DELIVERY_RADIUS_KM = 15;
 
 function validCoordinates(coords) {
@@ -258,7 +256,7 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
   const restaurant = await Restaurant.findOne({
     _id: restaurantId,
     isActive: true,
-  }).select('name image owner location availability isOpen platformFee');
+  }).select('name image owner location availability isOpen');
 
   if (!restaurant) {
     const error = new Error('Restaurant not found or unavailable');
@@ -356,18 +354,13 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
   }
 
   const deliveryFee = calculateDeliveryFee(distanceKm);
-  const platformFee = Number.isFinite(Number(restaurant.platformFee))
-    ? Number(restaurant.platformFee)
-    : PLATFORM_FEE;
-
-  const total = subtotal + deliveryFee + platformFee;
+  const total = subtotal + deliveryFee;
 
   return {
     restaurant,
     serverItems,
     subtotal,
     deliveryFee,
-    platformFee,
     total,
     distanceKm: Number(distanceKm.toFixed(2)),
     customerCoords,
@@ -393,7 +386,7 @@ const createOrder = asyncHandler(async (req, res) => {
   });
 
   // Never trust client-provided restaurantName, item prices, subtotal,
-  // deliveryFee, platformFee, or total. Address text/coordinates now also
+  // deliveryFee, or total. Address text/coordinates now also
   // come from pricing.addressSnapshot/customerCoords, resolved server-side
   // from the saved Address document when addressId is supplied.
   const customer = await User.findById(req.user._id).select('name phone').lean();
@@ -415,7 +408,6 @@ const createOrder = asyncHandler(async (req, res) => {
     deliveryDistanceKm: pricing.distanceKm,
     subtotal: pricing.subtotal,
     deliveryFee: pricing.deliveryFee,
-    platformFee: pricing.platformFee,
     total: pricing.total,
     paymentMethod,
     paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
