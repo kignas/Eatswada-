@@ -164,8 +164,17 @@ exports.getVendorMenu = asyncHandler(async (req, res) => {
 
 exports.addMenuItem = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
+  const {
+    restaurant,
+    restaurantId,
+    _id,
+    createdAt,
+    updatedAt,
+    ...safeBody
+  } = req.body;
+
   const itemData = {
-    ...req.body,
+    ...safeBody,
     restaurant: req.user.restaurantId,
     restaurantId: req.user.restaurantId,
   };
@@ -175,7 +184,14 @@ exports.addMenuItem = asyncHandler(async (req, res) => {
 
 exports.updateMenuItem = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
-  const { restaurant, restaurantId, ...safeBody } = req.body;
+  const {
+    restaurant,
+    restaurantId,
+    _id,
+    createdAt,
+    updatedAt,
+    ...safeBody
+  } = req.body;
   const item = await Menu.findOneAndUpdate(
     { _id: req.params.id, ...restaurantOwnershipFilter(req) },
     safeBody,
@@ -216,9 +232,9 @@ exports.updateRestaurantStatus = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'isActive must be a boolean.' });
   }
   const restaurant = await Restaurant.findOneAndUpdate(
-    { owner: req.user._id },
+    { _id: req.user.restaurantId },
     { isActive: req.body.isActive },
-    { new: true }
+    { new: true, runValidators: true }
   );
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
   res.status(200).json({ success: true, data: restaurant });
