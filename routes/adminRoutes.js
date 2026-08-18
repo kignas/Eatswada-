@@ -1,6 +1,6 @@
 const express = require('express');
 const router  = express.Router();
-const { protect } = require('../middleware/authMiddleware');
+const { protect, authorize } = require('../middleware/authMiddleware');
 const {
   adminLogin, getMetrics, getOrders, updateOrderStatus, cancelOrder,
   getRestaurants, toggleRestaurant, getRecentOrders, getPeakHours,
@@ -9,22 +9,22 @@ const {
 } = require('../controllers/adminController');
 
 router.post('/login', adminLogin);
-router.get('/metrics', protect, getMetrics);
-router.get('/dashboard/recent-orders', protect, getRecentOrders);
-router.get('/dashboard/peak-hours', protect, getPeakHours);
-router.get('/orders', protect, getOrders);
-router.patch('/orders/:id/status', protect, updateOrderStatus);
-router.patch('/orders/:id/cancel', protect, cancelOrder);
-router.get('/restaurants', protect, getRestaurants);
-router.patch('/restaurants/:id/toggle', protect, toggleRestaurant);
-router.get('/customers', protect, getCustomers);
-router.get('/analytics/revenue', protect, getRevenueAnalytics);
-router.get('/analytics/top-restaurants', protect, getTopRestaurants);
+router.get('/metrics', protect, authorize('admin', 'ceo'), getMetrics);
+router.get('/dashboard/recent-orders', protect, authorize('admin', 'ceo'), getRecentOrders);
+router.get('/dashboard/peak-hours', protect, authorize('admin', 'ceo'), getPeakHours);
+router.get('/orders', protect, authorize('admin', 'ceo'), getOrders);
+router.patch('/orders/:id/status', protect, authorize('admin', 'ceo'), updateOrderStatus);
+router.patch('/orders/:id/cancel', protect, authorize('admin', 'ceo'), cancelOrder);
+router.get('/restaurants', protect, authorize('admin', 'ceo'), getRestaurants);
+router.patch('/restaurants/:id/toggle', protect, authorize('admin', 'ceo'), toggleRestaurant);
+router.get('/customers', protect, authorize('admin', 'ceo'), getCustomers);
+router.get('/analytics/revenue', protect, authorize('admin', 'ceo'), getRevenueAnalytics);
+router.get('/analytics/top-restaurants', protect, authorize('admin', 'ceo'), getTopRestaurants);
 
 // Vendor account management (vendor *creation* is POST /api/auth/admin/create-vendor)
-router.get('/vendors', protect, getVendors);
-router.get('/vendors/:id', protect, getVendorById);
-router.put('/vendors/:id', protect, updateVendor);
-router.patch('/vendors/:id/toggle', protect, toggleVendorStatus);
+router.get('/vendors', protect, authorize('admin', 'ceo'), getVendors);
+router.get('/vendors/:id', protect, authorize('admin', 'ceo'), getVendorById);
+router.put('/vendors/:id', protect, authorize('admin', 'ceo'), updateVendor);
+router.patch('/vendors/:id/toggle', protect, authorize('admin', 'ceo'), toggleVendorStatus);
 
 module.exports = router;
