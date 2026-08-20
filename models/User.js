@@ -83,6 +83,10 @@ const userSchema = new mongoose.Schema(
       code:      { type: String, select: false },
       expiresAt: { type: Date,   select: false },
     },
+    passwordResetOtp: {
+      code:      { type: String, select: false },
+      expiresAt: { type: Date,   select: false },
+    },
     lastLogin: Date,
 
     // ── RIDER-SPECIFIC FIELDS ──────────────────────────────────
@@ -129,6 +133,17 @@ userSchema.pre('save', async function (next) {
 });
 
 /* ── Instance method: compare OTP ── */
+userSchema.methods.matchPassword = async function (enteredPassword) {
+  if (!this.password || !enteredPassword) return false;
+  return bcrypt.compare(String(enteredPassword), this.password);
+};
+
+userSchema.methods.matchPasswordResetOTP = function (enteredOTP) {
+  if (!this.passwordResetOtp || !this.passwordResetOtp.code) return false;
+  if (!this.passwordResetOtp.expiresAt || this.passwordResetOtp.expiresAt < Date.now()) return false;
+  return String(this.passwordResetOtp.code) === String(enteredOTP);
+};
+
 userSchema.methods.matchOTP = function (enteredOTP) {
   if (!this.otp || !this.otp.code) return false;
   if (this.otp.expiresAt < Date.now()) return false;
@@ -141,6 +156,7 @@ userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
   delete obj.otp;
+  delete obj.passwordResetOtp;
   return obj;
 };
 
