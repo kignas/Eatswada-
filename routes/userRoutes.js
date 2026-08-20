@@ -4,7 +4,7 @@ const rateLimit = require('express-rate-limit'); // Ensure you ran: npm install 
 const router   = express.Router();
 
 const {
-  sendOTPHandler, verifyOTPHandler, register, login,
+  sendOTPHandler, verifyOTPHandler, register, login, setPassword, forgotPasswordSendOTP, forgotPasswordReset,
   getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 } = require('../controllers/userController');
@@ -61,6 +61,27 @@ router.post('/login',
     body('password').notEmpty().withMessage('Password is required'),
   ],
   validate, login
+);
+
+// Customer password setup after verified-phone onboarding
+router.put('/password', protect,
+  [body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')],
+  validate, setPassword
+);
+
+// Forgot-password flow: OTP + new password. Do not reveal account existence.
+router.post('/forgot-password/send-otp', otpLimiter,
+  [body('phone').notEmpty().withMessage('Phone is required')],
+  validate, forgotPasswordSendOTP
+);
+
+router.post('/forgot-password/reset', loginLimiter,
+  [
+    body('phone').notEmpty().withMessage('Phone is required'),
+    body('otp').isLength({ min: 4, max: 4 }).withMessage('OTP must be 4 digits'),
+    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+  ],
+  validate, forgotPasswordReset
 );
 
 // ── Profile ───────────────────────────────────────────────────
