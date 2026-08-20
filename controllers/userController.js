@@ -25,10 +25,11 @@ const verifyOTPHandler = asyncHandler(async (req, res) => {
   user.otp = undefined;
   user.lastLogin = new Date();
   await user.save();
+  const needsPasswordSetup = user.role === 'user' && !user.password;
   res.json({
     success: true,
-    message: 'Login successful',
-    data: { user: user.toJSON(), token: generateToken(user._id, user.role) },
+    message: needsPasswordSetup ? 'Phone verified. Create your password to finish setting up your account.' : 'Login successful',
+    data: { user: user.toJSON(), token: generateToken(user._id, user.role), needsPasswordSetup },
   });
 });
 
@@ -45,15 +46,65 @@ const register = asyncHandler(async (req, res) => {
 
 const login = asyncHandler(async (req, res) => {
   const { phone, password } = req.body;
-  const user = await User.findOne({ phone }).select('+password');
-  if (!user || !(await user.matchPassword(password)))
+  const normalizedPhone = String(phone || '').trim();
+  if (!normalizedPhone || !password) {
+    return res.status(400).json({ success: false, message: 'Phone and password are required' });
+  }
+  const user = await User.findOne({ phone: normalizedPhone }).select('+password');
+  if (!user || user.role !== 'user' || !user.password) {
     return res.status(401).json({ success: false, message: 'Invalid phone or password' });
+  }
+  if (!user.isActive) return res.status(403).json({ success: false, message: 'Account is disabled. Please contact support.' });
+  if (!(await user.matchPassword(password))) {
+    return res.status(401).json({ success: false, message: 'Invalid phone or password' });
+  }
   user.lastLogin = new Date();
   await user.save();
-  res.json({
-    success: true,
-    data: { user: user.toJSON(), token: generateToken(user._id, user.role) },
-  });
+  res.json({ success: true, data: { user: user.toJSON(), token: generateToken(user._id, user.role) } });
+});
+
+const setPassword = asyncHandler(async (req, res) => {
+  const { password } = req.body;
+  if (!password || String(password).length < 6) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+  }
+  const user = await User.findById(req.user._id).select('+password');
+  if (!user || user.role !== 'user') return res.status(404).json({ success: false, message: 'Customer account not found' });
+  user.password = String(password);
+  await user.save();
+  res.json({ success: true, message: 'Password created successfully', data: { user: user.toJSON() } });
+});
+
+const forgotPasswordSendOTP = asyncHandler(async (req, res) => {
+  const phone = String(req.body.phone || '').trim();
+  if (!phone) return res.status(400).json({ success: false, message: 'Phone is required' });
+  const user = await User.findOne({ phone, role: 'user' }).select('+passwordResetOtp.code +passwordResetOtp.expiresAt');
+  // Do not reveal whether the account exists.
+  if (user) {
+    const otp = generateOTPCode();
+    user.passwordResetOtp = { code: otp, expiresAt: new Date(Date.now() + 5 * 60 * 1000) };
+    await user.save();
+    await sendOTP(phone, otp);
+  }
+  res.json({ success: true, message: 'If an account exists for this number, a verification code has been sent.' });
+});
+
+const forgotPasswordReset = asyncHandler(async (req, res) => {
+  const phone = String(req.body.phone || '').trim();
+  const otp = String(req.body.otp || '').trim();
+  const password = String(req.body.password || '');
+  if (!phone || !/^\d{4}$/.test(otp) || password.length < 6) {
+    return res.status(400).json({ success: false, message: 'Phone, 4-digit OTP and a password of at least 6 characters are required.' });
+  }
+  const user = await User.findOne({ phone, role: 'user' }).select('+password +passwordResetOtp.code +passwordResetOtp.expiresAt');
+  if (!user || !user.matchPasswordResetOTP(otp)) {
+    return res.status(400).json({ success: false, message: 'Invalid or expired verification code.' });
+  }
+  user.password = password;
+  user.passwordResetOtp = undefined;
+  user.lastLogin = new Date();
+  await user.save();
+  res.json({ success: true, message: 'Password reset successfully. You can now log in.' });
 });
 
 const getProfile = asyncHandler(async (req, res) => {
@@ -151,7 +202,7 @@ const setDefaultAddress = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  sendOTPHandler, verifyOTPHandler, register, login,
+  sendOTPHandler, verifyOTPHandler, register, login, setPassword, forgotPasswordSendOTP, forgotPasswordReset,
   getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 };
