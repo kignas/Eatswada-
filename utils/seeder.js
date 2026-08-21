@@ -24,7 +24,7 @@ const restaurants = [
     isVeg: false, isOpen: true, isFeatured: true,
     categories: ['Bengali', 'Indian', 'Lunch', 'Thali'],
     address: 'Main Road, Maynaguri',
-    minOrder: 80, deliveryFee: 40, freeDeliveryAbove: 200, platformFee: 5,
+    minOrder: 80, deliveryFee: 40, freeDeliveryAbove: 200,
   },
   {
     name: 'Burger King',
@@ -37,7 +37,7 @@ const restaurants = [
     isVeg: false, isOpen: true, isFeatured: false,
     categories: ['Burgers', 'Fast Food', 'Snacks'],
     address: 'Station Road, Maynaguri',
-    minOrder: 99, deliveryFee: 30, freeDeliveryAbove: 200, platformFee: 5,
+    minOrder: 99, deliveryFee: 30, freeDeliveryAbove: 200,
   },
   {
     name: 'Biryani Zone',
@@ -50,7 +50,7 @@ const restaurants = [
     isVeg: false, isOpen: true, isFeatured: true,
     categories: ['Biryani', 'Non-Veg', 'Rice'],
     address: 'College Road, Maynaguri',
-    minOrder: 120, deliveryFee: 40, freeDeliveryAbove: 250, platformFee: 5,
+    minOrder: 120, deliveryFee: 40, freeDeliveryAbove: 250,
   },
   {
     name: 'Pizza Palace',
@@ -63,7 +63,7 @@ const restaurants = [
     isVeg: true, isOpen: true, isFeatured: false,
     categories: ['Pizza', 'Italian', 'Veg'],
     address: 'Subhash Nagar, Maynaguri',
-    minOrder: 150, deliveryFee: 35, freeDeliveryAbove: 200, platformFee: 5,
+    minOrder: 150, deliveryFee: 35, freeDeliveryAbove: 200,
   },
   {
     name: 'Momos Hut',
@@ -76,7 +76,7 @@ const restaurants = [
     isVeg: false, isOpen: true, isFeatured: true,
     categories: ['Momos', 'Chinese', 'Snacks'],
     address: 'Bus Stand, Maynaguri',
-    minOrder: 60, deliveryFee: 20, freeDeliveryAbove: 150, platformFee: 5,
+    minOrder: 60, deliveryFee: 20, freeDeliveryAbove: 150,
   },
 ];
 
