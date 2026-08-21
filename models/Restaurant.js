@@ -149,6 +149,14 @@ const restaurantSchema = new mongoose.Schema(
       max: 100,
     },
 
+    // Cash on Delivery is a restaurant-level permission.
+    // When false, customers may only use online payment.
+    codEnabled: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
     isVeg: {
       type: Boolean,
       default: false,
@@ -317,4 +325,5 @@ restaurantSchema.pre('validate', function (next) {
 module.exports = mongoose.model('Restaurant', restaurantSchema);
 
 // --- DATABASE INDEXES FOR PERFORMANCE ---
+restaurantSchema.index({ isAvailable: 1 }); // Speeds up the home page restaurant feed
 

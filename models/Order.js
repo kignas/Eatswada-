@@ -26,7 +26,6 @@ const orderItemSchema = new mongoose.Schema({
   menuItem:  { type: mongoose.Schema.Types.ObjectId, ref: 'Menu' },
   name:      { type: String, required: true },
   price:     { type: Number, required: true },
-  originalPrice: { type: Number, default: null, min: 0 },
   image:     { type: String, default: '' },
   isVeg:     { type: Boolean, default: true },
   quantity:  { type: Number, required: true, min: 1 },
