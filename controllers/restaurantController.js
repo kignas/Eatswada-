@@ -252,7 +252,11 @@ const addMenuItem = asyncHandler(async (req, res) => {
   // `restaurant` here meant Mongoose silently dropped it (not in schema), leaving
   // the required `restaurantId` unset — so the item never matched
   // GET /api/restaurants/:id/menu, which filters on restaurantId.
-  const item = await MenuItem.create({ ...req.body, restaurantId: targetRestaurantId, restaurant: targetRestaurantId });
+  const payload = { ...req.body, restaurantId: targetRestaurantId, restaurant: targetRestaurantId };
+  if (payload.originalPrice !== undefined && payload.originalPrice !== null && Number(payload.originalPrice) <= Number(payload.price)) {
+    payload.originalPrice = null;
+  }
+  const item = await MenuItem.create(payload);
   if (item.price <= 99) { item.isUnder99 = true; await item.save(); }
   res.status(201).json({ success: true, data: item });
 });
@@ -269,7 +273,11 @@ const updateMenuItem = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this menu item' });
   }
 
-  const item = await MenuItem.findByIdAndUpdate(req.params.itemId, req.body, { new: true, runValidators: true });
+  const update = { ...req.body };
+  if (update.originalPrice !== undefined && update.originalPrice !== null && Number(update.originalPrice) <= Number(update.price ?? existing.price)) {
+    update.originalPrice = null;
+  }
+  const item = await MenuItem.findByIdAndUpdate(req.params.itemId, update, { new: true, runValidators: true });
   res.json({ success: true, data: item });
 });
 
