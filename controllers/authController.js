@@ -227,6 +227,7 @@ exports.createVendor = asyncHandler(async (req, res) => {
     freeDeliveryEnabled,
     freeDeliveryAbove,
     deliveryRadiusKm,
+    codEnabled,
     isVeg,
     location,
   } = req.body;
@@ -367,6 +368,7 @@ exports.createVendor = asyncHandler(async (req, res) => {
         freeDeliveryEnabled: freeDeliveryEnabled ?? true,
         freeDeliveryAbove: freeDeliveryAbove ?? 200,
         deliveryRadiusKm: deliveryRadiusKm ?? 15,
+        codEnabled: codEnabled === true,
         isVeg: !!isVeg,
         ...(location ? { location } : {}),
       };

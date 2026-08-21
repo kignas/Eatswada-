@@ -19,6 +19,12 @@ const addToCart = asyncHandler(async (req, res) => {
   const menuItem = await MenuItem.findById(menuItemId).populate('restaurant');
   if (!menuItem || menuItem.inStock === false)
     return res.status(404).json({ success: false, message: 'Item not available' });
+  if (!menuItem.restaurant || !menuItem.restaurant.isActive || menuItem.restaurant.availability?.isOpen === false)
+    return res.status(409).json({ success: false, message: 'This restaurant is currently closed.' });
+
+  const requestedQuantity = Number(quantity);
+  if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 99)
+    return res.status(400).json({ success: false, message: 'Quantity must be an integer between 1 and 99.' });
 
   let cart = await Cart.findOne({ user: req.user._id });
 
@@ -41,16 +47,16 @@ const addToCart = asyncHandler(async (req, res) => {
 
   const existing = cart.items.find(i => String(i.menuItem) === menuItemId);
   if (existing) {
-    existing.quantity += Number(quantity);
+    existing.quantity += requestedQuantity;
   } else {
     cart.items.push({
       menuItem: menuItem._id,
       name:     menuItem.name,
       price:    menuItem.price,
-      originalPrice: Number(menuItem.originalPrice) > Number(menuItem.price) ? menuItem.originalPrice : null,
+      originalPrice: (Number(menuItem.originalPrice) > Number(menuItem.price)) ? Number(menuItem.originalPrice) : null,
       image:    menuItem.image,
       isVeg:    menuItem.isVeg,
-      quantity: Number(quantity),
+      quantity: requestedQuantity,
       customizations,
     });
   }
@@ -122,11 +128,20 @@ const setPaymentMethod = asyncHandler(async (req, res) => {
   const valid = ['upi', 'card', 'cod', 'wallet'];
   if (!valid.includes(paymentMethod))
     return res.status(400).json({ success: false, message: 'Invalid payment method' });
-  const cart = await Cart.findOneAndUpdate(
-    { user: req.user._id },
-    { paymentMethod },
-    { new: true }
-  );
+
+  const cart = await Cart.findOne({ user: req.user._id });
+  if (!cart || !cart.restaurant)
+    return res.status(404).json({ success: false, message: 'Cart or restaurant not found' });
+
+  const restaurant = await Restaurant.findById(cart.restaurant).select('codEnabled isActive availability isOpen');
+  if (!restaurant || !restaurant.isActive)
+    return res.status(404).json({ success: false, message: 'Restaurant not found or unavailable' });
+
+  if (paymentMethod === 'cod' && restaurant.codEnabled !== true)
+    return res.status(403).json({ success: false, message: 'Cash on Delivery is not available for this restaurant.' });
+
+  cart.paymentMethod = paymentMethod;
+  await cart.save();
   res.json({ success: true, data: cart });
 });
 

@@ -256,11 +256,17 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
   const restaurant = await Restaurant.findOne({
     _id: restaurantId,
     isActive: true,
-  }).select('name image owner location availability isOpen deliveryRadiusKm freeDeliveryEnabled freeDeliveryAbove');
+  }).select('name image owner location availability isOpen deliveryRadiusKm freeDeliveryEnabled freeDeliveryAbove codEnabled');
 
   if (!restaurant) {
     const error = new Error('Restaurant not found or unavailable');
     error.statusCode = 404;
+    throw error;
+  }
+
+  if (restaurant.availability?.isOpen === false || restaurant.isOpen === false) {
+    const error = new Error('This restaurant is currently closed and is not accepting orders.');
+    error.statusCode = 409;
     throw error;
   }
 
@@ -352,7 +358,7 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
       menuItem: menuItem._id,
       name: menuItem.name,
       price: unitPrice,
-      originalPrice: Number(menuItem.originalPrice) > Number(unitPrice) ? Number(menuItem.originalPrice) : null,
+      originalPrice: (Number(menuItem.originalPrice) > Number(menuItem.price)) ? Number(menuItem.originalPrice) : null,
       image: menuItem.image || '',
       isVeg: !!menuItem.isVeg,
       quantity,
@@ -389,6 +395,13 @@ const createOrder = asyncHandler(async (req, res) => {
     paymentMethod = 'upi',
   } = req.body;
 
+  const validPaymentMethods = ['upi', 'card', 'wallet', 'cod'];
+  if (!validPaymentMethods.includes(paymentMethod)) {
+    const error = new Error('Invalid payment method.');
+    error.statusCode = 400;
+    throw error;
+  }
+
   const pricing = await buildAuthoritativeOrderPricing({
     items,
     restaurantId,
@@ -396,6 +409,12 @@ const createOrder = asyncHandler(async (req, res) => {
     addressId,
     userId: req.user._id,
   });
+
+  if (paymentMethod === 'cod' && pricing.restaurant.codEnabled !== true) {
+    const error = new Error('Cash on Delivery is not available for this restaurant.');
+    error.statusCode = 403;
+    throw error;
+  }
 
   // Never trust client-provided restaurantName, item prices, subtotal,
   // deliveryFee, or total. Address text/coordinates now also
@@ -428,6 +447,11 @@ const createOrder = asyncHandler(async (req, res) => {
   const deliveryOtp = order._plainDeliveryOtp;
   order.clearOtpSecrets();
   await order.populate(ORDER_POPULATE_PATHS);
+
+  await Cart.findOneAndUpdate(
+    { user: req.user._id },
+    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
+  );
 
   res.status(201).json({
     success: true,

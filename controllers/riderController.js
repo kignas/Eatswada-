@@ -250,6 +250,12 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     order.advanceStatus('assigned', `Accepted by rider (${req.user.name})`);
   } else if (status === 'out_for_delivery' || status === 'delivered') {
     order.advanceStatus(status, `Updated by rider (${req.user.name})`);
+    // COD is collected at the door. Once the rider completes delivery,
+    // the order is considered paid in cash. Online payments remain pending
+    // here until the real payment provider is integrated later.
+    if (status === 'delivered' && order.paymentMethod === 'cod') {
+      order.paymentStatus = 'paid';
+    }
   }
 
   await order.save();
