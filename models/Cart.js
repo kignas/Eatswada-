@@ -4,7 +4,7 @@ const cartItemSchema = new mongoose.Schema(
   {
     menuItem: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'MenuItem',
+      ref: 'Menu',
       required: true,
     },
     name: { type: String, required: true },  // snapshot to avoid join
@@ -44,7 +44,6 @@ const cartSchema = new mongoose.Schema(
     // Computed totals (updated on every write)
     subtotal:    { type: Number, default: 0 },
     deliveryFee: { type: Number, default: 40 },
-    platformFee: { type: Number, default: 5 },
     total:       { type: Number, default: 0 },
 
     // Delivery address snapshot for checkout
@@ -72,12 +71,9 @@ cartSchema.pre('save', function (next) {
   const subtotal = this.items.reduce((s, i) => s + i.quantity * i.price, 0);
   const FREE_DELIVERY_ABOVE = 200;
   const DELIVERY_FEE = 40;
-  const PLATFORM_FEE = 5;
-
   this.subtotal    = subtotal;
   this.deliveryFee = subtotal >= FREE_DELIVERY_ABOVE ? 0 : DELIVERY_FEE;
-  this.platformFee = PLATFORM_FEE;
-  this.total       = subtotal + this.deliveryFee + this.platformFee;
+  this.total       = subtotal + this.deliveryFee;
   next();
 });
 
