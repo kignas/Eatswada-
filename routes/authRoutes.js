@@ -3,7 +3,6 @@ const router = express.Router();
 const rateLimit = require("express-rate-limit");
 
 const { vendorLogin, adminLogin, createVendor, riderLogin } = require("../controllers/authController");
-const { setupAdmin } = require("../controllers/setupController");
 const { protect, authorize } = require("../middleware/authMiddleware");
 
 // SECURITY FIX: Rate Limiter to prevent brute-force attacks on login
@@ -25,11 +24,5 @@ router.post("/rider/login", loginLimiter, riderLogin);
 
 // ADMIN ONLY — no public vendor signup exists or should exist.
 router.post("/admin/create-vendor", protect, authorize("admin"), createVendor);
-
-
-// TEMPORARY — create the first admin account.
-// Protected by ADMIN_SETUP_KEY.
-// Remove this route after creating the admin.
-router.post("/setup-admin", setupAdmin);
 
 module.exports = router;
