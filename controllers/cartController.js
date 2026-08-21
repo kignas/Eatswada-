@@ -16,8 +16,13 @@ const getCart = asyncHandler(async (req, res) => {
 const addToCart = asyncHandler(async (req, res) => {
   const { menuItemId, quantity = 1, customizations = {} } = req.body;
 
+  const requestedQuantity = Number(quantity);
+  if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 99) {
+    return res.status(400).json({ success: false, message: 'Quantity must be an integer between 1 and 99' });
+  }
+
   const menuItem = await MenuItem.findById(menuItemId).populate('restaurant');
-  if (!menuItem || !menuItem.isAvailable)
+  if (!menuItem || menuItem.inStock === false)
     return res.status(404).json({ success: false, message: 'Item not available' });
 
   let cart = await Cart.findOne({ user: req.user._id });
@@ -41,7 +46,7 @@ const addToCart = asyncHandler(async (req, res) => {
 
   const existing = cart.items.find(i => String(i.menuItem) === menuItemId);
   if (existing) {
-    existing.quantity += Number(quantity);
+    existing.quantity += requestedQuantity;
   } else {
     cart.items.push({
       menuItem: menuItem._id,
@@ -49,7 +54,7 @@ const addToCart = asyncHandler(async (req, res) => {
       price:    menuItem.price,
       image:    menuItem.image,
       isVeg:    menuItem.isVeg,
-      quantity: Number(quantity),
+      quantity: requestedQuantity,
       customizations,
     });
   }

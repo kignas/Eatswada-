@@ -264,6 +264,13 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
     throw error;
   }
 
+  const restaurantIsOpen = restaurant.availability?.isOpen !== false && restaurant.isOpen !== false;
+  if (!restaurantIsOpen) {
+    const error = new Error('This restaurant is currently closed and is not accepting orders.');
+    error.statusCode = 409;
+    throw error;
+  }
+
   const restaurantCoords = restaurant.location?.coordinates;
   if (!validCoordinates(restaurantCoords) || isPlaceholderRestaurantLocation(restaurantCoords)) {
     const error = new Error(
@@ -423,6 +430,12 @@ const createOrder = asyncHandler(async (req, res) => {
     paymentMethod,
     paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
   });
+
+  // Clear the customer's active cart after the order has been successfully created.
+  await Cart.findOneAndUpdate(
+    { user: req.user._id },
+    { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0 }
+  );
 
   const deliveryOtp = order._plainDeliveryOtp;
   order.clearOtpSecrets();
