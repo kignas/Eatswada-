@@ -1,110 +1,140 @@
+const crypto = require('crypto');
 const User          = require('../models/User');
 const Address       = require('../models/Address');
 const generateToken = require('../utils/generateToken');
 const { sendOTP, generateOTPCode } = require('../utils/sendOTP');
 const asyncHandler  = require('express-async-handler');
 
-const sendOTPHandler = asyncHandler(async (req, res) => {
-  const { phone } = req.body;
+const OTP_TTL_MS = 5 * 60 * 1000;
+const normalizePhone = (phone) => String(phone || '').trim();
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+
+const issueOTP = async (user, purpose) => {
   const otp = generateOTPCode();
-  await User.findOneAndUpdate(
-    { phone },
-    { phone, otp: { code: otp, expiresAt: new Date(Date.now() + 5 * 60 * 1000) } },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  );
-  await sendOTP(phone, otp);
+  user.otp = { code: otp, expiresAt: new Date(Date.now() + OTP_TTL_MS), purpose };
+  await user.save();
+  await sendOTP(user.phone, otp);
+};
+
+const sendOTPHandler = asyncHandler(async (req, res) => {
+  const phone = normalizePhone(req.body.phone);
+  if (!/^\+?[6-9]\d{9,14}$/.test(phone)) {
+    return res.status(400).json({ success: false, message: 'Enter a valid mobile number.' });
+  }
+
+  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  if (!user) {
+    user = new User({ phone, isPhoneVerified: false });
+  }
+
+  await issueOTP(user, 'login');
   res.json({ success: true, message: 'OTP sent successfully' });
 });
 
 const verifyOTPHandler = asyncHandler(async (req, res) => {
-  const { phone, otp } = req.body;
-  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt');
-  if (!user) return res.status(404).json({ success: false, message: 'Phone not found' });
-  if (!user.matchOTP(otp)) return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+  const phone = normalizePhone(req.body.phone);
+  const otp = String(req.body.otp || '').trim();
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  if (!user) return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+  if (user.otp?.purpose !== 'login' || !user.matchOTP(otp)) {
+    return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+  }
   user.isPhoneVerified = true;
   user.otp = undefined;
   user.lastLogin = new Date();
   await user.save();
-  const needsPasswordSetup = user.role === 'user' && !user.password;
   res.json({
     success: true,
-    message: needsPasswordSetup ? 'Phone verified. Create your password to finish setting up your account.' : 'Login successful',
-    data: { user: user.toJSON(), token: generateToken(user._id, user.role), needsPasswordSetup },
-  });
-});
-
-const register = asyncHandler(async (req, res) => {
-  const { name, phone, email, password } = req.body;
-  const exists = await User.findOne({ $or: [{ phone }, ...(email ? [{ email }] : [])] });
-  if (exists) return res.status(409).json({ success: false, message: 'Phone or email already registered' });
-  const user = await User.create({ name, phone, email, password });
-  res.status(201).json({
-    success: true,
+    message: 'Login successful',
     data: { user: user.toJSON(), token: generateToken(user._id, user.role) },
   });
 });
 
-const login = asyncHandler(async (req, res) => {
-  const { phone, password } = req.body;
-  const normalizedPhone = String(phone || '').trim();
-  if (!normalizedPhone || !password) {
-    return res.status(400).json({ success: false, message: 'Phone and password are required' });
+const register = asyncHandler(async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const phone = normalizePhone(req.body.phone);
+  const email = normalizeEmail(req.body.email);
+  const password = String(req.body.password || '');
+  const otp = String(req.body.otp || '').trim();
+
+  if (!/^\+?[6-9]\d{9,14}$/.test(phone)) return res.status(400).json({ success:false, message:'Enter a valid mobile number.' });
+  if (password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
+  if (!name || name.length < 2) return res.status(400).json({ success:false, message:'Name is required.' });
+  if (email && !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ success:false, message:'Enter a valid email address.' });
+
+  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +password');
+  if (!user) return res.status(400).json({ success:false, message:'Please verify your mobile number first.' });
+  if (user.isPhoneVerified && user.password) return res.status(409).json({ success:false, message:'This account already exists. Please log in.' });
+  if (!user.otp?.code || user.otp.purpose !== 'login' || !user.matchOTP(otp)) {
+    return res.status(400).json({ success:false, message:'Invalid or expired OTP.' });
   }
-  const user = await User.findOne({ phone: normalizedPhone }).select('+password');
-  if (!user || user.role !== 'user' || !user.password) {
-    return res.status(401).json({ success: false, message: 'Invalid phone or password' });
-  }
-  if (!user.isActive) return res.status(403).json({ success: false, message: 'Account is disabled. Please contact support.' });
-  if (!(await user.matchPassword(password))) {
-    return res.status(401).json({ success: false, message: 'Invalid phone or password' });
-  }
+  const duplicateEmail = email ? await User.findOne({ email, _id: { $ne: user._id } }) : null;
+  if (duplicateEmail) return res.status(409).json({ success:false, message:'This email is already registered.' });
+
+  user.name = name;
+  if (email) user.email = email;
+  user.password = password;
+  user.isPhoneVerified = true;
+  user.otp = undefined;
   user.lastLogin = new Date();
   await user.save();
-  res.json({ success: true, data: { user: user.toJSON(), token: generateToken(user._id, user.role) } });
+
+  res.status(201).json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role) } });
 });
 
-const setPassword = asyncHandler(async (req, res) => {
-  const { password } = req.body;
-  if (!password || String(password).length < 6) {
-    return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-  }
-  const user = await User.findById(req.user._id).select('+password');
-  if (!user || user.role !== 'user') return res.status(404).json({ success: false, message: 'Customer account not found' });
-  user.password = String(password);
-  await user.save();
-  res.json({ success: true, message: 'Password created successfully', data: { user: user.toJSON() } });
-});
-
-const forgotPasswordSendOTP = asyncHandler(async (req, res) => {
-  const phone = String(req.body.phone || '').trim();
-  if (!phone) return res.status(400).json({ success: false, message: 'Phone is required' });
-  const user = await User.findOne({ phone, role: 'user' }).select('+passwordResetOtp.code +passwordResetOtp.expiresAt');
-  // Do not reveal whether the account exists.
-  if (user) {
-    const otp = generateOTPCode();
-    user.passwordResetOtp = { code: otp, expiresAt: new Date(Date.now() + 5 * 60 * 1000) };
-    await user.save();
-    await sendOTP(phone, otp);
-  }
-  res.json({ success: true, message: 'If an account exists for this number, a verification code has been sent.' });
-});
-
-const forgotPasswordReset = asyncHandler(async (req, res) => {
-  const phone = String(req.body.phone || '').trim();
-  const otp = String(req.body.otp || '').trim();
+const login = asyncHandler(async (req, res) => {
+  const phone = normalizePhone(req.body.phone);
   const password = String(req.body.password || '');
-  if (!phone || !/^\d{4}$/.test(otp) || password.length < 6) {
-    return res.status(400).json({ success: false, message: 'Phone, 4-digit OTP and a password of at least 6 characters are required.' });
+  const user = await User.findOne({ phone }).select('+password');
+  if (!user || !user.password || !(await user.matchPassword(password))) {
+    return res.status(401).json({ success: false, message: 'Invalid phone or password.' });
   }
-  const user = await User.findOne({ phone, role: 'user' }).select('+password +passwordResetOtp.code +passwordResetOtp.expiresAt');
-  if (!user || !user.matchPasswordResetOTP(otp)) {
-    return res.status(400).json({ success: false, message: 'Invalid or expired verification code.' });
+  if (!user.isActive) return res.status(403).json({ success:false, message:'Your account has been disabled.' });
+  if (!user.isPhoneVerified) return res.status(403).json({ success:false, message:'Please verify your mobile number with OTP first.' });
+  user.lastLogin = new Date();
+  await user.save();
+  res.json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role) } });
+});
+
+const requestPasswordReset = asyncHandler(async (req, res) => {
+  const phone = normalizePhone(req.body.phone);
+  const generic = 'If an account exists for this number, we sent a verification code.';
+  if (!/^\+?[6-9]\d{9,14}$/.test(phone)) return res.json({ success:true, message:generic });
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  if (!user || !user.isActive || !user.password) return res.json({ success:true, message:generic });
+  await issueOTP(user, 'password_reset');
+  res.json({ success:true, message:generic });
+});
+
+const verifyPasswordResetOTP = asyncHandler(async (req, res) => {
+  const phone = normalizePhone(req.body.phone);
+  const otp = String(req.body.otp || '').trim();
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  if (!user || !user.isActive || user.otp?.purpose !== 'password_reset' || !user.matchOTP(otp)) {
+    return res.status(400).json({ success:false, message:'Invalid or expired OTP.' });
+  }
+  const resetToken = user.createPasswordResetToken();
+  user.otp = undefined;
+  await user.save();
+  res.json({ success:true, data:{ resetToken } });
+});
+
+const resetPassword = asyncHandler(async (req, res) => {
+  const phone = normalizePhone(req.body.phone);
+  const resetToken = String(req.body.resetToken || '');
+  const password = String(req.body.password || '');
+  if (password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
+  if (!resetToken) return res.status(400).json({ success:false, message:'Password reset session expired. Please request a new OTP.' });
+  const hash = crypto.createHash('sha256').update(resetToken).digest('hex');
+  const user = await User.findOne({ phone }).select('+passwordResetTokenHash +passwordResetExpiresAt');
+  if (!user || !user.passwordResetTokenHash || user.passwordResetTokenHash !== hash || !user.passwordResetExpiresAt || user.passwordResetExpiresAt < new Date()) {
+    return res.status(400).json({ success:false, message:'Password reset session expired. Please request a new OTP.' });
   }
   user.password = password;
-  user.passwordResetOtp = undefined;
-  user.lastLogin = new Date();
+  user.passwordResetTokenHash = undefined;
+  user.passwordResetExpiresAt = undefined;
   await user.save();
-  res.json({ success: true, message: 'Password reset successfully. You can now log in.' });
+  res.json({ success:true, message:'Password changed successfully. You can now log in.' });
 });
 
 const getProfile = asyncHandler(async (req, res) => {
@@ -113,12 +143,16 @@ const getProfile = asyncHandler(async (req, res) => {
 });
 
 const updateProfile = asyncHandler(async (req, res) => {
-  const { name, email, vegOnly, avatar } = req.body;
+  const { name, email, password, vegOnly, avatar } = req.body;
   const user = await User.findById(req.user._id);
   if (name !== undefined)    user.name    = name;
   if (email !== undefined)   user.email   = email;
   if (vegOnly !== undefined) user.vegOnly = vegOnly;
   if (avatar !== undefined)  user.avatar  = avatar;
+  if (password !== undefined) {
+    if (typeof password !== 'string' || password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
+    user.password = password;
+  }
   await user.save();
   res.json({ success: true, data: user.toJSON() });
 });
@@ -201,9 +235,10 @@ const setDefaultAddress = asyncHandler(async (req, res) => {
   res.json({ success: true, data: address });
 });
 
+
 module.exports = {
-  sendOTPHandler, verifyOTPHandler, register, login, setPassword, forgotPasswordSendOTP, forgotPasswordReset,
+  sendOTPHandler, verifyOTPHandler, register, login,
+  requestPasswordReset, verifyPasswordResetOTP, resetPassword,
   getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 };
-            
