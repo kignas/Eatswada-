@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const bcrypt   = require('bcryptjs');
+const crypto   = require('crypto');
 
 const userSchema = new mongoose.Schema(
   {
@@ -82,11 +83,10 @@ const userSchema = new mongoose.Schema(
     otp: {
       code:      { type: String, select: false },
       expiresAt: { type: Date,   select: false },
+      purpose:   { type: String, enum: ['login', 'signup', 'password_reset'], select: false, default: 'login' },
     },
-    passwordResetOtp: {
-      code:      { type: String, select: false },
-      expiresAt: { type: Date,   select: false },
-    },
+    passwordResetTokenHash: { type: String, select: false },
+    passwordResetExpiresAt: { type: Date, select: false },
     lastLogin: Date,
 
     // ── RIDER-SPECIFIC FIELDS ──────────────────────────────────
@@ -132,18 +132,21 @@ userSchema.pre('save', async function (next) {
   next();
 });
 
-/* ── Instance method: compare OTP ── */
-userSchema.methods.matchPassword = async function (enteredPassword) {
+
+/* ── Password helpers ── */
+userSchema.methods.matchPassword = function (enteredPassword) {
   if (!this.password || !enteredPassword) return false;
-  return bcrypt.compare(String(enteredPassword), this.password);
+  return bcrypt.compare(enteredPassword, this.password);
 };
 
-userSchema.methods.matchPasswordResetOTP = function (enteredOTP) {
-  if (!this.passwordResetOtp || !this.passwordResetOtp.code) return false;
-  if (!this.passwordResetOtp.expiresAt || this.passwordResetOtp.expiresAt < Date.now()) return false;
-  return String(this.passwordResetOtp.code) === String(enteredOTP);
+userSchema.methods.createPasswordResetToken = function () {
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  this.passwordResetTokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  this.passwordResetExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  return rawToken;
 };
 
+/* ── Instance method: compare OTP ── */
 userSchema.methods.matchOTP = function (enteredOTP) {
   if (!this.otp || !this.otp.code) return false;
   if (this.otp.expiresAt < Date.now()) return false;
@@ -156,7 +159,8 @@ userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
   delete obj.otp;
-  delete obj.passwordResetOtp;
+  delete obj.passwordResetTokenHash;
+  delete obj.passwordResetExpiresAt;
   return obj;
 };
 
