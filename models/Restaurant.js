@@ -222,6 +222,22 @@ const restaurantSchema = new mongoose.Schema(
       default: false,
     },
 
+    // Admin-controlled homepage ranking. Higher values appear first.
+    displayPriority: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100000,
+      index: true,
+    },
+
+    // Number of verified customer reviews. Kept separate from legacy/admin rating data.
+    reviewCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     address: {
       type: String,
       trim: true,
