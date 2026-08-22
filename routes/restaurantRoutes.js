@@ -3,7 +3,8 @@ const router = express.Router();
 
 // 1. Import all controllers cleanly
 const { 
-  getRestaurants, 
+  getRestaurants,
+  getRestaurantReviews, 
   getRestaurantById, 
   getMenu, 
   getUnder99Items,
@@ -34,6 +35,7 @@ router.get('/under99', getUnder99Items);
 router.get('/', getRestaurants);
 
 // Dynamic public routes
+router.get('/:id/reviews', getRestaurantReviews);
 router.get('/:id', getRestaurantById);
 router.get('/:id/menu', getMenu); // This uses the Swiggy-style formatter we built!
 

@@ -15,6 +15,7 @@ const {
   toggleItemStock,
   getRestaurantProfile,
   updateRestaurantStatus,
+  getVendorReviews,
 } = require('../controllers/vendorController');
 
 /* ─────────────────────────────────────────────────────────────
@@ -23,6 +24,7 @@ const {
 
 // GET  /api/vendor/restaurant  — header profile + isActive flag
 router.get('/restaurant', protect, role('vendor'), getRestaurantProfile);
+router.get('/reviews', protect, role('vendor'), getVendorReviews);
 
 // PUT  /api/vendor/status      — master online / offline toggle
 router.put('/status', protect, role('vendor'), updateRestaurantStatus);

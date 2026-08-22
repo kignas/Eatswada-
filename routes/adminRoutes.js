@@ -6,6 +6,7 @@ const {
   getRestaurants, toggleRestaurant, getRecentOrders, getPeakHours,
   getCustomers, getRevenueAnalytics, getTopRestaurants,
   getVendors, getVendorById, updateVendor, toggleVendorStatus,
+  getReviews, moderateReview,
 } = require('../controllers/adminController');
 
 router.post('/login', adminLogin);
@@ -20,6 +21,8 @@ router.patch('/restaurants/:id/toggle', protect, authorize('admin', 'ceo'), togg
 router.get('/customers', protect, authorize('admin', 'ceo'), getCustomers);
 router.get('/analytics/revenue', protect, authorize('admin', 'ceo'), getRevenueAnalytics);
 router.get('/analytics/top-restaurants', protect, authorize('admin', 'ceo'), getTopRestaurants);
+router.get('/reviews', protect, authorize('admin', 'ceo'), getReviews);
+router.patch('/reviews/:id', protect, authorize('admin', 'ceo'), moderateReview);
 
 // Vendor account management (vendor *creation* is POST /api/auth/admin/create-vendor)
 router.get('/vendors', protect, authorize('admin', 'ceo'), getVendors);

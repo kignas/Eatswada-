@@ -2,7 +2,7 @@ const express = require('express');
 const router  = express.Router();
 
 const {
-  createOrder, getOrders, getOrderById,
+  createOrder, getOrders, getOrderById, getOrderReview, submitReview,
   cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
   assignRider,
 } = require('../controllers/orderController');
@@ -24,10 +24,13 @@ router.get('/', protect, getOrders);
 // ==========================================
 // 3. DYNAMIC ID ROUTES (Must be at the bottom!)
 // ==========================================
+router.get('/:id/review', protect, getOrderReview);
 router.get('/:id', protect, getOrderById);
 router.put('/:id/status', protect, authorize('admin', 'ceo'), updateOrderStatus);
 router.put('/:id/cancel', protect, cancelOrder);
 router.put('/:id/rate', protect, rateOrder);
+router.post('/:id/review', protect, submitReview);
+router.put('/:id/review', protect, submitReview);
 
 // Rider assignment — ADMIN ONLY.
 router.put('/:id/assign-rider', protect, authorize('admin', 'ceo'), assignRider);
