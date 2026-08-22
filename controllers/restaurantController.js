@@ -1,6 +1,7 @@
 const Restaurant = require('../models/Restaurant');
 const MenuItem   = require('../models/Menu');
 const asyncHandler = require('express-async-handler');
+const Review = require('../models/Review');
 
 /**
  * Restaurant-level authorization for Availability + Permissions feature:
@@ -15,7 +16,7 @@ const canManageRestaurant = (user, restaurant) => {
 };
 
 const getRestaurants = asyncHandler(async (req, res) => {
-  const { veg, category, search, sort = 'rating', page = 1, limit = 20 } = req.query;
+  const { veg, category, search, sort = 'recommended', page = 1, limit = 20 } = req.query;
   
   // 🔧 FIX (Restaurant Availability): only exclude soft-deleted restaurants here.
   // Closed restaurants (isOpen: false) must still come back — the customer
@@ -29,7 +30,12 @@ const getRestaurants = asyncHandler(async (req, res) => {
   if (category) filter.categories = { $in: [category] };
   if (search) filter.$text = { $search: search };
   
-  const sortMap = { rating: { rating: -1 }, time: { estimatedDeliveryMin: 1 }, distance: { distanceMeters: 1 } };
+  const sortMap = {
+    recommended: { isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 },
+    rating: { rating: -1, ratingCount: -1 },
+    time: { estimatedDeliveryMin: 1, rating: -1 },
+    distance: { distanceMeters: 1, rating: -1 }
+  };
   const sortOpt = sortMap[sort] || { rating: -1 };
   const skip = (Number(page) - 1) * Number(limit);
   
@@ -138,6 +144,39 @@ const normalizeRestaurantImages = (body) => {
   body.image = images[0] || '';
   return body;
 };
+
+
+const getRestaurantReviews = asyncHandler(async (req, res) => {
+  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true }).select('_id name rating ratingCount reviewCount');
+  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
+
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 10));
+  const skip = (page - 1) * limit;
+  const filter = { restaurant: restaurant._id, isVisible: true };
+  const [reviews, total, breakdown] = await Promise.all([
+    Review.find(filter).populate('user', 'name avatar').sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Review.countDocuments(filter),
+    Review.aggregate([
+      { $match: filter },
+      { $group: { _id: '$score', count: { $sum: 1 } } },
+      { $sort: { _id: -1 } }
+    ])
+  ]);
+  const counts = { 1:0, 2:0, 3:0, 4:0, 5:0 };
+  breakdown.forEach(x => { counts[x._id] = x.count; });
+  res.json({
+    success: true,
+    summary: { rating: total ? restaurant.rating : null, ratingCount: total, reviewCount: total, breakdown: counts },
+    page, pages: Math.ceil(total / limit), total,
+    data: reviews.map(r => ({
+      id: r._id, score: r.score, riderScore: r.riderScore, comment: r.comment,
+      createdAt: r.createdAt,
+      customer: { name: r.user?.name || 'Customer', avatar: r.user?.avatar || '' },
+      verified: true,
+    }))
+  });
+});
 
 const createRestaurant = asyncHandler(async (req, res) => {
   normalizeRestaurantImages(req.body);
@@ -325,7 +364,7 @@ const updateMenuItemAvailability = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  getRestaurants, getRestaurantById, getMenu, getUnder99Items,
+  getRestaurants, getRestaurantById, getRestaurantReviews, getMenu, getUnder99Items,
   searchRestaurants, getCategories,
   createRestaurant, updateRestaurant, deleteRestaurant, updateRestaurantAvailability,
   addMenuItem, updateMenuItem, deleteMenuItem, updateMenuItemAvailability

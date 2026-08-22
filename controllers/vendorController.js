@@ -2,6 +2,7 @@ const asyncHandler   = require('express-async-handler');
 const Order           = require('../models/Order');
 const Menu            = require('../models/Menu');
 const Restaurant      = require('../models/Restaurant');
+const Review          = require('../models/Review');
 
 // FIX: Import the auto-assignment service here
 const { autoAssignRider } = require('../services/riderAssignmentService'); 
@@ -239,3 +240,21 @@ exports.updateRestaurantStatus = asyncHandler(async (req, res) => {
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
   res.status(200).json({ success: true, data: restaurant });
 });
+
+
+exports.getVendorReviews = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const restaurantId = req.user.restaurantId;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+  const skip = (page - 1) * limit;
+  const [restaurant, reviews, total] = await Promise.all([
+    Restaurant.findById(restaurantId).select('name rating ratingCount reviewCount'),
+    Review.find({ restaurant: restaurantId, isVisible: true }).populate('user','name avatar').sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Review.countDocuments({ restaurant: restaurantId, isVisible: true })
+  ]);
+  if (!restaurant) return res.status(404).json({ success:false, message:'Restaurant not found.' });
+  res.json({ success:true, summary:{ name:restaurant.name, rating:restaurant.rating, ratingCount:restaurant.ratingCount, reviewCount:restaurant.reviewCount || total }, page, pages:Math.ceil(total/limit), total, data:reviews });
+});
+
+module.exports = { getVendorReviews };

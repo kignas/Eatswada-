@@ -6,6 +6,7 @@ const Address    = require('../models/Address');
 const Restaurant = require('../models/Restaurant');
 const Menu       = require('../models/Menu');
 const User       = require('../models/User');
+const Review     = require('../models/Review');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 
@@ -516,18 +517,71 @@ const cancelOrder = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Order cancelled', data: withLiveDisplayData(order) });
 });
 
-const rateOrder = asyncHandler(async (req, res) => {
-  const { score, comment } = req.body;
+async function refreshRestaurantRating(restaurantId) {
+  const result = await Review.aggregate([
+    { $match: { restaurant: restaurantId, isVisible: true } },
+    { $group: { _id: null, avg: { $avg: '$score' }, count: { $sum: 1 } } }
+  ]);
+  const stats = result[0] || { avg: 0, count: 0 };
+  await Restaurant.findByIdAndUpdate(restaurantId, {
+    rating: stats.count ? Math.round(stats.avg * 10) / 10 : 4,
+    ratingCount: stats.count,
+    reviewCount: stats.count,
+  });
+  return stats;
+}
+
+const getOrderReview = asyncHandler(async (req, res) => {
+  const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).select('_id status restaurant');
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+  const review = await Review.findOne({ order: order._id });
+  res.json({ success: true, data: review || null });
+});
+
+const submitReview = asyncHandler(async (req, res) => {
+  const { score, riderScore, comment = '' } = req.body;
+  const numericScore = Number(score);
+  const numericRiderScore = riderScore == null || riderScore === '' ? null : Number(riderScore);
+  if (!Number.isInteger(numericScore) || numericScore < 1 || numericScore > 5)
+    return res.status(400).json({ success: false, message: 'Restaurant rating must be a whole number from 1 to 5.' });
+  if (numericRiderScore !== null && (!Number.isInteger(numericRiderScore) || numericRiderScore < 1 || numericRiderScore > 5))
+    return res.status(400).json({ success: false, message: 'Rider rating must be a whole number from 1 to 5.' });
+
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-  if (order.status !== 'delivered')
-    return res.status(400).json({ success: false, message: 'You can only rate delivered orders' });
+  if (order.status !== 'delivered') return res.status(400).json({ success: false, message: 'You can only review delivered orders.' });
 
-  order.rating = { score, comment, givenAt: new Date() };
+  const cleanComment = String(comment || '').trim().slice(0, 500);
+  let review = await Review.findOne({ order: order._id });
+  const wasNewReview = !review;
+  if (review && String(review.user) !== String(req.user._id)) return res.status(403).json({ success: false, message: 'Not authorized.' });
+
+  if (review) {
+    review.score = numericScore;
+    review.riderScore = numericRiderScore;
+    review.comment = cleanComment;
+    review.isVisible = true;
+    review.adminNote = '';
+  } else {
+    review = new Review({ restaurant: order.restaurant, user: req.user._id, order: order._id, score: numericScore, riderScore: numericRiderScore, comment: cleanComment });
+  }
+  await review.save();
+
+  // Keep the existing order rating field for backwards compatibility with old order/tracking UI.
+  order.rating = { score: numericScore, comment: cleanComment, givenAt: new Date() };
   await order.save();
-  await order.populate(ORDER_POPULATE_PATHS);
-  res.json({ success: true, data: withLiveDisplayData(order) });
+  const stats = await refreshRestaurantRating(order.restaurant);
+
+  res.status(wasNewReview ? 201 : 200).json({
+    success: true,
+    message: wasNewReview ? 'Review submitted successfully.' : 'Review updated successfully.',
+    data: review,
+    restaurantRating: { rating: stats.count ? Math.round(stats.avg * 10) / 10 : 4, ratingCount: stats.count }
+  });
 });
+
+// Backward-compatible alias for the old /rate endpoint.
+const rateOrder = submitReview;
 
 const VENDOR_SETTABLE_STATUSES = ['confirmed', 'preparing', 'waiting_for_rider', 'delivered', 'cancelled'];
 
@@ -685,6 +739,8 @@ module.exports = {
   createOrder, 
   getOrders, 
   getOrderById,
+  getOrderReview,
+  submitReview,
   cancelOrder, 
   rateOrder, 
   updateOrderStatus, 

@@ -5,6 +5,7 @@ const bcrypt       = require('bcryptjs');
 const User         = require('../models/User');
 const Order        = require('../models/Order');
 const Restaurant   = require('../models/Restaurant');
+const Review       = require('../models/Review');
 const generateToken = require('../utils/generateToken');
 const { uploadToCloudinary } = require('../utils/riderUpload');
 
@@ -127,12 +128,12 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
   if (status === 'active') filter.isActive = true;
   else if (status === 'inactive') filter.isActive = false;
   if (search) filter.name = { $regex: search, $options: 'i' };
-  const restaurants = await Restaurant.find(filter).populate('owner', 'name phone email').sort({ createdAt: -1 });
+  const restaurants = await Restaurant.find(filter).populate('owner', 'name phone email').sort({ isFeatured: -1, displayPriority: -1, createdAt: -1 });
   res.json({ success: true, data: restaurants.map(r => ({
     id: r._id, name: r.name, ownerName: r.owner?.name ?? '',
     phone: r.owner?.phone ?? '', address: r.address ?? '',
     cuisine: r.cuisineDisplay || (r.cuisine || []).join(', '),
-    rating: r.rating, avgPrepTime: r.estimatedDeliveryMin ?? 20,
+    rating: r.rating, ratingCount: r.ratingCount, reviewCount: r.reviewCount || 0, displayPriority: r.displayPriority || 0, isFeatured: !!r.isFeatured, codEnabled: !!r.codEnabled, avgPrepTime: r.estimatedDeliveryMin ?? 20,
     isOpen: r.isOpen, isActive: r.isActive, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
   }))});
 });
@@ -600,4 +601,34 @@ exports.deleteRider = asyncHandler(async (req, res) => {
 
   await User.findByIdAndDelete(rider._id);
   res.json({ success: true, message: 'Rider deleted permanently.' });
+});
+
+
+exports.getReviews = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+  const skip = (page - 1) * limit;
+  const filter = {};
+  if (req.query.restaurantId) filter.restaurant = req.query.restaurantId;
+  if (req.query.visible === 'true') filter.isVisible = true;
+  if (req.query.visible === 'false') filter.isVisible = false;
+  const [reviews, total] = await Promise.all([
+    Review.find(filter).populate('user','name phone').populate('restaurant','name').sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Review.countDocuments(filter)
+  ]);
+  res.json({ success: true, page, pages: Math.ceil(total/limit), total, data: reviews });
+});
+
+exports.moderateReview = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const { isVisible, adminNote = '' } = req.body;
+  if (typeof isVisible !== 'boolean') return res.status(400).json({ success: false, message: 'isVisible must be boolean.' });
+  const review = await Review.findByIdAndUpdate(req.params.id, { isVisible, adminNote: String(adminNote).slice(0,300) }, { new: true });
+  if (!review) return res.status(404).json({ success: false, message: 'Review not found.' });
+  // Recalculate the restaurant's verified rating after moderation changes.
+  const stats = await Review.aggregate([{ $match: { restaurant: review.restaurant, isVisible: true } }, { $group: { _id: null, avg: { $avg: '$score' }, count: { $sum: 1 } } }]);
+  const s = stats[0] || { avg: 0, count: 0 };
+  await Restaurant.findByIdAndUpdate(review.restaurant, { rating: s.count ? Math.round(s.avg*10)/10 : 4, ratingCount: s.count, reviewCount: s.count });
+  res.json({ success: true, data: review });
 });

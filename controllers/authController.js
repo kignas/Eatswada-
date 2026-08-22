@@ -228,6 +228,8 @@ exports.createVendor = asyncHandler(async (req, res) => {
     freeDeliveryAbove,
     deliveryRadiusKm,
     codEnabled,
+    isFeatured,
+    displayPriority,
     isVeg,
     location,
   } = req.body;
@@ -369,6 +371,8 @@ exports.createVendor = asyncHandler(async (req, res) => {
         freeDeliveryAbove: freeDeliveryAbove ?? 200,
         deliveryRadiusKm: deliveryRadiusKm ?? 15,
         codEnabled: codEnabled === true,
+        isFeatured: isFeatured === true,
+        displayPriority: Number.isFinite(Number(displayPriority)) ? Number(displayPriority) : 0,
         isVeg: !!isVeg,
         ...(location ? { location } : {}),
       };
