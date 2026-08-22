@@ -257,4 +257,3 @@ exports.getVendorReviews = asyncHandler(async (req, res) => {
   res.json({ success:true, summary:{ name:restaurant.name, rating:restaurant.rating, ratingCount:restaurant.ratingCount, reviewCount:restaurant.reviewCount || total }, page, pages:Math.ceil(total/limit), total, data:reviews });
 });
 
-module.exports = { getVendorReviews };
