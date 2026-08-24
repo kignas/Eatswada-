@@ -222,6 +222,29 @@ const restaurantSchema = new mongoose.Schema(
       default: false,
     },
 
+    // Admin-controlled customer-facing restaurant badges.
+    isBestSeller: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    isNearFast: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
+    // Optional explicit homepage position. 1 = first, 2 = second, etc.
+    // 999999 means "automatic / no fixed position".
+    homeOrder: {
+      type: Number,
+      default: 999999,
+      min: 1,
+      max: 999999,
+      index: true,
+    },
+
     // Admin-controlled homepage ranking. Higher values appear first.
     displayPriority: {
       type: Number,
