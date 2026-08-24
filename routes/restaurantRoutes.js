@@ -49,9 +49,9 @@ router.post('/', protect, authorize('admin'), createRestaurant);
 // updateRestaurant/deleteRestaurant/updateRestaurantAvailability now also allow
 // 'vendor' — the controller enforces that a vendor can only touch their own
 // restaurant (canManageRestaurant), so admin-or-owner is the real gate.
-router.put('/:id', protect, authorize('admin', 'vendor'), updateRestaurant);
-router.delete('/:id', protect, authorize('admin', 'vendor'), deleteRestaurant);
-router.patch('/:id/availability', protect, authorize('admin', 'vendor'), updateRestaurantAvailability);
+router.put('/:id', protect, authorize('admin', 'ceo', 'vendor'), updateRestaurant);
+router.delete('/:id', protect, authorize('admin', 'ceo', 'vendor'), deleteRestaurant);
+router.patch('/:id/availability', protect, authorize('admin', 'ceo', 'vendor'), updateRestaurantAvailability);
 
 // Menu Item Management
 // Same admin-or-owner pattern: route allows both roles, controller checks
