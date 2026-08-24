@@ -64,15 +64,7 @@ const getRestaurants = asyncHandler(async (req, res) => {
     ]);
   }
 
-  // Keep admin-controlled presentation flags explicit in the public API response.
-  const data = restaurants.map(r => {
-    const item = typeof r.toObject === 'function' ? r.toObject() : { ...r };
-    item.isBestSeller = item.isBestSeller === true;
-    item.isNearFast = item.isNearFast === true;
-    return item;
-  });
-
-  res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data });
+  res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data: restaurants });
 });
 
 const getRestaurantById = asyncHandler(async (req, res) => {
@@ -223,19 +215,33 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   if (!canManageRestaurant(req.user, existing)) {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant' });
   }
-  // A vendor editing their own restaurant can't reassign it to someone else
-  // or change admin-only homepage presentation controls.
-  if (req.user.role !== 'admin') {
-    delete req.body.owner;
-    delete req.body.isFeatured;
-    delete req.body.isBestSeller;
-    delete req.body.isNearFast;
-    delete req.body.homeOrder;
-    delete req.body.displayPriority;
+  // CEO/admin are allowed to control customer-facing presentation flags.
+  // Vendors can edit their own operational restaurant data, but must never
+  // be able to change admin-controlled ranking/badge fields.
+  const isPrivilegedAdmin = req.user.role === 'admin' || req.user.role === 'ceo';
+  const update = { ...req.body };
+
+  if (!isPrivilegedAdmin) {
+    delete update.owner;
+    delete update.isFeatured;
+    delete update.isBestSeller;
+    delete update.isNearFast;
+    delete update.homeOrder;
+    delete update.displayPriority;
+  } else {
+    // Explicitly persist both boolean flags, including false. This avoids
+    // truthy/string handling issues and guarantees an unchecked admin box
+    // can turn the badge off again.
+    if (Object.prototype.hasOwnProperty.call(req.body, 'isBestSeller')) {
+      update.isBestSeller = req.body.isBestSeller === true || req.body.isBestSeller === 'true';
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body, 'isNearFast')) {
+      update.isNearFast = req.body.isNearFast === true || req.body.isNearFast === 'true';
+    }
   }
 
-  normalizeRestaurantImages(req.body);
-  const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
+  normalizeRestaurantImages(update);
+  const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });
 });
