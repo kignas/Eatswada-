@@ -31,7 +31,7 @@ const getRestaurants = asyncHandler(async (req, res) => {
   if (search) filter.$text = { $search: search };
   
   const sortMap = {
-    recommended: { isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 },
+    recommended: { homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 },
     rating: { rating: -1, ratingCount: -1 },
     time: { estimatedDeliveryMin: 1, rating: -1 },
     distance: { distanceMeters: 1, rating: -1 }
@@ -39,11 +39,31 @@ const getRestaurants = asyncHandler(async (req, res) => {
   const sortOpt = sortMap[sort] || { rating: -1 };
   const skip = (Number(page) - 1) * Number(limit);
   
-  const [restaurants, total] = await Promise.all([
-    Restaurant.find(filter).sort(sortOpt).skip(skip).limit(Number(limit)),
-    Restaurant.countDocuments(filter),
-  ]);
-  
+  let restaurants;
+  let total;
+
+  if (sort === 'recommended') {
+    // `$ifNull` keeps older documents (created before homeOrder existed) in
+    // the automatic bucket instead of letting a missing value outrank
+    // explicit positions such as #1, #2, #3.
+    [restaurants, total] = await Promise.all([
+      Restaurant.aggregate([
+        { $match: filter },
+        { $addFields: { __homeOrder: { $ifNull: ['$homeOrder', 999999] } } },
+        { $sort: { __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 } },
+        { $skip: skip },
+        { $limit: Number(limit) },
+        { $project: { __homeOrder: 0 } },
+      ]),
+      Restaurant.countDocuments(filter),
+    ]);
+  } else {
+    [restaurants, total] = await Promise.all([
+      Restaurant.find(filter).sort(sortOpt).skip(skip).limit(Number(limit)),
+      Restaurant.countDocuments(filter),
+    ]);
+  }
+
   res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data: restaurants });
 });
 
@@ -195,8 +215,16 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   if (!canManageRestaurant(req.user, existing)) {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant' });
   }
-  // A vendor editing their own restaurant can't reassign it to someone else.
-  if (req.user.role !== 'admin') delete req.body.owner;
+  // A vendor editing their own restaurant can't reassign it to someone else
+  // or change admin-only homepage presentation controls.
+  if (req.user.role !== 'admin') {
+    delete req.body.owner;
+    delete req.body.isFeatured;
+    delete req.body.isBestSeller;
+    delete req.body.isNearFast;
+    delete req.body.homeOrder;
+    delete req.body.displayPriority;
+  }
 
   normalizeRestaurantImages(req.body);
   const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });

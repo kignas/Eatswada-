@@ -128,12 +128,12 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
   if (status === 'active') filter.isActive = true;
   else if (status === 'inactive') filter.isActive = false;
   if (search) filter.name = { $regex: search, $options: 'i' };
-  const restaurants = await Restaurant.find(filter).populate('owner', 'name phone email').sort({ isFeatured: -1, displayPriority: -1, createdAt: -1 });
+  const restaurants = await Restaurant.find(filter).populate('owner', 'name phone email').sort({ homeOrder: 1, isFeatured: -1, displayPriority: -1, createdAt: -1 });
   res.json({ success: true, data: restaurants.map(r => ({
     id: r._id, name: r.name, ownerName: r.owner?.name ?? '',
     phone: r.owner?.phone ?? '', address: r.address ?? '',
     cuisine: r.cuisineDisplay || (r.cuisine || []).join(', '),
-    rating: r.rating, ratingCount: r.ratingCount, reviewCount: r.reviewCount || 0, displayPriority: r.displayPriority || 0, isFeatured: !!r.isFeatured, codEnabled: !!r.codEnabled, avgPrepTime: r.estimatedDeliveryMin ?? 20,
+    rating: r.rating, ratingCount: r.ratingCount, reviewCount: r.reviewCount || 0, displayPriority: r.displayPriority || 0, homeOrder: r.homeOrder ?? 999999, isFeatured: !!r.isFeatured, isBestSeller: !!r.isBestSeller, isNearFast: !!r.isNearFast, codEnabled: !!r.codEnabled, avgPrepTime: r.estimatedDeliveryMin ?? 20,
     isOpen: r.isOpen, isActive: r.isActive, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
   }))});
 });
