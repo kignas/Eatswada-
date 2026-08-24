@@ -64,7 +64,15 @@ const getRestaurants = asyncHandler(async (req, res) => {
     ]);
   }
 
-  res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data: restaurants });
+  // Keep admin-controlled presentation flags explicit in the public API response.
+  const data = restaurants.map(r => {
+    const item = typeof r.toObject === 'function' ? r.toObject() : { ...r };
+    item.isBestSeller = item.isBestSeller === true;
+    item.isNearFast = item.isNearFast === true;
+    return item;
+  });
+
+  res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data });
 });
 
 const getRestaurantById = asyncHandler(async (req, res) => {
