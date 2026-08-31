@@ -92,6 +92,8 @@ const DELIVERY_RULES = Object.freeze({
   ABOVE_15_KM: 50,
 });
 const MAX_DELIVERY_RADIUS_KM = 15;
+// Customer tip is optional, but must stay within a sane server-side limit.
+const MAX_TIP_AMOUNT = 500;
 
 function validCoordinates(coords) {
   return Array.isArray(coords) &&
@@ -241,7 +243,7 @@ async function resolveDeliveryAddress({ addressId, deliveryAddress, userId }) {
   };
 }
 
-async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress, addressId, userId }) {
+async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress, addressId, userId, tipAmount }) {
   if (!Array.isArray(items) || items.length === 0) {
     const error = new Error('Cart is empty');
     error.statusCode = 400;
@@ -373,13 +375,28 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
   const deliveryFee = freeDeliveryEnabled && freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove
     ? 0
     : baseDeliveryFee;
-  const total = subtotal + deliveryFee;
+
+  // The client may request a tip, but the server remains authoritative.
+  // Invalid, negative, non-finite, or excessive values are rejected rather
+  // than silently changing the customer's bill.
+  const parsedTip = Number(tipAmount ?? 0);
+  if (!Number.isFinite(parsedTip) || parsedTip < 0 || parsedTip > MAX_TIP_AMOUNT) {
+    const error = new Error(`Tip must be between ₹0 and ₹${MAX_TIP_AMOUNT}.`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const validTip = Math.round(parsedTip * 100) / 100;
+
+  // Preserve the existing authoritative pricing formula and add the verified
+  // tip on top. No client-provided subtotal/delivery/total is trusted.
+  const total = subtotal + deliveryFee + validTip;
 
   return {
     restaurant,
     serverItems,
     subtotal,
     deliveryFee,
+    tipAmount: validTip,
     total,
     distanceKm: Number(distanceKm.toFixed(2)),
     customerCoords,
@@ -394,6 +411,9 @@ const createOrder = asyncHandler(async (req, res) => {
     deliveryAddress,
     addressId,
     paymentMethod = 'upi',
+    restaurantNote,
+    deliveryInstructions,
+    tipAmount = 0,
   } = req.body;
 
   const validPaymentMethods = ['upi', 'card', 'wallet', 'cod'];
@@ -409,6 +429,7 @@ const createOrder = asyncHandler(async (req, res) => {
     deliveryAddress,
     addressId,
     userId: req.user._id,
+    tipAmount,
   });
 
   if (paymentMethod === 'cod' && pricing.restaurant.codEnabled !== true) {
@@ -440,6 +461,9 @@ const createOrder = asyncHandler(async (req, res) => {
     deliveryDistanceKm: pricing.distanceKm,
     subtotal: pricing.subtotal,
     deliveryFee: pricing.deliveryFee,
+    restaurantNote: typeof restaurantNote === 'string' ? restaurantNote.trim().slice(0, 250) : '',
+    deliveryInstructions: typeof deliveryInstructions === 'string' ? deliveryInstructions.trim().slice(0, 250) : '',
+    tipAmount: pricing.tipAmount,
     total: pricing.total,
     paymentMethod,
     paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
@@ -718,7 +742,11 @@ const assignRider = asyncHandler(async (req, res) => {
   order.rider = rider._id;
   order.riderAssignedAt = new Date();
   order.riderStatus = 'assigned';
-  order.riderEarning = order.riderEarning || order.deliveryFee || 0;
+  // Tip belongs to the rider. Set the earning once at assignment so
+  // reassignment cannot double-count the same tip.
+  const baseRiderFee = Number(order.deliveryFee) || 0;
+  const verifiedTip = Number(order.tipAmount) || 0;
+  order.riderEarning = order.riderEarning || (baseRiderFee + verifiedTip);
   order.riderStatusHistory = order.riderStatusHistory || [];
   order.riderStatusHistory.push({
     status: 'assigned',
