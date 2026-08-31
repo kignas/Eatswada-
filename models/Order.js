@@ -116,6 +116,25 @@ const orderSchema = new mongoose.Schema(
     subtotal:    { type: Number, required: true },
     deliveryFee: { type: Number, default: 30, min: 0 },
     discount:    { type: Number, default: 0 },
+
+    // Customer-provided order instructions and rider tip. These are persisted
+    // on the real order so the vendor/rider apps can consume them directly.
+    restaurantNote: {
+      type: String,
+      maxlength: 250,
+      default: '',
+    },
+    deliveryInstructions: {
+      type: String,
+      maxlength: 250,
+      default: '',
+    },
+    tipAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+
     total:       { type: Number, required: true },
 
     paymentMethod: {
