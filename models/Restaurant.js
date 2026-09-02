@@ -25,6 +25,22 @@ const restaurantSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Customer-facing restaurant description shown on Restaurant Information.
+    description: {
+      type: String,
+      trim: true,
+      maxlength: [1000, 'Restaurant description cannot exceed 1000 characters'],
+      default: '',
+    },
+
+    // Public restaurant contact number used by the customer "Call" action.
+    phone: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: [30, 'Restaurant phone cannot exceed 30 characters'],
+    },
+
     slug: {
       type: String,
       required: true,
@@ -174,6 +190,18 @@ const restaurantSchema = new mongoose.Schema(
       default: true,
     },
 
+    // ── Weekly opening hours ──
+    // Customer-facing schedule. Times use 24-hour HH:MM strings.
+    openingHours: {
+      monday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00', trim: true }, closesAt: { type: String, default: '22:00', trim: true } },
+      tuesday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00', trim: true }, closesAt: { type: String, default: '22:00', trim: true } },
+      wednesday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00', trim: true }, closesAt: { type: String, default: '22:00', trim: true } },
+      thursday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00', trim: true }, closesAt: { type: String, default: '22:00', trim: true } },
+      friday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00', trim: true }, closesAt: { type: String, default: '22:00', trim: true } },
+      saturday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00', trim: true }, closesAt: { type: String, default: '22:00', trim: true } },
+      sunday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00', trim: true }, closesAt: { type: String, default: '22:00', trim: true } },
+    },
+
     // ── Restaurant Availability ──
     // Scalable structure: supports Open / Closed Today / Temporarily Closed now,
     // and leaves room for automatic business-hours support later (autoHours/
@@ -295,6 +323,8 @@ const restaurantSchema = new mongoose.Schema(
   },
   {
     timestamps: true, // Adds createdAt and updatedAt automatically.
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
   }
 );
 
@@ -361,8 +391,25 @@ restaurantSchema.pre('validate', function (next) {
 });
 
 
+
+// Compatibility virtuals for existing admin/customer code.
+// Canonical storage remains nested under `availability`.
+restaurantSchema.virtual('availabilityStatus').get(function () {
+  if (this.availability?.isOpen) return 'open';
+  return this.availability?.closedReason || 'temporarily_closed';
+});
+
+restaurantSchema.virtual('autoHours').get(function () {
+  return !!this.availability?.autoHours;
+});
+
+restaurantSchema.virtual('opensAt').get(function () {
+  return this.availability?.opensAt || '';
+});
+
+restaurantSchema.virtual('closesAt').get(function () {
+  return this.availability?.closesAt || '';
+});
+
+
 module.exports = mongoose.model('Restaurant', restaurantSchema);
-
-// --- DATABASE INDEXES FOR PERFORMANCE ---
-restaurantSchema.index({ isAvailable: 1 }); // Speeds up the home page restaurant feed
-
