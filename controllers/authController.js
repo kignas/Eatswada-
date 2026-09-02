@@ -213,6 +213,8 @@ exports.createVendor = asyncHandler(async (req, res) => {
     // ...or create a new one
     restaurantName,
     cuisine,
+    description,
+    phone,
     address,
     image,
     images,
@@ -234,6 +236,7 @@ exports.createVendor = asyncHandler(async (req, res) => {
     homeOrder,
     displayPriority,
     isVeg,
+    openingHours,
     location,
   } = req.body;
 
@@ -359,6 +362,8 @@ exports.createVendor = asyncHandler(async (req, res) => {
         name: restaurantName.trim(),
         owner: vendorUser._id,
         cuisine: cuisineArray,
+        description: description || "",
+        phone: phone || vendorPhone || "",
         address: address || "",
         image: image || (Array.isArray(images) ? images[0] : "") || "",
         images: Array.isArray(images) ? images.filter(Boolean).slice(0, 4) : (image ? [image] : []),
@@ -380,6 +385,7 @@ exports.createVendor = asyncHandler(async (req, res) => {
         homeOrder: Number.isFinite(Number(homeOrder)) && Number(homeOrder) >= 1 ? Math.min(999999, Number(homeOrder)) : 999999,
         displayPriority: Number.isFinite(Number(displayPriority)) ? Number(displayPriority) : 0,
         isVeg: !!isVeg,
+        ...(openingHours ? { openingHours } : {}),
         ...(location ? { location } : {}),
       };
 

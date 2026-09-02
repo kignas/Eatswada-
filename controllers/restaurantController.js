@@ -199,11 +199,17 @@ const getRestaurantReviews = asyncHandler(async (req, res) => {
 });
 
 const createRestaurant = asyncHandler(async (req, res) => {
-  normalizeRestaurantImages(req.body);
-  if (!req.body.cuisine && req.body.cuisineDisplay) req.body.cuisine = [req.body.cuisineDisplay]; 
-  else if (!req.body.cuisine) req.body.cuisine = ['General'];
-  if (!req.body.slug && req.body.name) req.body.slug = req.body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '-' + Date.now();
-  const restaurant = await Restaurant.create(req.body);
+  const body = { ...req.body };
+  normalizeRestaurantImages(body);
+  if (!body.cuisine && body.cuisineDisplay) body.cuisine = [body.cuisineDisplay];
+  else if (!body.cuisine) body.cuisine = ['General'];
+  if (!body.slug && body.name) {
+    body.slug = body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '-' + Date.now();
+  }
+  if (body.phone != null) body.phone = String(body.phone).trim();
+  if (body.description != null) body.description = String(body.description).trim();
+
+  const restaurant = await Restaurant.create(body);
   res.status(201).json({ success: true, data: restaurant });
 });
 
@@ -241,6 +247,9 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   }
 
   normalizeRestaurantImages(update);
+  if (update.phone != null) update.phone = String(update.phone).trim();
+  if (update.description != null) update.description = String(update.description).trim();
+
   const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });
@@ -292,7 +301,8 @@ const updateRestaurantAvailability = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant' });
   }
 
-  const { status, opensAt, closesAt, autoHours } = req.body;
+  const { opensAt, closesAt, autoHours } = req.body;
+  const status = req.body.status || req.body.availabilityStatus;
   const validStatuses = ['open', 'closed_today', 'temporarily_closed'];
   if (!validStatuses.includes(status)) {
     return res.status(400).json({ success: false, message: `status must be one of: ${validStatuses.join(', ')}` });
