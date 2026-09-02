@@ -259,7 +259,7 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
   const restaurant = await Restaurant.findOne({
     _id: restaurantId,
     isActive: true,
-  }).select('name image owner location availability isOpen deliveryRadiusKm freeDeliveryEnabled freeDeliveryAbove codEnabled');
+  }).select('name image owner location availability isOpen deliveryRadiusKm freeDeliveryEnabled freeDeliveryAbove codEnabled minOrder');
 
   if (!restaurant) {
     const error = new Error('Restaurant not found or unavailable');
@@ -367,6 +367,18 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
       quantity,
       customizations: requested.customizations || {},
     });
+  }
+
+  // Restaurant-specific minimum order — server authoritative.
+  // Minimum is based on the verified food subtotal before delivery fee/tip.
+  const minimumOrder = Math.max(0, Number(restaurant.minOrder || 0));
+  if (minimumOrder > 0 && subtotal < minimumOrder) {
+    const remaining = Math.ceil((minimumOrder - subtotal) * 100) / 100;
+    const error = new Error(
+      `Minimum order is ₹${minimumOrder}. Please add ₹${remaining} more to your cart.`
+    );
+    error.statusCode = 400;
+    throw error;
   }
 
   const baseDeliveryFee = calculateDeliveryFee(distanceKm);
