@@ -5,7 +5,7 @@ const Restaurant      = require('../models/Restaurant');
 const Review          = require('../models/Review');
 
 // FIX: Import the auto-assignment service here
-const { autoAssignRider } = require('../services/riderAssignmentService'); 
+const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService'); 
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -47,7 +47,7 @@ function serializeVendorOrder(orderDoc) {
 /* ─────────────────────────────────────────────────────────────
  *  ORDER STATUS GROUPS
  * ───────────────────────────────────────────────────────────── */
-const QUEUE_STATUSES   = ['placed', 'confirmed', 'preparing', 'out_for_delivery'];
+const QUEUE_STATUSES   = ['placed', 'confirmed', 'preparing', 'waiting_for_rider', 'assigned', 'out_for_delivery'];
 const HISTORY_STATUSES = ['delivered', 'cancelled'];
 
 const VENDOR_STATUS_TRANSITIONS = {
@@ -145,6 +145,13 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   }
 
   await order.save();
+
+  // Auto-assigned riders must have the same 60-second acceptance timeout
+  // as manually assigned riders. Without this, a rider who ignores the
+  // assignment leaves the order stuck on `assigned` forever.
+  if (riderAssignment && riderAssignment.assigned) {
+    scheduleRiderTimeout(order._id, order.rider);
+  }
 
   res.status(200).json({ 
     success: true, 

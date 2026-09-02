@@ -738,6 +738,17 @@ const assignRider = asyncHandler(async (req, res) => {
     });
   }
 
+  // A rider can only accept once the restaurant has finished preparing
+  // and the order has entered the dispatch queue. Prevent admin from
+  // creating an assignment that the rider app is intentionally forbidden
+  // to accept.
+  if (order.status !== 'waiting_for_rider') {
+    return res.status(409).json({
+      success: false,
+      message: `Rider assignment is only available when the order is waiting_for_rider. Current status: "${order.status}".`,
+    });
+  }
+
   if (order.rider && RIDER_LOCKED_FOR_REASSIGN.includes(order.riderStatus)) {
     return res.status(409).json({
       success: false,
