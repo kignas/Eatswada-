@@ -84,6 +84,12 @@ const userSchema = new mongoose.Schema(
       code:      { type: String, select: false },
       expiresAt: { type: Date,   select: false },
       purpose:   { type: String, enum: ['login', 'signup', 'password_reset'], select: false, default: 'login' },
+      // Per-account brute-force protection. The IP rate limiter alone is not
+      // enough: an attacker on mobile data or a proxy pool rotates IPs freely,
+      // and a short OTP with unlimited guesses is not a secret at all.
+      attempts:    { type: Number, select: false, default: 0 },
+      lockedUntil: { type: Date,   select: false },
+      lastSentAt:  { type: Date,   select: false },
     },
     passwordResetTokenHash: { type: String, select: false },
     passwordResetExpiresAt: { type: Date, select: false },
@@ -146,15 +152,70 @@ userSchema.methods.createPasswordResetToken = function () {
   return rawToken;
 };
 
-/* ── Instance method: compare OTP ── */
+/* ── OTP constants ── */
+const MAX_OTP_ATTEMPTS = 5;
+const OTP_LOCKOUT_MS   = 15 * 60 * 1000;  // 15 min after 5 wrong codes
+const OTP_RESEND_MS    = 60 * 1000;       // 60 s minimum between codes per account
+
+/* ── Instance method: compare OTP (legacy boolean form) ── */
 userSchema.methods.matchOTP = function (enteredOTP) {
   if (!this.otp || !this.otp.code) return false;
   if (this.otp.expiresAt < Date.now()) return false;
-  // Force both to be strings so 8499 exactly matches "8499"
-  return String(this.otp.code) === String(enteredOTP);
+  // Constant-time compare so response timing can't leak a digit at a time.
+  const a = Buffer.from(String(this.otp.code));
+  const b = Buffer.from(String(enteredOTP));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+};
+
+/**
+ * checkOTP — the form every controller should use.
+ *
+ * Returns { ok, reason } and mutates the attempt/lock counters on `this`.
+ * Does NOT save; the caller decides when to persist (and must persist even
+ * on failure, or the attempt counter never increments).
+ */
+userSchema.methods.checkOTP = function (enteredOTP, expectedPurpose) {
+  const now = new Date();
+
+  if (this.otp?.lockedUntil && this.otp.lockedUntil > now) {
+    return { ok: false, reason: 'locked' };
+  }
+  if (!this.otp?.code) {
+    return { ok: false, reason: 'not_set' };
+  }
+  if (this.otp.expiresAt && this.otp.expiresAt < now) {
+    return { ok: false, reason: 'expired' };
+  }
+  if (expectedPurpose && this.otp.purpose !== expectedPurpose) {
+    return { ok: false, reason: 'wrong_purpose' };
+  }
+
+  if (this.matchOTP(enteredOTP)) {
+    this.otp = undefined;   // single use — burn it on success
+    return { ok: true };
+  }
+
+  this.otp.attempts = (this.otp.attempts || 0) + 1;
+
+  if (this.otp.attempts >= MAX_OTP_ATTEMPTS) {
+    // Invalidate the code itself, not just the session. Re-requesting is the
+    // only way forward, and that path is throttled too.
+    this.otp = { lockedUntil: new Date(Date.now() + OTP_LOCKOUT_MS) };
+    return { ok: false, reason: 'locked_now' };
+  }
+
+  return { ok: false, reason: 'incorrect', attemptsRemaining: MAX_OTP_ATTEMPTS - this.otp.attempts };
+};
+
+/** True when this account asked for an OTP less than 60 s ago. */
+userSchema.methods.otpRequestedTooRecently = function () {
+  return !!(this.otp?.lastSentAt && Date.now() - this.otp.lastSentAt.getTime() < OTP_RESEND_MS);
 };
 
 /* ── Remove sensitive fields from JSON output ── */
+userSchema.statics.OTP_LIMITS = { MAX_OTP_ATTEMPTS, OTP_LOCKOUT_MS, OTP_RESEND_MS };
+
 userSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;

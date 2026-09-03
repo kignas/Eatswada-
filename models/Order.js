@@ -11,7 +11,9 @@ const MAX_OTP_ATTEMPTS = 5;
 const OTP_LOCKOUT_MS   = 15 * 60 * 1000;    // 15 min lockout after too many wrong attempts
 
 function generateOtpCode() {
-  return String(Math.floor(1000 + Math.random() * 9000)); // 4-digit
+  // crypto.randomInt, not Math.random — Math.random's output is predictable
+  // from previous values, which for a shared 4-digit code is a real weakness.
+  return String(crypto.randomInt(1000, 10000)); // 4-digit
 }
 
 function hashOtp(code, salt) {
@@ -139,8 +141,8 @@ const orderSchema = new mongoose.Schema(
 
     paymentMethod: {
       type: String,
-      enum: ['upi', 'card', 'cod', 'wallet'],
-      default: 'upi',
+      enum: ['cod'],
+      default: 'cod',
     },
     paymentStatus: {
       type: String,
@@ -200,6 +202,11 @@ const orderSchema = new mongoose.Schema(
     },
     riderStatusHistory: [
       {
+        riderId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'User',
+          default: null,
+        },
         status: String,
         note: String,
         at: { type: Date, default: Date.now },
@@ -262,10 +269,13 @@ orderSchema.pre('save', async function (next) {
     this.estimatedDelivery = new Date(Date.now() + 40 * 60 * 1000);
 
     // Delivery OTP: generated once, shown to the customer on the tracking
-    // page, and checked against the rider's entry at handoff. Only the
-    // salted hash is persisted; the plaintext lives on `_plainDeliveryOtp`
-    // (a plain, non-schema property — never saved to Mongo) just long
-    // enough for the create-order controller to hand it back once.
+    // page, and checked against the rider's entry at handoff.
+    //
+    // NOTE ON STORAGE: both a salted hash (deliveryOtpHash) and the plaintext
+    // (deliveryOtp) are persisted. The plaintext is deliberate — the customer
+    // has to be able to reopen the tracking page days later and still see
+    // their code — so the hash is defence in depth, not a secret store. Treat
+    // this as a handoff code, never as a credential.
     const plainOtp = generateOtpCode();
     const salt = crypto.randomBytes(16).toString('hex');
     this.deliveryOtp = plainOtp;
@@ -314,16 +324,13 @@ orderSchema.methods.verifyDeliveryOtp = function (enteredOtp) {
   const receivedHash  = hashOtp(receivedOtp, this.deliveryOtpSalt);
   const isMatch       = receivedHash === this.deliveryOtpHash;
 
-  // Debug trace requested during the "Incorrect PIN" investigation.
-  // Never logs the plaintext stored OTP (it isn't persisted anywhere —
-  // only its hash is) — logs the two hashes being compared instead, so a
-  // mismatch is still fully diagnosable (wrong order, stale salt, expiry,
-  // whitespace, etc.) without exposing the secret in logs.
-  console.log(
-    `[verifyDeliveryOtp] order=${this._id} status=${this.status} ` +
-    `receivedOtp="${receivedOtp}" storedHash=${this.deliveryOtpHash} ` +
-    `receivedHash=${receivedHash} match=${isMatch}`
-  );
+  // The debug trace that used to live here printed the OTP the rider typed
+  // into the Render logs on every attempt. Anyone with dashboard access could
+  // read live delivery codes. If you need to diagnose a mismatch again, log
+  // the reason (expired / locked / not_set) — never the code itself.
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`[verifyDeliveryOtp] order=${this._id} status=${this.status} match=${isMatch}`);
+  }
 
   if (isMatch) {
     this.deliveryOtpVerified = true;
