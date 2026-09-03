@@ -15,7 +15,7 @@ const {
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { upload } = require('../utils/riderUpload');
 
-router.use(protect, authorize('admin', 'ceo'));
+router.use(protect, authorize('admin'));
 
 router.post('/', upload.single('photo'), createRider);
 router.get('/', getRiders);

@@ -41,7 +41,7 @@ router.post('/verify-otp',
   loginLimiter,
   [
     body('phone').notEmpty().withMessage('Phone is required'),
-    body('otp').isLength({ min: 4, max: 4 }).withMessage('OTP must be 4 digits'),
+    body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits'),
   ],
   validate, verifyOTPHandler
 );
@@ -54,7 +54,7 @@ router.post('/forgot-password',
 
 router.post('/forgot-password/verify',
   loginLimiter,
-  [body('phone').notEmpty().withMessage('Phone is required'), body('otp').isLength({ min: 4, max: 4 }).withMessage('OTP must be 4 digits')],
+  [body('phone').notEmpty().withMessage('Phone is required'), body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits')],
   validate, verifyPasswordResetOTP
 );
 
