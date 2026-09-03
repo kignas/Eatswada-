@@ -23,7 +23,9 @@ const protect = async (req, res, next) => {
   }
 
   if (!token) {
-    console.log('[protect] No token in request to', req.method, req.originalUrl);
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[protect] No token in request to', req.method, req.originalUrl);
+    }
     return res.status(401).json({
       success: false,
       message: 'Not authorised — no token provided.',
@@ -40,7 +42,9 @@ const protect = async (req, res, next) => {
     req.user = await User.findById(decoded.id).select('-password');
 
     if (!req.user) {
-      console.log('[protect] No user found for id:', decoded.id);
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[protect] No user found for id:', decoded.id);
+      }
       return res.status(401).json({
         success: false,
         message: 'Account not found. Please log in again.',
@@ -48,7 +52,9 @@ const protect = async (req, res, next) => {
     }
 
     if (!req.user.isActive) {
-      console.log('[protect] User found but isActive is false:', req.user._id);
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[protect] User found but isActive is false:', req.user._id);
+      }
       return res.status(401).json({
         success: false,
         message: 'Your account has been deactivated. Please contact support.',
@@ -59,7 +65,9 @@ const protect = async (req, res, next) => {
     next();
   } catch (err) {
     // Log internally — do NOT expose err.message to the client in production.
-    console.error('[authMiddleware.protect] JWT verification failed:', err.message);
+    if (process.env.NODE_ENV === 'development') {
+      console.error('[authMiddleware.protect] JWT verification failed:', err.message);
+    }
 
     return res.status(401).json({
       success: false,
