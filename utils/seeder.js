@@ -11,6 +11,11 @@ const Restaurant = require('../models/Restaurant');
 const MenuItem   = require('../models/Menu');
 const User       = require('../models/User');
 
+const SEED_VENDOR_PASSWORD = process.env.SEED_VENDOR_PASSWORD;
+if (!SEED_VENDOR_PASSWORD || SEED_VENDOR_PASSWORD.length < 10) {
+  throw new Error('SEED_VENDOR_PASSWORD must be set to a password of at least 10 characters before running the seeder.');
+}
+
 // ── Sample Restaurants (matching index.html frontend data) ────
 const restaurants = [
   {
@@ -18,7 +23,7 @@ const restaurants = [
     image: 'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=600&auto=format&fit=crop&q=80',
     cuisine: ['Bengali', 'Indian'],
     cuisineDisplay: 'Bengali, Indian',
-    rating: 4.5, ratingCount: '200+',
+    rating: 4.5, ratingCount: 200,
     time: '20-30 mins', distance: '0.8 km',
     offer: '20% OFF up to ₹50',
     isVeg: false, isOpen: true, isFeatured: true,
@@ -42,7 +47,7 @@ const restaurants = [
     image: 'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=600&auto=format&fit=crop&q=80',
     cuisine: ['Burgers', 'Fast Food', 'American'],
     cuisineDisplay: 'Burgers, Fast Food',
-    rating: 4.2, ratingCount: '500+',
+    rating: 4.2, ratingCount: 500,
     time: '25-35 mins', distance: '1.2 km',
     offer: 'Buy 1 Get 1 Free',
     isVeg: false, isOpen: true, isFeatured: false,
@@ -66,7 +71,7 @@ const restaurants = [
     image: 'https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?w=600&auto=format&fit=crop&q=80',
     cuisine: ['Biryani', 'Mughlai', 'Non-Veg'],
     cuisineDisplay: 'Biryani, Mughlai',
-    rating: 4.6, ratingCount: '1K+',
+    rating: 4.6, ratingCount: 1000,
     time: '30-40 mins', distance: '2.0 km',
     offer: 'FREE drink with every biryani',
     isVeg: false, isOpen: true, isFeatured: true,
@@ -90,7 +95,7 @@ const restaurants = [
     image: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=600&auto=format&fit=crop&q=80',
     cuisine: ['Pizza', 'Italian', 'Pasta'],
     cuisineDisplay: 'Pizza, Italian',
-    rating: 4.3, ratingCount: '300+',
+    rating: 4.3, ratingCount: 300,
     time: '35-45 mins', distance: '1.8 km',
     offer: '₹80 OFF on first order',
     isVeg: true, isOpen: true, isFeatured: false,
@@ -114,7 +119,7 @@ const restaurants = [
     image: 'https://images.unsplash.com/photo-1625398407796-82650a8c135f?w=600&auto=format&fit=crop&q=80',
     cuisine: ['Momos', 'Chinese', 'Tibetan'],
     cuisineDisplay: 'Momos, Chinese',
-    rating: 4.4, ratingCount: '800+',
+    rating: 4.4, ratingCount: 800,
     time: '15-25 mins', distance: '0.5 km',
     offer: '10% OFF on orders above ₹149',
     isVeg: false, isOpen: true, isFeatured: true,
@@ -197,15 +202,56 @@ const seed = async () => {
     await MenuItem.deleteMany({});
     console.log('🗑️  Cleared existing restaurants and menu items');
 
-    // FIX: Manually generate the slugs before bulk inserting
-    const mappedRestaurants = restaurants.map(r => ({
+    // Create one deterministic vendor owner per seeded restaurant. These are
+    // development/demo accounts only; the password is supplied via env.
+    const seedVendors = [];
+    for (let i = 0; i < restaurants.length; i++) {
+      const restaurant = restaurants[i];
+      const email = `seed.vendor${i + 1}@eatswada.local`;
+      const phone = `900000000${i + 1}`;
+
+      let vendor = await User.findOne({ email });
+      if (!vendor) {
+        vendor = new User({
+          name: `${restaurant.name} Vendor`,
+          email,
+          phone,
+          password: SEED_VENDOR_PASSWORD,
+          role: 'vendor',
+          isActive: true,
+          isPhoneVerified: true,
+          restaurantId: null,
+        });
+      } else {
+        vendor.name = `${restaurant.name} Vendor`;
+        vendor.phone = phone;
+        vendor.password = SEED_VENDOR_PASSWORD;
+        vendor.role = 'vendor';
+        vendor.isActive = true;
+        vendor.isPhoneVerified = true;
+        vendor.restaurantId = null;
+      }
+      await vendor.save();
+      seedVendors.push(vendor);
+    }
+
+    // Generate schema-valid restaurant documents, including the required owner.
+    const mappedRestaurants = restaurants.map((r, i) => ({
       ...r,
+      owner: seedVendors[i]._id,
+      codEnabled: true,
+      ratingCount: Number(r.ratingCount) || 0,
       slug: r.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '')
     }));
 
-    // Insert restaurants with the newly generated slugs
     const createdRestaurants = await Restaurant.insertMany(mappedRestaurants);
     console.log(`✅ Inserted ${createdRestaurants.length} restaurants`);
+
+    // Link each deterministic seed vendor to its seeded restaurant.
+    for (let i = 0; i < createdRestaurants.length; i++) {
+      seedVendors[i].restaurantId = createdRestaurants[i]._id;
+      await seedVendors[i].save();
+    }
 
     // Build menu items with correct restaurant references
     const allMenuItems = [];
@@ -215,7 +261,7 @@ const seed = async () => {
         // 🔧 FIX: Menu schema's field is `restaurantId`. The old `restaurant: restaurant._id`
         // line silently produced menu items with no restaurantId (Mongoose drops fields
         // not defined in the schema), which is why /:id/menu always returned count: 0.
-        allMenuItems.push({ ...item, restaurantId: restaurant._id, restaurant: restaurant._id });
+        allMenuItems.push({ ...item, restaurantId: restaurant._id });
       });
     });
 
