@@ -125,7 +125,7 @@ const setDeliveryAddress = asyncHandler(async (req, res) => {
 // PATCH /api/cart/payment
 const setPaymentMethod = asyncHandler(async (req, res) => {
   const { paymentMethod } = req.body;
-  const valid = ['upi', 'card', 'cod', 'wallet'];
+  const valid = ['cod'];
   if (!valid.includes(paymentMethod))
     return res.status(400).json({ success: false, message: 'Invalid payment method' });
 

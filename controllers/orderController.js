@@ -422,15 +422,27 @@ const createOrder = asyncHandler(async (req, res) => {
     restaurantId,
     deliveryAddress,
     addressId,
-    paymentMethod = 'upi',
+    paymentMethod = 'cod',
     restaurantNote,
     deliveryInstructions,
     tipAmount = 0,
   } = req.body;
 
-  const validPaymentMethods = ['upi', 'card', 'wallet', 'cod'];
+  // ── Payment methods actually supported today ──────────────────────
+  // There is no payment gateway wired into this request path. Accepting
+  // 'upi' / 'card' / 'wallet' here created an order marked as paid online
+  // with no money taken and no way for the vendor to tell — they cook the
+  // food for free. Until Razorpay verification runs before Order.create,
+  // COD is the only honest option.
+  //
+  // To enable online payment later: create the Razorpay order, take the
+  // payment on the client, verify the signature with
+  // services/paymentService.verifyRazorpaySignature, and only then create
+  // the Order with paymentStatus 'paid'. Add the method back to this list
+  // at the same time, not before.
+  const validPaymentMethods = ['cod'];
   if (!validPaymentMethods.includes(paymentMethod)) {
-    const error = new Error('Invalid payment method.');
+    const error = new Error('Cash on Delivery is the only payment method available right now.');
     error.statusCode = 400;
     throw error;
   }
@@ -478,7 +490,7 @@ const createOrder = asyncHandler(async (req, res) => {
     tipAmount: pricing.tipAmount,
     total: pricing.total,
     paymentMethod,
-    paymentStatus: paymentMethod === 'cod' ? 'pending' : 'pending',
+    paymentStatus: 'pending',   // COD — collected by the rider at handoff
   });
 
   const deliveryOtp = order._plainDeliveryOtp;
@@ -487,7 +499,7 @@ const createOrder = asyncHandler(async (req, res) => {
 
   await Cart.findOneAndUpdate(
     { user: req.user._id },
-    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
+    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'cod' } }
   );
 
   res.status(201).json({

@@ -9,8 +9,12 @@ const Review       = require('../models/Review');
 const generateToken = require('../utils/generateToken');
 const { uploadToCloudinary } = require('../utils/riderUpload');
 
-const ADMIN_ROLES = ['admin', 'ceo'];
+const ADMIN_ROLES = ['admin'];
 const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
+
+// Staff accounts (admin, vendor, rider) can read every customer's name,
+// phone number and home address. Six characters is not enough for that.
+const STAFF_MIN_PASSWORD = 10;
 
 function assertAdmin(req, res) {
   if (!req.user || !ADMIN_ROLES.includes(req.user.role)) {
@@ -26,13 +30,20 @@ exports.adminLogin = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Email and password are required.' });
 
   const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password');
-  if (!user || !user.password)
-    return res.status(401).json({ success: false, message: 'Invalid credentials.' });
-  if (!ADMIN_ROLES.includes(user.role))
-    return res.status(403).json({ success: false, message: 'Access denied. Admin account required.' });
 
-  const isMatch = await bcrypt.compare(password, user.password);
-  if (!isMatch) return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+  // One reply for every failure mode, and the bcrypt compare runs either way.
+  //
+  // The old code returned 403 "Admin account required" for a registered
+  // non-admin email and 401 for an unknown one, before checking the password —
+  // a free oracle for testing whether any given email has an Eatswada account.
+  // Comparing against a dummy hash when the user is missing keeps the response
+  // time flat too, so timing doesn't leak what the status code no longer does.
+  const DUMMY_HASH = '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalidinv';
+  const isMatch = await bcrypt.compare(password, user?.password || DUMMY_HASH);
+
+  if (!user || !user.password || !isMatch || !ADMIN_ROLES.includes(user.role)) {
+    return res.status(401).json({ success: false, message: 'Invalid credentials.' });
+  }
   if (!user.isActive) return res.status(401).json({ success: false, message: 'Account deactivated.' });
 
   user.lastLogin = new Date();
@@ -310,8 +321,8 @@ exports.updateVendor = asyncHandler(async (req, res) => {
   if (name !== undefined) vendor.name = String(name).trim();
 
   if (password !== undefined && password !== '') {
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    if (password.length < STAFF_MIN_PASSWORD) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 10 characters.' });
     }
     vendor.password = password; // re-hashed by the User pre('save') hook
   }
@@ -382,8 +393,8 @@ exports.createRider = asyncHandler(async (req, res) => {
       message: 'name, email, phone, and password are required.',
     });
   }
-  if (password.length < 6) {
-    return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+  if (password.length < STAFF_MIN_PASSWORD) {
+    return res.status(400).json({ success: false, message: 'Password must be at least 10 characters.' });
   }
   if (!VEHICLE_TYPES.includes(vehicleType)) {
     return res.status(400).json({
@@ -512,8 +523,8 @@ exports.updateRider = asyncHandler(async (req, res) => {
   if (name !== undefined) rider.name = String(name).trim();
 
   if (password !== undefined && password !== '') {
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    if (password.length < STAFF_MIN_PASSWORD) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 10 characters.' });
     }
     rider.password = password; // re-hashed by the User pre('save') hook
   }

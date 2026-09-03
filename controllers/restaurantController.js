@@ -5,7 +5,7 @@ const Review = require('../models/Review');
 
 /**
  * Restaurant-level authorization for Availability + Permissions feature:
- *  - CEO (admin) can manage every restaurant.
+ *  - Admin can manage every restaurant.
  *  - Vendor can only manage a restaurant they own.
  * Used by updateRestaurant, deleteRestaurant, and updateRestaurantAvailability.
  */
@@ -217,24 +217,45 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   const existing = await Restaurant.findById(req.params.id);
   if (!existing) return res.status(404).json({ success: false, message: 'Restaurant not found' });
 
-  // PERMISSIONS: CEO can edit any restaurant; vendor only their own.
+  // PERMISSIONS: Admin can edit any restaurant; vendor only their own.
   if (!canManageRestaurant(req.user, existing)) {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant' });
   }
-  // CEO/admin are allowed to control customer-facing presentation flags.
-  // Vendors can edit their own operational restaurant data, but must never
-  // be able to change admin-controlled ranking/badge fields.
-  const isPrivilegedAdmin = req.user.role === 'admin' || req.user.role === 'ceo';
-  const update = { ...req.body };
+  // Field permissions are an ALLOW-LIST, not a deny-list.
+  //
+  // This used to start from { ...req.body } and delete six admin-only fields,
+  // which left every other field in the schema writable by the vendor —
+  // including `rating`, `ratingCount` and `reviewCount` (a vendor could award
+  // themselves 5.0 with 900 reviews) and `location.coordinates`, `minOrder`,
+  // `deliveryRadiusKm`, `freeDeliveryAbove` and `codEnabled` (moving the map
+  // pin on top of the customer changes the distance-based delivery fee).
+  //
+  // Anything not named below is ignored. Adding a field to the schema no
+  // longer silently grants vendors write access to it.
+  const VENDOR_EDITABLE = [
+    'name', 'description', 'phone', 'address', 'image', 'coverImage', 'images',
+    'cuisine', 'cuisineDisplay', 'categories', 'isVeg',
+    'openingHours', 'availability', 'isOpen', 'closedReason',
+  ];
 
-  if (!isPrivilegedAdmin) {
-    delete update.owner;
-    delete update.isFeatured;
-    delete update.isBestSeller;
-    delete update.isNearFast;
-    delete update.homeOrder;
-    delete update.displayPriority;
-  } else {
+  const ADMIN_ONLY_EDITABLE = [
+    'owner', 'isActive', 'isFeatured', 'isBestSeller', 'isNearFast',
+    'homeOrder', 'displayPriority', 'rating', 'ratingCount', 'reviewCount',
+    'location', 'minOrder', 'deliveryRadiusKm', 'codEnabled',
+    'freeDeliveryEnabled', 'freeDeliveryAbove', 'offer', 'commissionRate',
+  ];
+
+  const isPrivilegedAdmin = req.user.role === 'admin';
+  const allowedFields = isPrivilegedAdmin
+    ? [...VENDOR_EDITABLE, ...ADMIN_ONLY_EDITABLE]
+    : VENDOR_EDITABLE;
+
+  const update = {};
+  for (const key of allowedFields) {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) update[key] = req.body[key];
+  }
+
+  if (isPrivilegedAdmin) {
     // Explicitly persist both boolean flags, including false. This avoids
     // truthy/string handling issues and guarantees an unchecked admin box
     // can turn the badge off again.
@@ -259,7 +280,7 @@ const deleteRestaurant = asyncHandler(async (req, res) => {
   const existing = await Restaurant.findById(req.params.id);
   if (!existing) return res.status(404).json({ success: false, message: 'Restaurant not found' });
 
-  // PERMISSIONS: CEO can deactivate any restaurant; vendor only their own.
+  // PERMISSIONS: Admin can deactivate any restaurant; vendor only their own.
   if (!canManageRestaurant(req.user, existing)) {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant' });
   }
@@ -289,7 +310,7 @@ const deleteRestaurant = asyncHandler(async (req, res) => {
  * PATCH /api/restaurants/:id/availability
  * Body: { status: 'open' | 'closed_today' | 'temporarily_closed', opensAt?, closesAt?, autoHours? }
  *
- * PERMISSIONS: CEO can open/close any restaurant; vendor only their own.
+ * PERMISSIONS: Admin can open/close any restaurant; vendor only their own.
  * opensAt/closesAt/autoHours are accepted and stored now (for the future
  * auto-hours feature) but are not evaluated yet — see Restaurant.js.
  */
@@ -334,7 +355,7 @@ const addMenuItem = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findById(targetRestaurantId);
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
 
-  // PERMISSIONS: CEO can add items to any restaurant; vendor only their own.
+  // PERMISSIONS: Admin can add items to any restaurant; vendor only their own.
   if (!canManageRestaurant(req.user, restaurant)) {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant\'s menu' });
   }
@@ -356,7 +377,7 @@ const updateMenuItem = asyncHandler(async (req, res) => {
   const existing = await MenuItem.findById(req.params.itemId);
   if (!existing) return res.status(404).json({ success: false, message: 'Menu item not found' });
 
-  // PERMISSIONS: CEO can edit any menu item; vendor only items on their own
+  // PERMISSIONS: Admin can edit any menu item; vendor only items on their own
   // restaurant. Checked against the item's actual restaurantId (not the URL's
   // :id) so a vendor can't reach another restaurant's item by mismatching params.
   const restaurant = await Restaurant.findById(existing.restaurantId);
@@ -389,7 +410,7 @@ const deleteMenuItem = asyncHandler(async (req, res) => {
  * PATCH /api/restaurants/:id/menu/:itemId/availability
  * Body: { isAvailable: boolean }
  *
- * PERMISSIONS: CEO can mark any item In Stock/Out of Stock; vendor only
+ * PERMISSIONS: Admin can mark any item In Stock/Out of Stock; vendor only
  * items on their own restaurant. `isAvailable` is the feature-facing name
  * from the spec — it's written to the existing `inStock` schema field
  * (kept as-is; see Menu.js "Vendor Toggle" comment) so nothing that already

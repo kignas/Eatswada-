@@ -52,10 +52,11 @@ exports.setupAdmin = asyncHandler(async (req, res) => {
     });
   }
 
-  if (String(password).length < 6) {
+  // This creates the highest-privilege account on the platform.
+  if (String(password).length < 12) {
     return res.status(400).json({
       success: false,
-      message: "Password must be at least 6 characters."
+      message: "Password must be at least 12 characters."
     });
   }
 
