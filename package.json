@@ -1,12 +1,18 @@
 {
-  "name": "nearbite-backend",
+  "name": "eatswada-backend",
   "version": "1.0.0",
-  "description": "Production-grade backend for Nearbite food delivery app",
+  "description": "Production backend for Eatswada food delivery app",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "seed": "node utils/seeder.js"
+    "seed": "node utils/seeder.js",
+    "test:syntax": "node tests/syntax-check.js",
+    "test:launch-gate": "node tests/launch-gate.js",
+    "test:integration": "node tests/integration-gate.js",
+    "test:e2e:order": "node tests/order-lifecycle-e2e.js",
+    "test:security": "node tests/security-gate.js",
+    "test:deployment": "node tests/deployment-gate.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -24,16 +30,18 @@
     "express-async-handler": "^1.2.0",
     "hpp": "^0.2.3",
     "compression": "^1.7.4",
-"cloudinary": "^2.7.0",
-"multer": "^2.0.2",
-"streamifier": "^0.1.1"
-},
-"devDependencies": {
-  "nodemon": "^3.0.2"
-},
+    "cloudinary": "^2.7.0",
+    "multer": "^2.0.2",
+    "streamifier": "^0.1.1",
+    "axios": "^1.7.9",
+    "twilio": "^5.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
-  "author": "Nearbite",
+  "author": "Eatswada",
   "license": "MIT"
 }

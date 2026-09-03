@@ -32,6 +32,9 @@ const adminRiderRoutes = require('./routes/adminRiderRoutes');
 
 // 🚨 APP IS CREATED HERE FIRST! 🚨
 const app = express();
+// Render sits behind a reverse proxy. Trust the first proxy hop so
+// express-rate-limit sees the real client IP instead of the shared proxy IP.
+app.set('trust proxy', 1);
 
 app.set("trust proxy", 1);
 
@@ -39,25 +42,46 @@ app.set("trust proxy", 1);
 app.use(compression());
 app.use(helmet());
 
-// 🚨 UPDATED CORS CONFIGURATION FOR VERCEL + GITHUB PAGES 🚨
+// Production CORS is configured through CORS_ORIGINS (comma-separated).
+// The GitHub Pages portal origin is retained because the current Admin,
+// Vendor and Rider portals use that host. Never use '*' with credentials.
+const configuredCorsOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+const defaultCorsOrigins = [
+  'http://localhost:5500',
+  'http://127.0.0.1:5500',
+  'https://kignas.github.io',
+];
+
+const allowedCorsOrigins = [...new Set([...defaultCorsOrigins, ...configuredCorsOrigins])];
+
 app.use(cors({
-  origin: [
-    'http://localhost:5500', 
-    'http://127.0.0.1:5500', 
-    'https://nearbite-three.vercel.app', // Your live customer frontend URL!
-    // 🔧 FIX: Vendor, Rider, and CEO portals are hosted on GitHub Pages at
-    // kignas.github.io/Vendor, /Rider, /Ceo. That origin was missing here,
-    // so the browser blocked every request from all three portals before
-    // it ever reached the server — surfacing as "Can't reach the server"
-    // on every login page, even when the backend was up.
-    'https://kignas.github.io'
-  ],
+  origin: (origin, callback) => {
+    // Non-browser/server-to-server requests have no Origin header.
+    if (!origin) return callback(null, true);
+    if (allowedCorsOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('CORS origin not allowed'));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-setup-key']
 }));
 
-app.options('*', cors());
+// Use the exact same allow-list for preflight as for normal requests.
+// `cors()` without options would reflect any origin on OPTIONS requests.
+app.options('*', cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedCorsOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('CORS origin not allowed'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-setup-key'],
+}));
 
 const globalLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
@@ -82,11 +106,11 @@ if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
 
 // ── Health & Welcome Routes ───────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ success: true, service: 'Nearbite API', version: '1.0.0', uptime: process.uptime().toFixed(2) + 's' });
+  res.json({ success: true, service: 'Eatswada API', version: '1.0.0', uptime: process.uptime().toFixed(2) + 's' });
 });
 
 app.get('/', (req, res) => {
-  res.status(200).send('<h2>🍔 Nearbite Backend API is Live and Running! 🚀</h2>');
+  res.status(200).send('<h2>🍔 Eatswada Backend API is Live and Running! 🚀</h2>');
 });
 
 app.use('/api/users',       authLimiter, userRoutes);
@@ -113,7 +137,7 @@ let server;
 connectDB().then(() => {
   server = app.listen(PORT, '0.0.0.0', () => {
     console.log('╔══════════════════════════════════════════════╗');
-    console.log(`║  🍔  Nearbite API running on port ${PORT}       ║`);
+    console.log(`║  🍔  Eatswada API running on port ${PORT}       ║`);
     console.log('╚══════════════════════════════════════════════╝');
   });
 
