@@ -81,6 +81,20 @@ const orderSchema = new mongoose.Schema(
     restaurantName: { type: String, required: true },
     restaurantImage: { type: String, default: '' },
 
+    // Multi-restaurant checkout grouping.
+    // ONE customer checkout can produce several Order documents — exactly one
+    // per restaurant, so vendor ownership isolation is preserved (a vendor
+    // still only ever sees their own restaurant's order). Every Order created
+    // by the same checkout shares this id, generated server-side with
+    // crypto.randomUUID(). Optional so every pre-existing single-restaurant
+    // order (which never had one) remains valid and unchanged.
+    checkoutGroupId: {
+      type: String,
+      default: null,
+      index: true,
+      required: false,
+    },
+
     // Customer contact snapshot. These are captured at order creation so
     // historical orders still have the customer's name/phone even if the
     // profile changes later. Populated `user` remains the source for older
