@@ -9,84 +9,45 @@ const OTP_TTL_MS = 5 * 60 * 1000;
 const normalizePhone = (phone) => String(phone || '').trim();
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
-// Generic reply for every OTP failure. Never tell the caller whether the
-// account exists, whether the code was wrong, or how many tries are left —
-// each of those is a free hint for someone guessing.
-const OTP_FAIL = 'Invalid or expired OTP.';
-const OTP_LOCKED = 'Too many incorrect codes. Please request a new OTP in 15 minutes.';
-
 const issueOTP = async (user, purpose) => {
   const otp = generateOTPCode();
-  user.otp = {
-    code: otp,
-    expiresAt: new Date(Date.now() + OTP_TTL_MS),
-    purpose,
-    attempts: 0,
-    lockedUntil: null,
-    lastSentAt: new Date(),
-  };
+  user.otp = { code: otp, expiresAt: new Date(Date.now() + OTP_TTL_MS), purpose };
   await user.save();
   await sendOTP(user.phone, otp);
 };
 
-// Every customer-facing auth handler looks the account up through this.
-//
-// SECURITY: the role filter is the whole point. Without it, /send-otp and
-// /forgot-password match admin, vendor and rider accounts by phone number,
-// which means the customer OTP flow doubles as a staff password reset for
-// anyone who knows a staff phone number.
-const findCustomerByPhone = (phone, extraSelect = '') =>
-  User.findOne({ phone, role: 'user' })
-    .select(`+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt${extraSelect}`);
-
 const sendOTPHandler = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
-  if (/^\+?[6-9]\d{9,14}$/.test(phone) === false) {
+  console.log(`[OTP-DEBUG] handler reached phone=${phone ? `${phone.slice(0, 3)}****${phone.slice(-3)}` : 'empty'}`);
+
+  if (!/^\+?[6-9]\d{9,14}$/.test(phone)) {
+    console.log('[OTP-DEBUG] validation failed: invalid phone');
     return res.status(400).json({ success: false, message: 'Enter a valid mobile number.' });
   }
 
-  // A staff phone number must never be usable here. If one is supplied we
-  // reply exactly as we would for a fresh customer number and send nothing —
-  // no OTP is written to the staff account, and the caller learns nothing.
-  const staffAccount = await User.findOne({ phone, role: { $ne: 'user' } }).select('_id');
-  if (staffAccount) {
-    return res.json({ success: true, message: 'OTP sent successfully' });
-  }
-
-  let user = await findCustomerByPhone(phone);
+  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
   if (!user) {
-    user = new User({ phone, role: 'user', isPhoneVerified: false });
-  }
-
-  // Per-account throttle, on top of the per-IP limiter in the route. Stops one
-  // number being used to burn SMS credit from many IPs.
-  if (user.otpRequestedTooRecently()) {
-    return res.status(429).json({
-      success: false,
-      message: 'Please wait a minute before requesting another OTP.',
-    });
+    user = new User({ phone, isPhoneVerified: false });
+    console.log('[OTP-DEBUG] no existing user; creating OTP-capable user');
+  } else {
+    console.log('[OTP-DEBUG] existing user found');
   }
 
   await issueOTP(user, 'login');
+  console.log(`[OTP-DEBUG] OTP issued successfully provider=${process.env.OTP_PROVIDER || 'mock'}`);
   res.json({ success: true, message: 'OTP sent successfully' });
 });
 
 const verifyOTPHandler = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const otp = String(req.body.otp || '').trim();
-  const user = await findCustomerByPhone(phone);
-  if (!user) return res.status(400).json({ success: false, message: OTP_FAIL });
-
-  const result = user.checkOTP(otp, 'login');
-  if (!result.ok) {
-    await user.save();   // persist the attempt counter / lock
-    return res.status(400).json({
-      success: false,
-      message: result.reason === 'locked' || result.reason === 'locked_now' ? OTP_LOCKED : OTP_FAIL,
-    });
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  if (!user) return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+  if (user.otp?.purpose !== 'login' || !user.matchOTP(otp)) {
+    return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
   }
-
   user.isPhoneVerified = true;
+  user.otp = undefined;
   user.lastLogin = new Date();
   await user.save();
   res.json({
@@ -108,17 +69,11 @@ const register = asyncHandler(async (req, res) => {
   if (!name || name.length < 2) return res.status(400).json({ success:false, message:'Name is required.' });
   if (email && !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ success:false, message:'Enter a valid email address.' });
 
-  let user = await findCustomerByPhone(phone, ' +password');
+  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +password');
   if (!user) return res.status(400).json({ success:false, message:'Please verify your mobile number first.' });
   if (user.isPhoneVerified && user.password) return res.status(409).json({ success:false, message:'This account already exists. Please log in.' });
-
-  const otpResult = user.checkOTP(otp, 'login');
-  if (!otpResult.ok) {
-    await user.save();
-    return res.status(400).json({
-      success: false,
-      message: otpResult.reason === 'locked' || otpResult.reason === 'locked_now' ? OTP_LOCKED : OTP_FAIL,
-    });
+  if (!user.otp?.code || user.otp.purpose !== 'login' || !user.matchOTP(otp)) {
+    return res.status(400).json({ success:false, message:'Invalid or expired OTP.' });
   }
   const duplicateEmail = email ? await User.findOne({ email, _id: { $ne: user._id } }) : null;
   if (duplicateEmail) return res.status(409).json({ success:false, message:'This email is already registered.' });
@@ -127,6 +82,7 @@ const register = asyncHandler(async (req, res) => {
   if (email) user.email = email;
   user.password = password;
   user.isPhoneVerified = true;
+  user.otp = undefined;
   user.lastLogin = new Date();
   await user.save();
 
@@ -136,8 +92,7 @@ const register = asyncHandler(async (req, res) => {
 const login = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const password = String(req.body.password || '');
-  // role: 'user' — staff sign in through their own portals, never here.
-  const user = await User.findOne({ phone, role: 'user' }).select('+password');
+  const user = await User.findOne({ phone }).select('+password');
   if (!user || !user.password || !(await user.matchPassword(password))) {
     return res.status(401).json({ success: false, message: 'Invalid phone or password.' });
   }
@@ -152,9 +107,8 @@ const requestPasswordReset = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const generic = 'If an account exists for this number, we sent a verification code.';
   if (!/^\+?[6-9]\d{9,14}$/.test(phone)) return res.json({ success:true, message:generic });
-  const user = await findCustomerByPhone(phone);
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
   if (!user || !user.isActive || !user.password) return res.json({ success:true, message:generic });
-  if (user.otpRequestedTooRecently()) return res.json({ success:true, message:generic });
   await issueOTP(user, 'password_reset');
   res.json({ success:true, message:generic });
 });
@@ -162,21 +116,12 @@ const requestPasswordReset = asyncHandler(async (req, res) => {
 const verifyPasswordResetOTP = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const otp = String(req.body.otp || '').trim();
-  const user = await findCustomerByPhone(phone);
-  if (!user || !user.isActive) {
-    return res.status(400).json({ success:false, message:OTP_FAIL });
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  if (!user || !user.isActive || user.otp?.purpose !== 'password_reset' || !user.matchOTP(otp)) {
+    return res.status(400).json({ success:false, message:'Invalid or expired OTP.' });
   }
-
-  const result = user.checkOTP(otp, 'password_reset');
-  if (!result.ok) {
-    await user.save();
-    return res.status(400).json({
-      success: false,
-      message: result.reason === 'locked' || result.reason === 'locked_now' ? OTP_LOCKED : OTP_FAIL,
-    });
-  }
-
   const resetToken = user.createPasswordResetToken();
+  user.otp = undefined;
   await user.save();
   res.json({ success:true, data:{ resetToken } });
 });
@@ -188,7 +133,7 @@ const resetPassword = asyncHandler(async (req, res) => {
   if (password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
   if (!resetToken) return res.status(400).json({ success:false, message:'Password reset session expired. Please request a new OTP.' });
   const hash = crypto.createHash('sha256').update(resetToken).digest('hex');
-  const user = await User.findOne({ phone, role: 'user' }).select('+passwordResetTokenHash +passwordResetExpiresAt');
+  const user = await User.findOne({ phone }).select('+passwordResetTokenHash +passwordResetExpiresAt');
   if (!user || !user.passwordResetTokenHash || user.passwordResetTokenHash !== hash || !user.passwordResetExpiresAt || user.passwordResetExpiresAt < new Date()) {
     return res.status(400).json({ success:false, message:'Password reset session expired. Please request a new OTP.' });
   }
