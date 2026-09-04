@@ -1,5 +1,6 @@
 // File 2: controllers/orderController.js
 const mongoose    = require('mongoose');
+const crypto      = require('crypto');
 const Order      = require('../models/Order');
 const Cart       = require('../models/Cart');
 const Address    = require('../models/Address');
@@ -79,57 +80,31 @@ function withLiveDisplayData(orderDoc) {
 
 // ─────────────────────────────────────────────────────────────────────
 // Server-authoritative delivery + order pricing
-// Maynaguri launch rule:
-//   < 10 km   => ₹30
-//   10–15 km  => ₹40
-//   > 15 km   => ₹50
-// The browser may display an estimate, but these values are calculated
-// again here from database data and customer coordinates.
+// The delivery tier + geo helpers now live in services/deliveryPricing.js so
+// the checkout path and the cart-preview path price delivery identically
+// (single source of truth). Behaviour is unchanged from the previous inline
+// implementation. The browser may display an estimate, but these values are
+// calculated again here from database data and customer coordinates.
 // ─────────────────────────────────────────────────────────────────────
-const DELIVERY_RULES = Object.freeze({
-  UNDER_10_KM: 30,
-  FROM_10_TO_15_KM: 40,
-  ABOVE_15_KM: 50,
-});
-const MAX_DELIVERY_RADIUS_KM = 15;
+const {
+  MAX_DELIVERY_RADIUS_KM,
+  validCoordinates,
+  isPlaceholderRestaurantLocation,
+  haversineKm,
+  calculateDeliveryFee,
+} = require('../services/deliveryPricing');
+
 // Customer tip is optional, but must stay within a sane server-side limit.
 const MAX_TIP_AMOUNT = 500;
 
-function validCoordinates(coords) {
-  return Array.isArray(coords) &&
-    coords.length === 2 &&
-    Number.isFinite(Number(coords[0])) &&
-    Number.isFinite(Number(coords[1])) &&
-    Number(coords[0]) >= -180 && Number(coords[0]) <= 180 &&
-    Number(coords[1]) >= -90 && Number(coords[1]) <= 90;
-}
-
-function isPlaceholderRestaurantLocation(coords) {
-  // Restaurant.js currently has Kolkata as a legacy placeholder default.
-  // Nearbite launches in Maynaguri, so never use that placeholder for pricing.
-  return Array.isArray(coords) &&
-    Math.abs(Number(coords[0]) - 88.3832) < 0.000001 &&
-    Math.abs(Number(coords[1]) - 22.5726) < 0.000001;
-}
-
-function haversineKm(from, to) {
-  const [lon1, lat1] = from.map(Number);
-  const [lon2, lat2] = to.map(Number);
-  const toRad = value => value * Math.PI / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) ** 2;
-  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function calculateDeliveryFee(distanceKm) {
-  if (distanceKm < 10) return DELIVERY_RULES.UNDER_10_KM;
-  if (distanceKm <= 15) return DELIVERY_RULES.FROM_10_TO_15_KM;
-  return DELIVERY_RULES.ABOVE_15_KM;
-}
+// Pure multi-restaurant checkout math (grouping + deterministic tip split).
+const {
+  getMenuRefId,
+  groupItemsByRestaurant,
+  allocateTip,
+  resolveRestaurantNote,
+  normalizeRestaurantNotes,
+} = require('../services/checkoutMath');
 
 function normalizeCustomerCoordinates(deliveryAddress) {
   if (!deliveryAddress || typeof deliveryAddress !== 'object') return null;
@@ -243,7 +218,7 @@ async function resolveDeliveryAddress({ addressId, deliveryAddress, userId }) {
   };
 }
 
-async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress, addressId, userId, tipAmount }) {
+async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress, addressId, userId }) {
   if (!Array.isArray(items) || items.length === 0) {
     const error = new Error('Cart is empty');
     error.statusCode = 400;
@@ -321,6 +296,9 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
   }
 
   const uniqueIds = [...new Set(menuIds.map(String))];
+  // Ownership is enforced against the real production Menu schema.
+  // Menu uses `restaurantId`; there is intentionally no legacy `restaurant`
+  // field on the Menu model.
   const menuDocs = await Menu.find({
     _id: { $in: uniqueIds },
     restaurantId: restaurant._id,
@@ -388,58 +366,87 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
     ? 0
     : baseDeliveryFee;
 
-  // The client may request a tip, but the server remains authoritative.
-  // Invalid, negative, non-finite, or excessive values are rejected rather
-  // than silently changing the customer's bill.
-  const parsedTip = Number(tipAmount ?? 0);
-  if (!Number.isFinite(parsedTip) || parsedTip < 0 || parsedTip > MAX_TIP_AMOUNT) {
-    const error = new Error(`Tip must be between ₹0 and ₹${MAX_TIP_AMOUNT}.`);
-    error.statusCode = 400;
-    throw error;
-  }
-  const validTip = Math.round(parsedTip * 100) / 100;
-
-  // Preserve the existing authoritative pricing formula and add the verified
-  // tip on top. No client-provided subtotal/delivery/total is trusted.
-  const total = subtotal + deliveryFee + validTip;
+  // NOTE: tip is intentionally NOT handled here. In a multi-restaurant
+  // checkout a single customer tip is validated once and then allocated
+  // across the child orders by createOrder (see allocateTip) — pricing one
+  // restaurant group must not bake in the whole tip. The food-only total
+  // (subtotal + verified delivery fee) is returned; createOrder adds this
+  // order's allocated tip to produce the final order total. No
+  // client-provided subtotal/delivery/total is ever trusted.
+  const total = subtotal + deliveryFee;
 
   return {
     restaurant,
     serverItems,
     subtotal,
     deliveryFee,
-    tipAmount: validTip,
-    total,
+    minimumOrder,
+    freeDeliveryEnabled,
+    freeDeliveryAbove,
+    total, // food + delivery only (pre-tip)
     distanceKm: Number(distanceKm.toFixed(2)),
     customerCoords,
     addressSnapshot,
   };
 }
 
+// Validate a single customer-requested tip for the whole checkout. The server
+// remains authoritative: non-finite, negative, or excessive values are
+// rejected rather than silently altering the bill. Returned value is rounded
+// to currency precision. This runs ONCE per checkout; the result is then
+// split across restaurant orders by allocateTip.
+function validateCheckoutTip(tipAmount) {
+  const parsedTip = Number(tipAmount ?? 0);
+  if (!Number.isFinite(parsedTip) || parsedTip < 0 || parsedTip > MAX_TIP_AMOUNT) {
+    const error = new Error(`Tip must be between ₹0 and ₹${MAX_TIP_AMOUNT}.`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return Math.round(parsedTip * 100) / 100;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MULTI-RESTAURANT CHECKOUT (Phase 3.5A)
+//
+// ONE customer checkout produces ONE Order document PER restaurant (never a
+// single order mixing restaurants — that would break vendor ownership
+// isolation). All child orders share a crypto.randomUUID() checkoutGroupId.
+//
+// The server is the sole authority for pricing and ownership:
+//   • each item's owning restaurant is resolved from MongoDB (client-supplied
+//     restaurantId is ignored) and items are grouped by that real owner;
+//   • every restaurant group is priced with buildAuthoritativeOrderPricing
+//     (active/open checks, distance/radius, menu ownership, stock, live
+//     prices, minimum order, delivery fee, free-delivery threshold);
+//   • COD must be enabled for EVERY restaurant in the checkout;
+//   • the single customer tip is validated once and split across the child
+//     orders by verified delivery fee (never duplicated — see allocateTip);
+//   • if any child order fails to create, the ones already created for THIS
+//     checkoutGroupId are deleted (compensating rollback) and the cart is
+//     left untouched — the cart is cleared ONLY after every order succeeds.
+//
+// Single-restaurant checkout is a special case of the same path and returns
+// the exact legacy response shape (data + top-level ids + deliveryOtp) for
+// backward compatibility.
+// ─────────────────────────────────────────────────────────────────────
 const createOrder = asyncHandler(async (req, res) => {
   const {
     items,
-    restaurantId,
+    // restaurantId is accepted for backward compatibility but intentionally
+    // NOT trusted — each item's owning restaurant is resolved from MongoDB.
     deliveryAddress,
     addressId,
     paymentMethod = 'cod',
-    restaurantNote,
-    deliveryInstructions,
+    restaurantNote,          // legacy flat note (single-restaurant, or explicit global)
+    restaurantNotes,         // optional per-restaurant notes: [{restaurantId, note}] or { [restaurantId]: note }
+    globalRestaurantNote,    // optional boolean: apply flat restaurantNote to every restaurant
+    deliveryInstructions,    // delivery/address-level, applies to every child order
     tipAmount = 0,
   } = req.body;
 
   // ── Payment methods actually supported today ──────────────────────
-  // There is no payment gateway wired into this request path. Accepting
-  // 'upi' / 'card' / 'wallet' here created an order marked as paid online
-  // with no money taken and no way for the vendor to tell — they cook the
-  // food for free. Until Razorpay verification runs before Order.create,
-  // COD is the only honest option.
-  //
-  // To enable online payment later: create the Razorpay order, take the
-  // payment on the client, verify the signature with
-  // services/paymentService.verifyRazorpaySignature, and only then create
-  // the Order with paymentStatus 'paid'. Add the method back to this list
-  // at the same time, not before.
+  // COD is the only honest option until a verified payment gateway runs
+  // before Order.create (see the note in the previous implementation).
   const validPaymentMethods = ['cod'];
   if (!validPaymentMethods.includes(paymentMethod)) {
     const error = new Error('Cash on Delivery is the only payment method available right now.');
@@ -447,72 +454,185 @@ const createOrder = asyncHandler(async (req, res) => {
     throw error;
   }
 
-  const pricing = await buildAuthoritativeOrderPricing({
-    items,
-    restaurantId,
-    deliveryAddress,
-    addressId,
-    userId: req.user._id,
-    tipAmount,
-  });
-
-  if (paymentMethod === 'cod' && pricing.restaurant.codEnabled !== true) {
-    const error = new Error('Cash on Delivery is not available for this restaurant.');
-    error.statusCode = 403;
+  if (!Array.isArray(items) || items.length === 0) {
+    const error = new Error('Cart is empty');
+    error.statusCode = 400;
     throw error;
   }
 
-  // Never trust client-provided restaurantName, item prices, subtotal,
-  // deliveryFee, or total. Address text/coordinates now also
-  // come from pricing.addressSnapshot/customerCoords, resolved server-side
-  // from the saved Address document when addressId is supplied.
+  // ── Resolve each item's REAL owning restaurant from MongoDB ──────────
+  const rawIds = items.map(getMenuRefId);
+  if (rawIds.some(id => !mongoose.Types.ObjectId.isValid(id))) {
+    const error = new Error('One or more cart items are invalid or outdated. Please refresh your cart.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const uniqueIds = [...new Set(rawIds.map(String))];
+  const menuOwners = await Menu.find({ _id: { $in: uniqueIds } })
+    .select('restaurantId')
+    .lean();
+  const menuRestaurantMap = new Map(
+    menuOwners.map(m => [String(m._id), String(m.restaurantId || '')])
+  );
+
+  // Group by authoritative owner (throws 400 if any item is unresolved).
+  const groups = groupItemsByRestaurant(items, menuRestaurantMap);
+  const isSingleRestaurant = groups.length === 1;
+
+  // ── Price every restaurant group authoritatively ────────────────────
+  const pricings = [];
+  for (const group of groups) {
+    const pricing = await buildAuthoritativeOrderPricing({
+      items: group.items,
+      restaurantId: group.restaurantId,
+      deliveryAddress,
+      addressId,
+      userId: req.user._id,
+    });
+
+    // COD must be available for EVERY restaurant in the checkout.
+    if (paymentMethod === 'cod' && pricing.restaurant.codEnabled !== true) {
+      const error = new Error(
+        `Cash on Delivery is not available for ${pricing.restaurant.name || 'one of the restaurants'} in your order.`
+      );
+      error.statusCode = 403;
+      throw error;
+    }
+
+    pricings.push(pricing);
+  }
+
+  // ── Validate the tip ONCE, then allocate it across restaurant orders ─
+  const requestedTip = validateCheckoutTip(tipAmount);
+  const allocatedTips = allocateTip(requestedTip, pricings.map(p => p.deliveryFee));
+
+  // Defensive: the allocation must sum EXACTLY to the requested tip.
+  const allocatedTotal = Math.round(allocatedTips.reduce((s, t) => s + t, 0) * 100) / 100;
+  if (allocatedTotal !== requestedTip) {
+    const error = new Error('Tip allocation error. Please try again.');
+    error.statusCode = 500;
+    throw error;
+  }
+
+  // ── Resolve notes (never blindly copied across restaurants) ──────────
+  const perRestaurantNotes = normalizeRestaurantNotes(
+    restaurantNotes,
+    id => mongoose.Types.ObjectId.isValid(id)
+  );
+  const cleanDeliveryInstructions =
+    typeof deliveryInstructions === 'string' ? deliveryInstructions.trim().slice(0, 250) : '';
+
   const customer = await User.findById(req.user._id).select('name phone').lean();
+  const checkoutGroupId = crypto.randomUUID();
 
-  const addressSnapshot = {
-    ...pricing.addressSnapshot,
-    coordinates: pricing.customerCoords,
-  };
+  // ── Create one Order per restaurant, with compensating rollback ──────
+  const createdOrders = [];
+  try {
+    for (let idx = 0; idx < pricings.length; idx += 1) {
+      const pricing = pricings[idx];
+      const allocatedTip = allocatedTips[idx];
+      const note = resolveRestaurantNote({
+        restaurantId: String(pricing.restaurant._id),
+        perRestaurantNotes,
+        flatNote: restaurantNote,
+        isSingleRestaurant,
+        globalNote: globalRestaurantNote === true,
+      });
 
-  const order = await Order.create({
-    user: req.user._id,
-    restaurant: pricing.restaurant._id,
-    restaurantName: pricing.restaurant.name,
-    restaurantImage: pricing.restaurant.image || '',
-    customerName: customer?.name || '',
-    customerPhone: customer?.phone || '',
-    items: pricing.serverItems,
-    deliveryAddress: addressSnapshot,
-    deliveryDistanceKm: pricing.distanceKm,
-    subtotal: pricing.subtotal,
-    deliveryFee: pricing.deliveryFee,
-    restaurantNote: typeof restaurantNote === 'string' ? restaurantNote.trim().slice(0, 250) : '',
-    deliveryInstructions: typeof deliveryInstructions === 'string' ? deliveryInstructions.trim().slice(0, 250) : '',
-    tipAmount: pricing.tipAmount,
-    total: pricing.total,
-    paymentMethod,
-    paymentStatus: 'pending',   // COD — collected by the rider at handoff
-  });
+      const addressSnapshot = { ...pricing.addressSnapshot, coordinates: pricing.customerCoords };
+      const orderTotal = Math.round((pricing.subtotal + pricing.deliveryFee + allocatedTip) * 100) / 100;
 
-  const deliveryOtp = order._plainDeliveryOtp;
-  order.clearOtpSecrets();
-  await order.populate(ORDER_POPULATE_PATHS);
+      const order = await Order.create({
+        user: req.user._id,
+        restaurant: pricing.restaurant._id,
+        restaurantName: pricing.restaurant.name,
+        restaurantImage: pricing.restaurant.image || '',
+        customerName: customer?.name || '',
+        customerPhone: customer?.phone || '',
+        items: pricing.serverItems,
+        deliveryAddress: addressSnapshot,
+        deliveryDistanceKm: pricing.distanceKm,
+        subtotal: pricing.subtotal,
+        deliveryFee: pricing.deliveryFee,
+        restaurantNote: note,
+        deliveryInstructions: cleanDeliveryInstructions,
+        tipAmount: allocatedTip,
+        total: orderTotal,
+        checkoutGroupId,
+        paymentMethod,
+        paymentStatus: 'pending', // COD — collected by the rider at handoff
+      });
 
+      createdOrders.push(order);
+    }
+  } catch (err) {
+    // Compensating rollback: delete ONLY the orders this checkout created.
+    // Scoped by _id + user + checkoutGroupId so unrelated orders are never
+    // touched. The cart is deliberately NOT cleared, so the customer can
+    // retry without losing their basket.
+    if (createdOrders.length > 0) {
+      const ids = createdOrders.map(o => o._id);
+      try {
+        await Order.deleteMany({ _id: { $in: ids }, user: req.user._id, checkoutGroupId });
+      } catch (_cleanupErr) { /* best-effort cleanup; original error is surfaced */ }
+    }
+    throw err;
+  }
+
+  // ── Every child order created — NOW it is safe to clear the cart ─────
   await Cart.findOneAndUpdate(
     { user: req.user._id },
     { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'cod' } }
   );
 
-  res.status(201).json({
-    success: true,
-    data: {
-      ...withLiveDisplayData(order),
-      orderNumber: order.orderNumber,
-      shipmentId: order.shipmentId,
+  // ── Response ─────────────────────────────────────────────────────────
+  if (isSingleRestaurant) {
+    // Preserve the exact legacy single-restaurant response shape.
+    const order = createdOrders[0];
+    const pricing = pricings[0];
+    const deliveryOtp = order._plainDeliveryOtp;
+    order.clearOtpSecrets();
+    await order.populate(ORDER_POPULATE_PATHS);
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        ...withLiveDisplayData(order),
+        orderNumber: order.orderNumber,
+        shipmentId: order.shipmentId,
+        publicOrderId: order.orderNumber,
+        publicShipmentId: order.shipmentId,
+        deliveryDistanceKm: pricing.distanceKm,
+        checkoutGroupId,
+      },
+      checkoutGroupId,
+      deliveryOtp,
+    });
+  }
+
+  // Multi-restaurant response: one safe summary per child order. Privileged
+  // internal fields (OTP secrets, rider internals, hashes) are never exposed.
+  const orders = createdOrders.map((order, idx) => {
+    order.clearOtpSecrets();
+    return {
+      _id: order._id,
       publicOrderId: order.orderNumber,
       publicShipmentId: order.shipmentId,
-      deliveryDistanceKm: pricing.distanceKm,
-    },
-    deliveryOtp,
+      restaurant: order.restaurant,
+      restaurantName: order.restaurantName,
+      subtotal: order.subtotal,
+      deliveryFee: order.deliveryFee,
+      tipAmount: order.tipAmount,
+      total: order.total,
+      status: order.status,
+      deliveryDistanceKm: pricings[idx].distanceKm,
+    };
+  });
+
+  return res.status(201).json({
+    success: true,
+    checkoutGroupId,
+    orders,
   });
 });
 

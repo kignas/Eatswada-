@@ -364,7 +364,8 @@ const addMenuItem = asyncHandler(async (req, res) => {
   // `restaurant` here meant Mongoose silently dropped it (not in schema), leaving
   // the required `restaurantId` unset — so the item never matched
   // GET /api/restaurants/:id/menu, which filters on restaurantId.
-  const payload = { ...req.body, restaurantId: targetRestaurantId, restaurant: targetRestaurantId };
+  const payload = { ...req.body, restaurantId: targetRestaurantId };
+  delete payload.restaurant;
   if (payload.originalPrice !== undefined && payload.originalPrice !== null && Number(payload.originalPrice) <= Number(payload.price)) {
     payload.originalPrice = null;
   }

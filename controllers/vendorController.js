@@ -16,7 +16,7 @@ function assertVendorPayload(req, res) {
 }
 
 function restaurantOwnershipFilter(req) {
-  return { $or: [{ restaurant: req.user.restaurantId }, { restaurantId: req.user.restaurantId }] };
+  return { restaurantId: req.user.restaurantId };
 }
 
 const VENDOR_ORDER_POPULATE = [
@@ -183,7 +183,6 @@ exports.addMenuItem = asyncHandler(async (req, res) => {
 
   const itemData = {
     ...safeBody,
-    restaurant: req.user.restaurantId,
     restaurantId: req.user.restaurantId,
   };
   const item = await Menu.create(itemData);
