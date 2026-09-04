@@ -15,7 +15,11 @@ function assertVendorPayload(req, res) {
   return true;
 }
 
-function restaurantOwnershipFilter(req) {
+function orderOwnershipFilter(req) {
+  return { restaurant: req.user.restaurantId };
+}
+
+function vendorMenuFilter(req) {
   return { restaurantId: req.user.restaurantId };
 }
 
@@ -68,7 +72,7 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
   if (view === 'history') statusFilter = { status: { $in: HISTORY_STATUSES } };
 
   const orders = await Order.find({
-    ...restaurantOwnershipFilter(req),
+    ...orderOwnershipFilter(req),
     ...statusFilter,
   })
     .populate(VENDOR_ORDER_POPULATE)
@@ -80,7 +84,7 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
 exports.acceptOrder = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
 
-  const order = await Order.findOne({ _id: req.params.id, ...restaurantOwnershipFilter(req) });
+  const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
 
   if (order.status !== 'placed') {
@@ -104,7 +108,7 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'A rejection reason is required.' });
   }
 
-  const order = await Order.findOne({ _id: req.params.id, ...restaurantOwnershipFilter(req) });
+  const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
 
   if (order.status !== 'placed') {
@@ -124,7 +128,7 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
 exports.updateOrderStatus = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
 
-  const order = await Order.findOne({ _id: req.params.id, ...restaurantOwnershipFilter(req) });
+  const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
 
   const nextStatus = VENDOR_STATUS_TRANSITIONS[order.status];
@@ -166,51 +170,14 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 
 exports.getVendorMenu = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
-  const items = await Menu.find(restaurantOwnershipFilter(req)).sort({ sortOrder: 1, createdAt: -1 });
+  const items = await Menu.find(vendorMenuFilter(req)).sort({ sortOrder: 1, createdAt: -1 });
   res.status(200).json({ success: true, data: items });
 });
 
-exports.addMenuItem = asyncHandler(async (req, res) => {
-  if (!assertVendorPayload(req, res)) return;
-  const {
-    restaurant,
-    restaurantId,
-    _id,
-    createdAt,
-    updatedAt,
-    ...safeBody
-  } = req.body;
-
-  const itemData = {
-    ...safeBody,
-    restaurantId: req.user.restaurantId,
-  };
-  const item = await Menu.create(itemData);
-  res.status(201).json({ success: true, data: item });
-});
-
-exports.updateMenuItem = asyncHandler(async (req, res) => {
-  if (!assertVendorPayload(req, res)) return;
-  const {
-    restaurant,
-    restaurantId,
-    _id,
-    createdAt,
-    updatedAt,
-    ...safeBody
-  } = req.body;
-  const item = await Menu.findOneAndUpdate(
-    { _id: req.params.id, ...restaurantOwnershipFilter(req) },
-    safeBody,
-    { new: true, runValidators: true }
-  );
-  if (!item) return res.status(404).json({ success: false, message: 'Item not found or access denied.' });
-  res.status(200).json({ success: true, data: item });
-});
 
 exports.toggleItemStock = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
-  const existing = await Menu.findOne({ _id: req.params.id, ...restaurantOwnershipFilter(req) });
+  const existing = await Menu.findOne({ _id: req.params.id, ...vendorMenuFilter(req) });
   if (!existing) return res.status(404).json({ success: false, message: 'Menu item not found or access denied.' });
 
   const updated = await Menu.findByIdAndUpdate(existing._id, { inStock: !existing.inStock }, { new: true });
@@ -230,20 +197,6 @@ exports.getRestaurantProfile = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
   const restaurant = await Restaurant.findById(req.user.restaurantId);
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant profile not found.' });
-  res.status(200).json({ success: true, data: restaurant });
-});
-
-exports.updateRestaurantStatus = asyncHandler(async (req, res) => {
-  if (!assertVendorPayload(req, res)) return;
-  if (typeof req.body.isActive !== 'boolean') {
-    return res.status(400).json({ success: false, message: 'isActive must be a boolean.' });
-  }
-  const restaurant = await Restaurant.findOneAndUpdate(
-    { _id: req.user.restaurantId },
-    { isActive: req.body.isActive },
-    { new: true, runValidators: true }
-  );
-  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
   res.status(200).json({ success: true, data: restaurant });
 });
 
