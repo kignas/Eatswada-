@@ -1,31 +1,18 @@
 /**
  * sendOTP utility
- * Supports:  mock (dev only) | twilio | msg91
+ * Supports:  mock (dev/test) | twilio | msg91
  *
- * In production set OTP_PROVIDER=twilio or msg91 in .env.
- * The server refuses to start an OTP flow in mock mode in production —
- * silently "sending" an OTP nobody receives is worse than a hard failure.
+ * In production set OTP_PROVIDER=twilio or msg91 in .env
  */
 
-const crypto = require('crypto');
-
-const OTP_LENGTH = 6;
-
-// crypto.randomInt is cryptographically secure. Math.random is not, and an
-// OTP generated from it is predictable from previous outputs.
 const generateOTPCode = () =>
-  String(crypto.randomInt(0, 10 ** OTP_LENGTH)).padStart(OTP_LENGTH, '0');
+  Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit OTP
 
 const sendOTP = async (phone, otp) => {
   const provider = process.env.OTP_PROVIDER || 'mock';
 
   if (provider === 'mock') {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error(
-        'OTP_PROVIDER is not configured. Set OTP_PROVIDER=msg91 or twilio before serving traffic.'
-      );
-    }
-    // Development only: log the OTP so you can test without SMS credits.
+    // Development: just log the OTP
     console.log(`📲 [MOCK OTP] Phone: ${phone}  OTP: ${otp}`);
     return { success: true, provider: 'mock' };
   }
@@ -37,7 +24,7 @@ const sendOTP = async (phone, otp) => {
       process.env.TWILIO_AUTH_TOKEN
     );
     await client.messages.create({
-      body: `Your Eatswada OTP is: ${otp}. Valid for 5 minutes.`,
+      body: `Your Nearbite OTP is: ${otp}. Valid for 5 minutes.`,
       from: process.env.TWILIO_PHONE,
       to: phone,
     });
@@ -58,4 +45,4 @@ const sendOTP = async (phone, otp) => {
   throw new Error(`Unknown OTP provider: ${provider}`);
 };
 
-module.exports = { sendOTP, generateOTPCode, OTP_LENGTH };
+module.exports = { sendOTP, generateOTPCode };
