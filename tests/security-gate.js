@@ -60,9 +60,14 @@ check('Admin login is rate limited', /adminLoginLimiter/.test(adminRoutes));
 check('Vendor login is rate limited', /loginLimiter/.test(authRoutes));
 check('Rider login is rate limited', /router\.post\(['"]\/rider\/login['"],\s*loginLimiter/.test(authRoutes));
 
-check('Vendor order queries are ownership scoped', /findOne\(\{ _id: req\.params\.id, \.\.\.restaurantOwnershipFilter\(req\) \}\)/.test(vendor));
-check('Vendor menu updates are ownership scoped', /findOneAndUpdate\(\n\s*\{ _id: req\.params\.id, \.\.\.restaurantOwnershipFilter\(req\) \}/.test(vendor));
-check('Vendor cannot overwrite restaurant linkage', /const \{[\s\S]*restaurantId,[\s\S]*\} = req\.body/.test(vendor));
+check('Vendor order queries are ownership scoped to Order.restaurant', /function orderOwnershipFilter\(req\) \{\n\s*return \{ restaurant: req\.user\.restaurantId \};/.test(vendor));
+check('Vendor menu reads are scoped to Menu.restaurantId', /function vendorMenuFilter\(req\) \{\n\s*return \{ restaurantId: req\.user\.restaurantId \};/.test(vendor));
+check('Vendor has stock-only menu mutation', /router\.put\(\s*['"]\/menu\/:id\/toggle-stock['"]/ .test(vendorRoutes) && !/router\.put\(\s*['"]\/menu\/:id['"]/.test(vendorRoutes));
+check('Vendor cannot add menu items', !/router\.post\(\s*['"]\/menu['"]/.test(vendorRoutes));
+check('Vendor cannot use general menu update', !/router\.put\(\s*['"]\/menu\/:id['"]/.test(vendorRoutes));
+check('Vendor cannot delete menu items', !/router\.delete\(\s*['"]\/menu/.test(vendorRoutes));
+check('Vendor cannot mutate restaurant profile', !/router\.(put|patch|delete)\([^\n]*authorize\([^\n]*vendor/.test(read('routes/restaurantRoutes.js')));
+check('Vendor cannot upload images', !/authorize\([^)]*['"]vendor['"]/.test(read('routes/uploadRoutes.js')));
 check('Restaurant vendor edits use ownership check', /canManageRestaurant\(req\.user, existing\)/.test(restaurant));
 check('Restaurant vendor fields use allow-list', /const VENDOR_EDITABLE = \[/.test(restaurant));
 check('Menu item restaurant ownership is checked before vendor edit/delete', /canManageRestaurant\(req\.user, restaurant\)/.test(restaurant));
@@ -76,7 +81,7 @@ check('Delivery requires OTP before delivered', /status === ['"]delivered['"] &&
 check('Admin rider assignment requires admin role', /router\.put\(['"]\/:id\/assign-rider['"],\s*protect,\s*authorize\(['"]admin['"]\)/.test(orderRoutes));
 check('Rider routes require rider role', /router\.use\(protect, authorize\(['"]rider['"]\)\)/.test(riderRoutes));
 check('Vendor routes require vendor role', /role\(['"]vendor['"]\)/.test(vendorRoutes));
-check('Upload routes require auth and admin/vendor role', /router\.post\(['"]\/:type['"],\s*protect,\s*authorize\(['"]admin['"], ['"]vendor['"]\)/.test(uploadRoutes));
+check('Upload routes require auth and admin role', /router\.post\(['"]\/:type['"],\s*protect,\s*authorize\(['"]admin['"]\)/.test(uploadRoutes) && !/authorize\([^\n]*vendor/.test(uploadRoutes));
 
 // Detect the two most dangerous accidental patterns in privileged updates.
 check('No vendor raw req.body update on restaurant', !/findByIdAndUpdate\(req\.params\.id,\s*req\.body/.test(restaurant));
