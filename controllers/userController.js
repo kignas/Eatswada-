@@ -18,32 +18,32 @@ const issueOTP = async (user, purpose) => {
 
 const sendOTPHandler = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
-  console.log(`[OTP-DEBUG] handler reached phone=${phone ? `${phone.slice(0, 3)}****${phone.slice(-3)}` : 'empty'}`);
-
   if (!/^\+?[6-9]\d{9,14}$/.test(phone)) {
-    console.log('[OTP-DEBUG] validation failed: invalid phone');
     return res.status(400).json({ success: false, message: 'Enter a valid mobile number.' });
   }
 
   let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
   if (!user) {
     user = new User({ phone, isPhoneVerified: false });
-    console.log('[OTP-DEBUG] no existing user; creating OTP-capable user');
-  } else {
-    console.log('[OTP-DEBUG] existing user found');
   }
 
   await issueOTP(user, 'login');
-  console.log(`[OTP-DEBUG] OTP issued successfully provider=${process.env.OTP_PROVIDER || 'mock'}`);
   res.json({ success: true, message: 'OTP sent successfully' });
 });
 
 const verifyOTPHandler = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const otp = String(req.body.otp || '').trim();
+  console.log(`[OTP-VERIFY] handler phone=${phone.replace(/(\+91|\+?91)?(\d{2})\d{6}(\d{2})$/, '$1$2******$3')} otpLength=${otp.length}`);
   const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
-  if (!user) return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
-  if (user.otp?.purpose !== 'login' || !user.matchOTP(otp)) {
+  if (!user) {
+    console.log('[OTP-VERIFY] user not found');
+    return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+  }
+  const purposeOk = user.otp?.purpose === 'login';
+  const match = purposeOk && user.matchOTP(otp);
+  console.log(`[OTP-VERIFY] purposeOk=${purposeOk} match=${match} expired=${Boolean(user.otp?.expiresAt && user.otp.expiresAt < Date.now())}`);
+  if (!match) {
     return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
   }
   user.isPhoneVerified = true;
