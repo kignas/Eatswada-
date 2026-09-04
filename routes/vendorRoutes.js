@@ -8,13 +8,10 @@ const {
   getVendorOrders,
   acceptOrder,
   rejectOrder,
-  updateOrderStatus, // ← RESTORED: Import back from vendorController
+  updateOrderStatus,
   getVendorMenu,
-  addMenuItem,
-  updateMenuItem,
   toggleItemStock,
   getRestaurantProfile,
-  updateRestaurantStatus,
   getVendorReviews,
 } = require('../controllers/vendorController');
 
@@ -26,8 +23,6 @@ const {
 router.get('/restaurant', protect, role('vendor'), getRestaurantProfile);
 router.get('/reviews', protect, role('vendor'), getVendorReviews);
 
-// PUT  /api/vendor/status      — master online / offline toggle
-router.put('/status', protect, role('vendor'), updateRestaurantStatus);
 
 /* ─────────────────────────────────────────────────────────────
  *  ORDERS
@@ -46,7 +41,7 @@ router.put('/orders/:id/accept', protect, role('vendor'), acceptOrder);
 // PUT  /api/vendor/orders/:id/reject  — reject a newly placed order, body: { reason }
 router.put('/orders/:id/reject', protect, role('vendor'), rejectOrder);
 
-// PUT  /api/vendor/orders/:id/status  — advance one step: confirmed→preparing, preparing→out_for_delivery
+// PUT  /api/vendor/orders/:id/status  — advance vendor workflow: confirmed→preparing→waiting_for_rider
 router.put('/orders/:id/status', protect, role('vendor'), updateOrderStatus);
 
 /* ─────────────────────────────────────────────────────────────
@@ -56,13 +51,9 @@ router.put('/orders/:id/status', protect, role('vendor'), updateOrderStatus);
 // GET  /api/vendor/menu                   — grouped-by-category menu
 router.get('/menu', protect, role('vendor'), getVendorMenu);
 
-// POST /api/vendor/menu                   — add new item
-router.post('/menu', protect, role('vendor'), addMenuItem);
 
 // PUT  /api/vendor/menu/:id/toggle-stock  — atomic inStock flip
 router.put('/menu/:id/toggle-stock', protect, role('vendor'), toggleItemStock);
 
-// PUT  /api/vendor/menu/:id               — general field update (price etc.)
-router.put('/menu/:id', protect, role('vendor'), updateMenuItem);
 
 module.exports = router;

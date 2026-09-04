@@ -49,16 +49,16 @@ router.post('/', protect, authorize('admin'), createRestaurant);
 // updateRestaurant/deleteRestaurant/updateRestaurantAvailability now also allow
 // 'vendor' — the controller enforces that a vendor can only touch their own
 // restaurant (canManageRestaurant), so admin-or-owner is the real gate.
-router.put('/:id', protect, authorize('admin', 'vendor'), updateRestaurant);
-router.delete('/:id', protect, authorize('admin', 'vendor'), deleteRestaurant);
-router.patch('/:id/availability', protect, authorize('admin', 'vendor'), updateRestaurantAvailability);
+router.put('/:id', protect, authorize('admin'), updateRestaurant);
+router.delete('/:id', protect, authorize('admin'), deleteRestaurant);
+router.patch('/:id/availability', protect, authorize('admin'), updateRestaurantAvailability);
 
 // Menu Item Management
 // Same admin-or-owner pattern: route allows both roles, controller checks
 // ownership of the item's parent restaurant.
-router.post('/:id/menu', protect, authorize('admin', 'vendor'), addMenuItem);
-router.put('/:id/menu/:itemId', protect, authorize('admin', 'vendor'), updateMenuItem);
-router.delete('/:id/menu/:itemId', protect, authorize('admin', 'vendor'), deleteMenuItem);
-router.patch('/:id/menu/:itemId/availability', protect, authorize('admin', 'vendor'), updateMenuItemAvailability);
+router.post('/:id/menu', protect, authorize('admin'), addMenuItem);
+router.put('/:id/menu/:itemId', protect, authorize('admin'), updateMenuItem);
+router.delete('/:id/menu/:itemId', protect, authorize('admin'), deleteMenuItem);
+router.patch('/:id/menu/:itemId/availability', protect, authorize('admin'), updateMenuItemAvailability);
 
 module.exports = router;
