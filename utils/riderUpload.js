@@ -2,26 +2,40 @@
 
 const multer = require('multer');
 const cloudinary = require('./cloudinaryConfig');
+const { validateImageBuffer } = require('./imageValidation');
 
-// Memory storage — the file never touches disk, we stream the buffer
-// straight to Cloudinary as a base64 data URI. Keeps this dependency-free
-// (no need for multer-storage-cloudinary or streamifier).
+const ALLOWED_MIME_TYPES = Object.freeze([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 1,
+    fields: 20,
+    parts: 21,
+  },
   fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith('image/')) {
-      return cb(new Error('Only image files are allowed for profile pictures.'));
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error('Only JPEG, PNG, WebP, or GIF images are allowed for profile pictures.'));
     }
     cb(null, true);
   },
 });
 
-/**
- * uploadToCloudinary — uploads an in-memory file buffer and returns the
- * Cloudinary result (use result.secure_url as the stored avatar URL).
- */
 const uploadToCloudinary = async (buffer, mimetype, folder = 'nearbite/riders') => {
+  const validation = validateImageBuffer(buffer, mimetype);
+  if (!validation.valid) {
+    const error = new Error(validation.message);
+    error.statusCode = 400;
+    throw error;
+  }
+
   const base64 = `data:${mimetype};base64,${buffer.toString('base64')}`;
   return cloudinary.uploader.upload(base64, {
     folder,
