@@ -233,6 +233,8 @@ const updateRestaurant = asyncHandler(async (req, res) => {
     delete update.minOrder;
     delete update.freeDeliveryAbove;
     delete update.freeDeliveryEnabled;
+    // FSSAI reference is Admin-controlled; vendors cannot change it.
+    delete update.fssaiLicenseNumber;
   } else {
     // Explicitly persist both boolean flags, including false. This avoids
     // truthy/string handling issues and guarantees an unchecked admin box
