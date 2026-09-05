@@ -89,13 +89,15 @@ const maskPhone = (phone) => {
   return `${value.slice(0, 3)}****${value.slice(-3)}`;
 };
 
-app.use('/api/users/send-otp', (req, res, next) => {
-  console.log(`[OTP-DEBUG] request ${req.method} ${req.originalUrl} origin=${req.get('origin') || 'none'} phone=${maskPhone(req.body?.phone)}`);
-  res.on('finish', () => {
-    console.log(`[OTP-DEBUG] response status=${res.statusCode} success=${res.statusCode >= 200 && res.statusCode < 300}`);
+if (process.env.NODE_ENV === 'development') {
+  app.use('/api/users/send-otp', (req, res, next) => {
+    console.log(`[OTP-DEBUG] request ${req.method} ${req.originalUrl} origin=${req.get('origin') || 'none'} phone=${maskPhone(req.body?.phone)}`);
+    res.on('finish', () => {
+      console.log(`[OTP-DEBUG] response status=${res.statusCode} success=${res.statusCode >= 200 && res.statusCode < 300}`);
+    });
+    next();
   });
-  next();
-});
+}
 
 // ── Health & Welcome Routes ───────────────────────────────────
 app.get('/health', (req, res) => {
