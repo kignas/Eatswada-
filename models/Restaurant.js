@@ -41,6 +41,17 @@ const restaurantSchema = new mongoose.Schema(
       maxlength: [30, 'Restaurant phone cannot exceed 30 characters'],
     },
 
+    // FSSAI licence/registration reference supplied by Admin. This is a
+    // display/reference field only; Eatswada does not auto-verify it.
+    // It intentionally accepts letters/numbers because the Admin may enter
+    // the licence/reference exactly as issued.
+    fssaiLicenseNumber: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: [100, 'FSSAI licence/reference cannot exceed 100 characters'],
+    },
+
     slug: {
       type: String,
       required: true,
