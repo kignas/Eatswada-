@@ -9,7 +9,13 @@ const User       = require('../models/User');
 const Review     = require('../models/Review');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
-const { getMenuRefId, groupItemsByRestaurant, allocateTip, resolveRestaurantNote, normalizeRestaurantNotes } = require('../services/checkoutMath');
+const {
+  getMenuRefId,
+  groupItemsByRestaurant,
+  allocateTip,
+  resolveRestaurantNote,
+  normalizeRestaurantNotes,
+} = require('../services/checkoutMath');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -87,50 +93,19 @@ function withLiveDisplayData(orderDoc) {
 // The browser may display an estimate, but these values are calculated
 // again here from database data and customer coordinates.
 // ─────────────────────────────────────────────────────────────────────
-const DELIVERY_RULES = Object.freeze({
-  UNDER_10_KM: 30,
-  FROM_10_TO_15_KM: 40,
-  ABOVE_15_KM: 50,
-});
-const MAX_DELIVERY_RADIUS_KM = 10;
+// Delivery geo + fee helpers now come from the SINGLE source of truth in
+// services/deliveryPricing.js (see #5). Changing the radius cap or fee there
+// changes it everywhere — checkout and cart-preview can no longer drift apart.
+const {
+  MAX_DELIVERY_RADIUS_KM,
+  validCoordinates,
+  isPlaceholderRestaurantLocation,
+  haversineKm,
+  calculateDeliveryFee,
+} = require('../services/deliveryPricing');
+
 // Customer tip is optional, but must stay within a sane server-side limit.
 const MAX_TIP_AMOUNT = 500;
-
-function validCoordinates(coords) {
-  return Array.isArray(coords) &&
-    coords.length === 2 &&
-    Number.isFinite(Number(coords[0])) &&
-    Number.isFinite(Number(coords[1])) &&
-    Number(coords[0]) >= -180 && Number(coords[0]) <= 180 &&
-    Number(coords[1]) >= -90 && Number(coords[1]) <= 90;
-}
-
-function isPlaceholderRestaurantLocation(coords) {
-  // Restaurant.js currently has Kolkata as a legacy placeholder default.
-  // Nearbite launches in Maynaguri, so never use that placeholder for pricing.
-  return Array.isArray(coords) &&
-    Math.abs(Number(coords[0]) - 88.3832) < 0.000001 &&
-    Math.abs(Number(coords[1]) - 22.5726) < 0.000001;
-}
-
-function haversineKm(from, to) {
-  const [lon1, lat1] = from.map(Number);
-  const [lon2, lat2] = to.map(Number);
-  const toRad = value => value * Math.PI / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) ** 2;
-  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function calculateDeliveryFee(distanceKm) {
-  if (distanceKm < 10) return DELIVERY_RULES.UNDER_10_KM;
-  if (distanceKm <= 15) return DELIVERY_RULES.FROM_10_TO_15_KM;
-  return DELIVERY_RULES.ABOVE_15_KM;
-}
 
 function normalizeCustomerCoordinates(deliveryAddress) {
   if (!deliveryAddress || typeof deliveryAddress !== 'object') return null;
@@ -244,120 +219,59 @@ async function resolveDeliveryAddress({ addressId, deliveryAddress, userId }) {
   };
 }
 
-async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAddress, addressId, userId, tipAmount }) {
-  if (!Array.isArray(items) || items.length === 0) {
-    const error = new Error('Cart is empty');
-    error.statusCode = 400;
-    throw error;
-  }
-
+// Price a SINGLE restaurant's slice of a (possibly multi-restaurant) cart.
+// Customer coordinates + delivery address are resolved ONCE by the caller and
+// shared across every restaurant in the checkout. Throws (with .statusCode)
+// on any failure so the WHOLE checkout is rejected before a single order is
+// written — a customer never ends up with a partial multi-restaurant order.
+async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
   if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
-    const error = new Error('Invalid restaurant');
-    error.statusCode = 400;
-    throw error;
+    const error = new Error('Invalid restaurant'); error.statusCode = 400; throw error;
   }
 
-  const restaurant = await Restaurant.findOne({
-    _id: restaurantId,
-    isActive: true,
-  }).select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove codEnabled');
-
-  if (!restaurant) {
-    const error = new Error('Restaurant not found or unavailable');
-    error.statusCode = 404;
-    throw error;
-  }
+  const restaurant = await Restaurant.findOne({ _id: restaurantId, isActive: true })
+    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove codEnabled');
+  if (!restaurant) { const e = new Error('Restaurant not found or unavailable'); e.statusCode = 404; throw e; }
 
   if (restaurant.availability?.isOpen === false || restaurant.isOpen === false) {
-    const error = new Error('This restaurant is currently closed and is not accepting orders.');
-    error.statusCode = 409;
-    throw error;
+    const e = new Error(`${restaurant.name} is currently closed and is not accepting orders.`); e.statusCode = 409; throw e;
   }
 
   const restaurantCoords = restaurant.location?.coordinates;
   if (!validCoordinates(restaurantCoords) || isPlaceholderRestaurantLocation(restaurantCoords)) {
-    const error = new Error(
-      'This restaurant does not have a verified map location yet. Please try another restaurant.'
-    );
-    error.statusCode = 409;
-    throw error;
-  }
-
-  const { coords: customerCoords, snapshot: addressSnapshot } = await resolveDeliveryAddress({
-    addressId,
-    deliveryAddress,
-    userId,
-  });
-
-  if (!customerCoords) {
-    const error = new Error(
-      'Please select your delivery location using GPS/Google Maps before placing the order.'
-    );
-    error.statusCode = 400;
-    throw error;
+    const e = new Error(`${restaurant.name} does not have a verified map location yet. Please try another restaurant.`);
+    e.statusCode = 409; throw e;
   }
 
   const distanceKm = haversineKm(restaurantCoords, customerCoords);
-
-  // Keep the platform-wide launch cap, while allowing Admin to configure a
-  // smaller delivery radius per restaurant.
   const configuredRadius = Number(restaurant.deliveryRadiusKm);
   const effectiveRadius = Number.isFinite(configuredRadius) && configuredRadius > 0
     ? Math.min(configuredRadius, MAX_DELIVERY_RADIUS_KM)
     : MAX_DELIVERY_RADIUS_KM;
-
   if (distanceKm > effectiveRadius) {
-    const error = new Error(
-      `This address is ${distanceKm.toFixed(1)} km away. This restaurant delivers only within ${effectiveRadius.toFixed(1).replace(/\.0$/, '')} km.`
-    );
-    error.statusCode = 400;
-    throw error;
+    const e = new Error(`${restaurant.name} delivers only within ${effectiveRadius.toFixed(1).replace(/\.0$/, '')} km — your address is ${distanceKm.toFixed(1)} km away.`);
+    e.statusCode = 400; throw e;
   }
 
-  const menuIds = items.map(item => item?.menuItem || item?.menuId || item?.id || item?._id);
+  const menuIds = items.map(it => it?.menuItem || it?.menuId || it?.id || it?._id);
   if (menuIds.some(id => !mongoose.Types.ObjectId.isValid(id))) {
-    const error = new Error('One or more cart items are invalid or outdated. Please refresh your cart.');
-    error.statusCode = 400;
-    throw error;
+    const e = new Error('One or more cart items are invalid or outdated. Please refresh your cart.'); e.statusCode = 400; throw e;
   }
-
   const uniqueIds = [...new Set(menuIds.map(String))];
-  const menuDocs = await Menu.find({
-    _id: { $in: uniqueIds },
-    restaurantId: restaurant._id,
-  }).lean();
+  const menuDocs = await Menu.find({ _id: { $in: uniqueIds }, restaurantId: restaurant._id }).lean();
+  const menuMap = new Map(menuDocs.map(m => [String(m._id), m]));
 
-  const menuMap = new Map(menuDocs.map(item => [String(item._id), item]));
   const serverItems = [];
   let subtotal = 0;
-
   for (const requested of items) {
     const rawId = requested?.menuItem || requested?.menuId || requested?.id || requested?._id;
     const menuItem = menuMap.get(String(rawId));
-
-    if (!menuItem) {
-      const error = new Error('A cart item no longer belongs to this restaurant. Please refresh your cart.');
-      error.statusCode = 409;
-      throw error;
-    }
-
-    if (menuItem.inStock === false) {
-      const error = new Error(`${menuItem.name} is currently out of stock.`);
-      error.statusCode = 409;
-      throw error;
-    }
-
+    if (!menuItem) { const e = new Error('A cart item no longer belongs to this restaurant. Please refresh your cart.'); e.statusCode = 409; throw e; }
+    if (menuItem.inStock === false) { const e = new Error(`${menuItem.name} is currently out of stock.`); e.statusCode = 409; throw e; }
     const quantity = Number(requested.quantity);
-    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
-      const error = new Error(`Invalid quantity for ${menuItem.name}.`);
-      error.statusCode = 400;
-      throw error;
-    }
-
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) { const e = new Error(`Invalid quantity for ${menuItem.name}.`); e.statusCode = 400; throw e; }
     const unitPrice = calculateItemServerPrice(menuItem, requested.customizations);
-    const lineTotal = unitPrice * quantity;
-    subtotal += lineTotal;
-
+    subtotal += unitPrice * quantity;
     serverItems.push({
       menuItem: menuItem._id,
       name: menuItem.name,
@@ -370,13 +284,14 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
     });
   }
 
+  // Per-restaurant minimum order.
   const minimumOrder = Number(restaurant.minOrder || 0);
   if (minimumOrder > 0 && subtotal < minimumOrder) {
-    const error = new Error(`Minimum order is ₹${minimumOrder}. Add ₹${Math.ceil(minimumOrder - subtotal)} more to continue.`);
-    error.statusCode = 400;
-    throw error;
+    const e = new Error(`Minimum order for ${restaurant.name} is ₹${minimumOrder}. Add ₹${Math.ceil(minimumOrder - subtotal)} more to continue.`);
+    e.statusCode = 400; throw e;
   }
 
+  // Per-restaurant delivery fee + per-restaurant free-delivery threshold.
   const baseDeliveryFee = calculateDeliveryFee(distanceKm);
   const freeDeliveryEnabled = restaurant.freeDeliveryEnabled !== false;
   const freeDeliveryAbove = Number(restaurant.freeDeliveryAbove || 0);
@@ -384,102 +299,211 @@ async function buildAuthoritativeOrderPricing({ items, restaurantId, deliveryAdd
     ? 0
     : baseDeliveryFee;
 
-  // The client may request a tip, but the server remains authoritative.
-  // Invalid, negative, non-finite, or excessive values are rejected rather
-  // than silently changing the customer's bill.
-  const parsedTip = Number(tipAmount ?? 0);
-  if (!Number.isFinite(parsedTip) || parsedTip < 0 || parsedTip > MAX_TIP_AMOUNT) {
-    const error = new Error(`Tip must be between ₹0 and ₹${MAX_TIP_AMOUNT}.`);
-    error.statusCode = 400;
-    throw error;
-  }
-  const validTip = Math.round(parsedTip * 100) / 100;
+  return { restaurant, serverItems, subtotal, deliveryFee, distanceKm: Number(distanceKm.toFixed(2)) };
+}
 
-  // Preserve the existing authoritative pricing formula and add the verified
-  // tip on top. No client-provided subtotal/delivery/total is trusted.
-  const total = subtotal + deliveryFee + validTip;
+// Shapes the checkout response. A SINGLE-restaurant checkout keeps the EXACT
+// legacy shape ({ data: order, deliveryOtp }) so existing clients that redirect
+// to track-order.html?id=data._id keep working unchanged. A multi-restaurant
+// checkout additionally returns { multiple:true, orders:[...], deliveryOtps }.
+function buildCheckoutResponse(orders, replay) {
+  const shaped = orders.map(o => {
+    const otp = replay ? (o.deliveryOtp || '') : (o._capturedOtp || '');
+    return {
+      order: {
+        ...withLiveDisplayData(o),
+        orderNumber: o.orderNumber,
+        shipmentId: o.shipmentId,
+        publicOrderId: o.orderNumber,
+        publicShipmentId: o.shipmentId,
+        deliveryDistanceKm: o.deliveryDistanceKm,
+      },
+      deliveryOtp: otp,
+    };
+  });
+
+  if (shaped.length === 1) {
+    return { success: true, replay: !!replay, data: shaped[0].order, deliveryOtp: shaped[0].deliveryOtp };
+  }
 
   return {
-    restaurant,
-    serverItems,
-    subtotal,
-    deliveryFee,
-    tipAmount: validTip,
-    total,
-    distanceKm: Number(distanceKm.toFixed(2)),
-    customerCoords,
-    addressSnapshot,
+    success: true,
+    replay: !!replay,
+    multiple: true,
+    count: shaped.length,
+    data: shaped[0].order, // backward-compatible primary order
+    orders: shaped.map(s => s.order),
+    deliveryOtps: shaped.reduce((acc, s) => { acc[s.order._id] = s.deliveryOtp; return acc; }, {}),
   };
 }
 
 const createOrder = asyncHandler(async (req, res) => {
-  const { items, deliveryAddress, addressId, paymentMethod = 'upi', restaurantNote, restaurantNotes, deliveryInstructions, tipAmount = 0 } = req.body;
+  const {
+    items,
+    deliveryAddress,
+    addressId,
+    paymentMethod = 'cod',
+    restaurantNote,
+    restaurantNotes,
+    globalNote,
+    deliveryInstructions,
+    tipAmount = 0,
+  } = req.body;
+
   const validPaymentMethods = ['upi', 'card', 'wallet', 'cod'];
-  if (!validPaymentMethods.includes(paymentMethod)) { const error = new Error('Invalid payment method.'); error.statusCode = 400; throw error; }
-  if (!Array.isArray(items) || !items.length) { const error = new Error('Cart is empty'); error.statusCode = 400; throw error; }
+  if (!validPaymentMethods.includes(paymentMethod)) {
+    const e = new Error('Invalid payment method.'); e.statusCode = 400; throw e;
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    const e = new Error('Cart is empty'); e.statusCode = 400; throw e;
+  }
 
-  // Resolve menu ownership from MongoDB. Client restaurantId is never trusted.
-  const menuIds = items.map(getMenuRefId);
-  if (menuIds.some(id => !mongoose.Types.ObjectId.isValid(id))) { const error = new Error('One or more cart items are invalid or outdated. Please refresh your cart.'); error.statusCode = 400; throw error; }
-  const uniqueIds = [...new Set(menuIds.map(String))];
-  const menuDocs = await Menu.find({ _id: { $in: uniqueIds } }).select('_id restaurantId').lean();
-  const menuRestaurantMap = new Map(menuDocs.filter(m => m.restaurantId).map(m => [String(m._id), String(m.restaurantId)]));
-  const groups = groupItemsByRestaurant(items, menuRestaurantMap);
+  // ── Idempotency ─────────────────────────────────────────────────────
+  // A client may retry (double-tap, dropped response, network retry). When it
+  // sends the same key, return the orders already created for that key instead
+  // of creating a second set. Covers the whole checkout (possibly several
+  // restaurant orders). NOTE: this closes sequential retries; the frontend
+  // button-lock covers the rarer truly-concurrent double POST.
+  const idempotencyKey = String(req.headers['idempotency-key'] || req.body.idempotencyKey || '').trim().slice(0, 100);
+  if (idempotencyKey) {
+    const existing = await Order.find({ user: req.user._id, idempotencyKey })
+      .select('+deliveryOtp')
+      .populate(ORDER_POPULATE_PATHS)
+      .sort({ createdAt: 1 });
+    if (existing.length) {
+      return res.status(200).json(buildCheckoutResponse(existing, true));
+    }
+  }
 
-  const notes = normalizeRestaurantNotes(restaurantNotes, id => mongoose.Types.ObjectId.isValid(id));
-  const customer = await User.findById(req.user._id).select('name phone').lean();
+  // ── Resolve the ONE delivery address for the whole checkout ─────────
+  const { coords: customerCoords, snapshot: addressSnapshot } =
+    await resolveDeliveryAddress({ addressId, deliveryAddress, userId: req.user._id });
+  if (!customerCoords) {
+    const e = new Error('Please select your delivery location using GPS/Google Maps before placing the order.');
+    e.statusCode = 400; throw e;
+  }
+
+  // ── Tip: validate the TOTAL once (server-authoritative) ─────────────
+  const parsedTip = Number(tipAmount ?? 0);
+  if (!Number.isFinite(parsedTip) || parsedTip < 0 || parsedTip > MAX_TIP_AMOUNT) {
+    const e = new Error(`Tip must be between ₹0 and ₹${MAX_TIP_AMOUNT}.`); e.statusCode = 400; throw e;
+  }
+  const totalTip = Math.round(parsedTip * 100) / 100;
+
+  // ── Group items by the REAL restaurant that owns each menu item ─────
+  // The client's restaurantId is NEVER trusted for grouping — checkoutMath
+  // regroups from a menuId->restaurantId map resolved from MongoDB.
+  const allMenuIds = items
+    .map(getMenuRefId)
+    .filter(id => mongoose.Types.ObjectId.isValid(id))
+    .map(String);
+  const ownerDocs = await Menu.find({ _id: { $in: [...new Set(allMenuIds)] } }).select('restaurantId').lean();
+  const menuRestaurantMap = new Map(ownerDocs.map(m => [String(m._id), String(m.restaurantId)]));
+  const groups = groupItemsByRestaurant(items, menuRestaurantMap); // throws 400 on any unknown item
+
+  // ── Price EVERY restaurant before creating anything ─────────────────
   const priced = [];
   for (const group of groups) {
-    priced.push(await buildAuthoritativeOrderPricing({ items: group.items, restaurantId: group.restaurantId, deliveryAddress, addressId, userId: req.user._id, tipAmount: 0 }));
+    priced.push(await buildRestaurantPricing({
+      restaurantId: group.restaurantId,
+      items: group.items,
+      customerCoords,
+    }));
   }
 
+  // COD availability is per restaurant.
   if (paymentMethod === 'cod') {
-    const unavailable = priced.find(p => p.restaurant.codEnabled !== true);
-    if (unavailable) { const error = new Error(`Cash on Delivery is not available for ${unavailable.restaurant.name}.`); error.statusCode = 403; throw error; }
+    const noCod = priced.find(p => p.restaurant.codEnabled !== true);
+    if (noCod) { const e = new Error(`Cash on Delivery is not available for ${noCod.restaurant.name}.`); e.statusCode = 403; throw e; }
   }
 
-  const tipAmounts = allocateTip(tipAmount, priced.map(p => p.deliveryFee));
-  const addressSnapshots = priced.map(p => ({ ...p.addressSnapshot, coordinates: p.customerCoords }));
+  // Split the tip across restaurants by delivery fee (never duplicated).
+  const tipShares = allocateTip(totalTip, priced.map(p => p.deliveryFee));
+
   const isSingle = priced.length === 1;
+  const customer = await User.findById(req.user._id).select('name phone').lean();
+  const perRestaurantNotes = normalizeRestaurantNotes(restaurantNotes, mongoose.Types.ObjectId.isValid);
+  const sharedDeliveryInstructions = typeof deliveryInstructions === 'string'
+    ? deliveryInstructions.trim().slice(0, 250) : '';
+
+  // ── Create one order per restaurant ─────────────────────────────────
   const created = [];
+  for (let i = 0; i < priced.length; i += 1) {
+    const p = priced[i];
+    const note = resolveRestaurantNote({
+      restaurantId: String(p.restaurant._id),
+      perRestaurantNotes,
+      flatNote: restaurantNote,
+      isSingleRestaurant: isSingle,
+      globalNote: globalNote === true,
+    });
+    const tip = tipShares[i] || 0;
 
-  try {
-    for (let i = 0; i < priced.length; i += 1) {
-      const pricing = priced[i];
-      const note = resolveRestaurantNote({ restaurantId: pricing.restaurant._id, perRestaurantNotes: notes, flatNote: restaurantNote, isSingleRestaurant: isSingle, globalNote: req.body.globalRestaurantNote === true });
-      const childTip = tipAmounts[i] || 0;
-      const order = await Order.create({
-        user: req.user._id, restaurant: pricing.restaurant._id, restaurantName: pricing.restaurant.name, restaurantImage: pricing.restaurant.image || '',
-        customerName: customer?.name || '', customerPhone: customer?.phone || '', items: pricing.serverItems,
-        deliveryAddress: addressSnapshots[i], deliveryDistanceKm: pricing.distanceKm, subtotal: pricing.subtotal, deliveryFee: pricing.deliveryFee,
-        restaurantNote: note, deliveryInstructions: typeof deliveryInstructions === 'string' ? deliveryInstructions.trim().slice(0, 250) : '',
-        tipAmount: childTip, total: pricing.subtotal + pricing.deliveryFee + childTip, paymentMethod, paymentStatus: 'pending'
-      });
-      created.push(order);
-    }
-  } catch (err) {
-    // Best-effort rollback so a partial multi-restaurant checkout does not leave orphan orders.
-    if (created.length) await Order.deleteMany({ _id: { $in: created.map(o => o._id) }, user: req.user._id }).catch(() => {});
-    throw err;
-  }
+    const order = await Order.create({
+      user: req.user._id,
+      restaurant: p.restaurant._id,
+      restaurantName: p.restaurant.name,
+      restaurantImage: p.restaurant.image || '',
+      customerName: customer?.name || '',
+      customerPhone: customer?.phone || '',
+      items: p.serverItems,
+      deliveryAddress: { ...addressSnapshot, coordinates: customerCoords },
+      deliveryDistanceKm: p.distanceKm,
+      subtotal: p.subtotal,
+      deliveryFee: p.deliveryFee,
+      restaurantNote: note,
+      deliveryInstructions: sharedDeliveryInstructions,
+      tipAmount: tip,
+      total: p.subtotal + p.deliveryFee + tip,
+      paymentMethod,
+      paymentStatus: 'pending',
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    });
 
-  const responseOrders = [];
-  const deliveryOtps = {};
-  for (const order of created) {
-    const otp = order._plainDeliveryOtp;
+    order._capturedOtp = order._plainDeliveryOtp;
     order.clearOtpSecrets();
     await order.populate(ORDER_POPULATE_PATHS);
-    responseOrders.push(withLiveDisplayData(order));
-    deliveryOtps[String(order._id)] = otp;
+    created.push(order);
   }
 
-  await Cart.findOneAndUpdate({ user: req.user._id }, { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } });
+  await Cart.findOneAndUpdate(
+    { user: req.user._id },
+    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'cod' } }
+  );
 
-  if (created.length === 1) {
-    return res.status(201).json({ success: true, data: { ...responseOrders[0], orderNumber: created[0].orderNumber, shipmentId: created[0].shipmentId, publicOrderId: created[0].orderNumber, publicShipmentId: created[0].shipmentId }, deliveryOtp: deliveryOtps[String(created[0]._id)] });
-  }
-  return res.status(201).json({ success: true, multiple: true, data: responseOrders, orders: responseOrders, deliveryOtps });
+  return res.status(201).json(buildCheckoutResponse(created, false));
 });
+
+// Average delivery speed (km/h) for a rough live ETA. Conservative for local
+// roads — an estimate, not a promise.
+const AVG_DELIVERY_SPEED_KMH = 18;
+const LIVE_RIDER_STATUSES = ['picked_up', 'out_for_delivery'];
+
+// Attach the rider's live position + ETA to a customer-facing order object —
+// ONLY while the order is actually on the move and the rider app has sent a
+// GPS fix. At any other stage nothing is exposed. Requires the order's `rider`
+// to have been populated with `riderDetails.currentLocation`.
+function enrichRiderLive(data, orderDoc) {
+  const rider = orderDoc.rider && typeof orderDoc.rider === 'object' ? orderDoc.rider : null;
+  const riderCoords = rider?.riderDetails?.currentLocation?.coordinates;
+  const destCoords = orderDoc.deliveryAddress?.coordinates;
+  if (
+    LIVE_RIDER_STATUSES.includes(orderDoc.riderStatus) &&
+    validCoordinates(riderCoords) &&
+    validCoordinates(destCoords)
+  ) {
+    const distanceKm = haversineKm(riderCoords, destCoords);
+    data.riderLocation = {
+      lat: Number(riderCoords[1]),
+      lng: Number(riderCoords[0]),
+      updatedAt: rider.riderDetails.currentLocation.updatedAt || null,
+    };
+    data.riderDistanceKm = Number(distanceKm.toFixed(2));
+    data.riderEtaMinutes = Math.max(1, Math.round((distanceKm / AVG_DELIVERY_SPEED_KMH) * 60));
+  }
+  return data;
+}
+
 const getOrders = asyncHandler(async (req, res) => {
   const { status, page = 1, limit = 10 } = req.query;
   const filter = { user: req.user._id };
@@ -490,7 +514,7 @@ const getOrders = asyncHandler(async (req, res) => {
     Order.find(filter)
       .select('+deliveryOtp')
       .populate(ORDER_POPULATE_PATHS)
-      .populate('rider', 'name phone')
+      .populate('rider', 'name phone riderDetails.currentLocation')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(Number(limit)),
@@ -502,7 +526,7 @@ const getOrders = asyncHandler(async (req, res) => {
     page: Number(page),
     pages: Math.ceil(total / Number(limit)),
     total,
-    data: orders.map(withLiveDisplayData),
+    data: orders.map(o => enrichRiderLive(withLiveDisplayData(o), o)),
   });
 });
 
@@ -510,16 +534,24 @@ const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
     .select('+deliveryOtp')
     .populate(ORDER_POPULATE_PATHS)
-    .populate('rider', 'name phone');
+    .populate('rider', 'name phone riderDetails.currentLocation');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-  res.json({ success: true, data: withLiveDisplayData(order) });
+  res.json({ success: true, data: enrichRiderLive(withLiveDisplayData(order), order) });
 });
 
 const cancelOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-  if (!order.isCancellable)
-    return res.status(400).json({ success: false, message: 'Order cannot be cancelled at this stage' });
+
+  // A customer may cancel ONLY while the order is still 'placed' — i.e. before
+  // the restaurant has accepted it. Once accepted (confirmed) and preparing has
+  // begun, the customer can no longer cancel from here.
+  if (order.status !== 'placed') {
+    const message = order.status === 'cancelled'
+      ? 'This order is already cancelled.'
+      : 'This order has already been accepted by the restaurant and can no longer be cancelled. Please contact support if you need help.';
+    return res.status(409).json({ success: false, message });
+  }
 
   order.advanceStatus('cancelled', req.body.reason || 'Cancelled by customer');
   order.cancelReason = req.body.reason || 'Cancelled by customer';
@@ -685,7 +717,7 @@ const getAllOrders = asyncHandler(async (req, res) => {
     page: Number(page),
     pages: Math.ceil(total / Number(limit)),
     total,
-    data: orders.map(withLiveDisplayData),
+    data: orders.map(o => enrichRiderLive(withLiveDisplayData(o), o)),
   });
 });
 

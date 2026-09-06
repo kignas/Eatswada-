@@ -271,6 +271,24 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
  * above). Only allowed while the order is 'out_for_delivery'. Enforces a
  * per-order failed-attempt limit and temporary lockout — see
  * Order.OTP_CONFIG (currently 5 attempts / 15-minute lockout). */
+
+/* PUT /api/riders/location — the rider app sends its live GPS here while
+ * delivering. Stored as [lng, lat]; surfaced to the customer's tracking
+ * screen only while the order is picked_up / out_for_delivery. */
+exports.updateLocation = asyncHandler(async (req, res) => {
+  const lat = Number(req.body.lat ?? req.body.latitude);
+  const lng = Number(req.body.lng ?? req.body.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) ||
+      lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    return res.status(400).json({ success: false, message: 'Valid lat/lng required.' });
+  }
+  await User.updateOne(
+    { _id: req.user._id, role: 'rider' },
+    { $set: { 'riderDetails.currentLocation': { coordinates: [lng, lat], updatedAt: new Date() } } }
+  );
+  res.json({ success: true });
+});
+
 exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {
   const { otp } = req.body;
 
