@@ -62,6 +62,13 @@ const protect = async (req, res, next) => {
     }
 
     
+    if ((Number(decoded.tv) || 0) !== (Number(req.user.tokenVersion) || 0)) {
+      return res.status(401).json({
+        success: false,
+        message: 'Session expired or revoked. Please log in again.',
+      });
+    }
+
     next();
   } catch (err) {
     // Log internally — do NOT expose err.message to the client in production.
