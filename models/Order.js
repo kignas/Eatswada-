@@ -166,6 +166,10 @@ const orderSchema = new mongoose.Schema(
     razorpayOrderId:   { type: String, default: '' },
     razorpayPaymentId: { type: String, default: '' },
 
+    // Idempotency: same key => same checkout. Set on every child order of a
+    // multi-restaurant checkout so a retry returns the existing set.
+    idempotencyKey: { type: String, default: '', select: false },
+
     // ORDER LIFECYCLE — mirrors track-order.html progress bar
     status: {
       type: String,
@@ -256,6 +260,7 @@ const orderSchema = new mongoose.Schema(
 orderSchema.index({ rider: 1, riderStatus: 1 });
 orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ restaurant: 1, status: 1 });
+orderSchema.index({ user: 1, idempotencyKey: 1 });
 
 /* ── Pre-save: generate order number ── */
 orderSchema.pre('save', async function (next) {
@@ -385,5 +390,6 @@ orderSchema.methods.clearOtpSecrets = function () {
 module.exports = mongoose.model('Order', orderSchema);
 // --- DATABASE INDEXES FOR PERFORMANCE ---
 orderSchema.index({ user: 1, createdAt: -1 }); // Speeds up customer order history
-orderSchema.index({ restaurant: 1, status: 1 }); // Speeds up vendor active order dashboard
+orderSchema.index({ restaurant: 1, status: 1 });
+orderSchema.index({ user: 1, idempotencyKey: 1 }); // Speeds up vendor active order dashboard
 
