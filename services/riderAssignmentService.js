@@ -172,10 +172,71 @@ function scheduleRiderTimeout(orderId, riderId) {
   }, 60 * 1000);
 }
 
+/**
+ * Durable recovery for the accept-timeout.
+ * ─────────────────────────────────────────
+ * scheduleRiderTimeout() uses an in-process setTimeout, which is lost when the
+ * server restarts, sleeps (Render free tier), or is replaced. This sweep is the
+ * safety net: it finds orders still sitting in riderStatus 'assigned' past the
+ * accept window and releases + reassigns them, so an order can never get stuck
+ * "assigned" forever just because the process that scheduled its timeout died.
+ *
+ * handleReassignment() uses an atomic findOneAndUpdate, so even if two
+ * instances sweep at once only one wins per order — safe to run everywhere.
+ */
+const ACCEPT_TIMEOUT_MS = 60 * 1000;
+
+async function recoverStuckAssignments() {
+  const cutoff = new Date(Date.now() - ACCEPT_TIMEOUT_MS);
+  let stuck = [];
+  try {
+    stuck = await Order.find({
+      riderStatus: 'assigned',
+      riderAssignedAt: { $lte: cutoff },
+      status: { $nin: ['delivered', 'cancelled'] },
+    }).select('_id rider').lean();
+  } catch (err) {
+    console.error('[assignment-recovery] scan failed:', err.message);
+    return { scanned: 0, reassigned: 0 };
+  }
+
+  let reassigned = 0;
+  for (const order of stuck) {
+    if (!order.rider) continue;
+    try {
+      const result = await handleReassignment(
+        order._id,
+        order.rider,
+        'Auto-released on recovery sweep: rider did not accept in time.'
+      );
+      if (result && result.assigned) reassigned += 1;
+    } catch (err) {
+      console.error(`[assignment-recovery] order ${order._id} failed:`, err.message);
+    }
+  }
+  return { scanned: stuck.length, reassigned };
+}
+
+let recoveryTimer = null;
+
+/**
+ * Runs one sweep on boot, then every intervalMs. Call once from server.js
+ * after the DB connection is established.
+ */
+function startAssignmentRecovery(intervalMs = 60 * 1000) {
+  recoverStuckAssignments().catch(() => {});
+  if (recoveryTimer) clearInterval(recoveryTimer);
+  recoveryTimer = setInterval(() => { recoverStuckAssignments().catch(() => {}); }, intervalMs);
+  if (recoveryTimer.unref) recoveryTimer.unref();
+  return recoveryTimer;
+}
+
 module.exports = { 
   autoAssignRider, 
   findBestAvailableRider, 
   resolveOrderZone, 
   handleReassignment, 
-  scheduleRiderTimeout 
+  scheduleRiderTimeout,
+  recoverStuckAssignments,
+  startAssignmentRecovery,
 };
