@@ -92,7 +92,7 @@ const DELIVERY_RULES = Object.freeze({
   FROM_10_TO_15_KM: 40,
   ABOVE_15_KM: 50,
 });
-const MAX_DELIVERY_RADIUS_KM = 15;
+const MAX_DELIVERY_RADIUS_KM = 10;
 // Customer tip is optional, but must stay within a sane server-side limit.
 const MAX_TIP_AMOUNT = 500;
 

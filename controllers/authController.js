@@ -54,7 +54,7 @@ exports.vendorLogin = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    token: generateToken(user._id),
+    token: generateToken(user._id, user.role, user.tokenVersion),
     user: {
       _id: user._id,
       name: user.name,
@@ -114,7 +114,7 @@ exports.riderLogin = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    token: generateToken(rider._id),
+    token: generateToken(rider._id, rider.role, rider.tokenVersion),
     user: {
       _id: rider._id,
       name: rider.name,

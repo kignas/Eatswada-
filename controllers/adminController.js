@@ -53,7 +53,7 @@ exports.adminLogin = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     data: {
-      token: generateToken(user._id, user.role),
+      token: generateToken(user._id, user.role, user.tokenVersion),
       user: { id: user._id, name: user.name, email: user.email, role: user.role },
     },
   });

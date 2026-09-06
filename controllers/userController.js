@@ -53,7 +53,7 @@ const verifyOTPHandler = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     message: 'Login successful',
-    data: { user: user.toJSON(), token: generateToken(user._id, user.role) },
+    data: { user: user.toJSON(), token: generateToken(user._id, user.role, user.tokenVersion) },
   });
 });
 
@@ -86,7 +86,7 @@ const register = asyncHandler(async (req, res) => {
   user.lastLogin = new Date();
   await user.save();
 
-  res.status(201).json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role) } });
+  res.status(201).json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role, user.tokenVersion) } });
 });
 
 const login = asyncHandler(async (req, res) => {
@@ -100,7 +100,7 @@ const login = asyncHandler(async (req, res) => {
   if (!user.isPhoneVerified) return res.status(403).json({ success:false, message:'Please verify your mobile number with OTP first.' });
   user.lastLogin = new Date();
   await user.save();
-  res.json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role) } });
+  res.json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role, user.tokenVersion) } });
 });
 
 const requestPasswordReset = asyncHandler(async (req, res) => {
@@ -138,10 +138,16 @@ const resetPassword = asyncHandler(async (req, res) => {
     return res.status(400).json({ success:false, message:'Password reset session expired. Please request a new OTP.' });
   }
   user.password = password;
+  user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
   user.passwordResetTokenHash = undefined;
   user.passwordResetExpiresAt = undefined;
   await user.save();
   res.json({ success:true, message:'Password changed successfully. You can now log in.' });
+});
+
+const logout = asyncHandler(async (req, res) => {
+  await User.updateOne({ _id: req.user._id }, { $inc: { tokenVersion: 1 } });
+  res.json({ success: true, message: 'Logged out successfully.' });
 });
 
 const getProfile = asyncHandler(async (req, res) => {
@@ -159,6 +165,7 @@ const updateProfile = asyncHandler(async (req, res) => {
   if (password !== undefined) {
     if (typeof password !== 'string' || password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
     user.password = password;
+    user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
   }
   await user.save();
   res.json({ success: true, data: user.toJSON() });
@@ -246,6 +253,6 @@ const setDefaultAddress = asyncHandler(async (req, res) => {
 module.exports = {
   sendOTPHandler, verifyOTPHandler, register, login,
   requestPasswordReset, verifyPasswordResetOTP, resetPassword,
-  getProfile, updateProfile,
+  logout, getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 };
