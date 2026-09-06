@@ -40,22 +40,44 @@ app.set("trust proxy", 1);
 app.use(compression());
 app.use(helmet());
 
-// 🚨 UPDATED CORS CONFIGURATION FOR VERCEL + GITHUB PAGES 🚨
+// ── CORS ────────────────────────────────────────────────────────
+// Keep production origins explicit. Set CORS_ORIGINS in Render as a
+// comma-separated list for any additional customer/admin/vendor origins.
+// Example:
+// CORS_ORIGINS=https://eatswada.com,https://www.eatswada.com,https://kignas.github.io
+const configuredCorsOrigins = String(process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+const corsOrigins = [
+  'http://localhost:5500',
+  'http://127.0.0.1:5500',
+  'https://eatswada.com',
+  'https://www.eatswada.com',
+  'https://nearbite-three.vercel.app',
+  'https://kignas.github.io',
+  ...configuredCorsOrigins
+].filter((origin, index, list) => list.indexOf(origin) === index);
+
 app.use(cors({
-  origin: [
-    'http://localhost:5500', 
-    'http://127.0.0.1:5500', 
-    'https://nearbite-three.vercel.app', // Your live customer frontend URL!
-    // 🔧 FIX: Vendor, Rider, and CEO portals are hosted on GitHub Pages at
-    // kignas.github.io/Vendor, /Rider, /Ceo. That origin was missing here,
-    // so the browser blocked every request from all three portals before
-    // it ever reached the server — surfacing as "Can't reach the server"
-    // on every login page, even when the backend was up.
-    'https://kignas.github.io'
-  ],
+  origin(origin, callback) {
+    // Non-browser/server-to-server requests have no Origin header.
+    if (!origin) return callback(null, true);
+    if (corsOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS origin not allowed: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-setup-key']
+  // Idempotency-Key is sent by cart.html during POST /api/orders.
+  // Without it, the browser preflight fails and the frontend reports
+  // the misleading "Failed to fetch" message.
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Idempotency-Key',
+    'x-setup-key'
+  ]
 }));
 
 app.options('*', cors());
