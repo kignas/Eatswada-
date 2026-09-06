@@ -1,5 +1,6 @@
 'use strict';
 
+const PlatformRating = require('../models/PlatformRating');
 const asyncHandler = require('express-async-handler');
 const bcrypt       = require('bcryptjs');
 const User         = require('../models/User');
@@ -643,3 +644,26 @@ exports.moderateReview = asyncHandler(async (req, res) => {
   await Restaurant.findByIdAndUpdate(review.restaurant, { rating: s.count ? Math.round(s.avg*10)/10 : 4, ratingCount: s.count, reviewCount: s.count });
   res.json({ success: true, data: review });
 });
+
+// Platform-level Rate Us feedback (separate from verified restaurant/order reviews).
+exports.getPlatformRatings = asyncHandler(async (req, res) => {
+  const requestedLimit = Number(req.query.limit);
+  const limit = Math.min(Math.max(Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50, 1), 100);
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const skip = (page - 1) * limit;
+  const [rows, total, summary, distribution] = await Promise.all([
+    PlatformRating.find({}).populate('user', 'name phone email').sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    PlatformRating.countDocuments({}),
+    PlatformRating.aggregate([{ $group: { _id: null, average: { $avg: '$score' }, count: { $sum: 1 } } }]),
+    PlatformRating.aggregate([{ $group: { _id: '$score', count: { $sum: 1 } } }, { $sort: { _id: 1 } }]),
+  ]);
+  const avg = summary[0]?.average || 0;
+  res.json({
+    success: true,
+    data: rows,
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    summary: { average: Math.round(avg * 10) / 10, count: summary[0]?.count || 0, distribution: Object.fromEntries(distribution.map(x => [String(x._id), x.count])) },
+  });
+});
+
+
