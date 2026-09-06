@@ -1,0 +1,2702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+  <title>Checkout – Eatswada</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400..800&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+
+<!-- Global sheet FIRST so cart-scoped rules below can win without !important. -->
+<link rel="stylesheet" href="style.css">
+
+  <style>
+  /* ==========================================================================
+     EATSWADA — CART / CHECKOUT  (Phase 3.1)
+     Single consolidated block. Replaces the two duplicate cart CSS blocks.
+
+     Namespacing note: style.css defines global .item-name (nowrap + ellipsis
+     + !important sizing), .discount-badge / [class*="discount"] (amber),
+     .header-title / .header-sub (!important), .card / .card-body (!important)
+     and body{background:#fff}. Cart-specific classes are therefore prefixed
+     `ct-` and the page is scoped with body.ct-page. No !important is used.
+
+     Deliberate exception: money elements keep "total"/"price" in their class
+     stems so they inherit tabular-nums from style.css [class*="total"].
+     ========================================================================== */
+
+  :root{
+    --ct-green:      #159A62;   /* Eatswada primary action */
+    --ct-green-deep: #0E7A4C;
+    --ct-green-soft: #E9F7F0;
+    --ct-ink:        #1C2024;
+    --ct-ink-2:      #3D4349;
+    --ct-muted:      #697077;
+    --ct-line:       #E7EAED;
+    --ct-line-soft:  #F0F2F4;
+    --ct-surface:    #FFFFFF;
+    --ct-bg:         #F4F5F7;
+    --ct-save:       #15803D;
+    --ct-save-bg:    #ECFDF3;
+    --ct-danger:     #DC2626;
+    --ct-danger-bg:  #FEF2F2;
+    --ct-r-sm: 10px;
+    --ct-r-md: 14px;
+    --ct-r-lg: 18px;
+    --ct-shadow: 0 2px 12px rgba(28,32,36,.06);
+    --ct-ease: cubic-bezier(.25,1,.5,1);
+
+    --ct-footer-h: 176px;       /* measured at runtime, see syncFooterOffset */
+    --ct-media: 56px;
+    --ct-right: 96px;
+    --ct-kb: 0px;               /* visual-viewport keyboard inset, see ctSyncKeyboardInset */
+  }
+
+  /* body{background:#fff} in style.css beats a bare `body` selector here,
+     so the page is scoped with a class to raise specificity legitimately. */
+  body.ct-page{
+    background: var(--ct-bg);
+    color: var(--ct-ink);
+    -webkit-tap-highlight-color: transparent;
+    padding-bottom: calc(var(--ct-footer-h) + 12px);
+    overflow-x: hidden;
+  }
+
+  .tap{ cursor:pointer; transition: transform .1s var(--ct-ease); }
+  .tap:active{ transform: scale(.97); }
+
+  .ct-num{ font-family: var(--font-micro); font-variant-numeric: tabular-nums; }
+
+  /* ── Header ───────────────────────────────────────────────────────── */
+  .ct-header{
+    position: sticky; top: 0; z-index: 50;
+    background: var(--ct-surface);
+    padding: 12px 14px;
+    padding-top: calc(12px + env(safe-area-inset-top));
+    display: flex; align-items: center; gap: 12px;
+    border-bottom: 1px solid var(--ct-line);
+  }
+  .ct-header-left{ display:flex; align-items:center; gap:11px; min-width:0; flex:1; }
+  .ct-back{
+    width:36px; height:36px; flex:0 0 36px;
+    background:#F6F7F8; border:1px solid var(--ct-line); border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-size:14px; color:var(--ct-ink);
+  }
+  .ct-head-copy{ min-width:0; }
+  .ct-head-title{
+    font-size:17px; font-weight:800; letter-spacing:-.3px;
+    line-height:1.15; color:var(--ct-ink);
+  }
+  .ct-head-sub{
+    font-size:11.5px; font-weight:600; color:var(--ct-muted);
+    line-height:1.3; margin-top:1px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .ct-clear{
+    flex:0 0 auto;
+    font-size:12px; font-weight:700; color:var(--ct-danger);
+    background:var(--ct-danger-bg); border:1px solid #FCDCDC;
+    padding:7px 13px; border-radius:9px;
+  }
+
+  /* ── Card shell (NOT .card — that carries !important in style.css) ── */
+  .ct-card{
+    background: var(--ct-surface);
+    margin: 12px 14px;
+    border: 1px solid var(--ct-line);
+    border-radius: var(--ct-r-lg);
+    padding: 14px;
+    box-shadow: var(--ct-shadow);
+  }
+
+  /* ── Address ──────────────────────────────────────────────────────── */
+  .ct-addr{ display:grid; grid-template-columns:28px 1fr auto; gap:0 10px; align-items:start; }
+  .ct-addr-pin{
+    width:28px; height:28px; border-radius:9px;
+    background:var(--ct-green-soft); color:var(--ct-green);
+    display:flex; align-items:center; justify-content:center; font-size:12px;
+  }
+  .ct-addr-eyebrow{
+    font-size:10.5px; font-weight:700; letter-spacing:.4px;
+    color:var(--ct-muted); text-transform:uppercase; line-height:1;
+  }
+  .ct-addr-tag{
+    display:block; margin-top:5px;
+    font-size:14.5px; font-weight:800; color:var(--ct-ink);
+    line-height:1.2; overflow-wrap:anywhere;
+  }
+  .ct-addr-text{
+    grid-column:2 / -1; margin-top:4px;
+    font-size:12.5px; font-weight:500; line-height:1.5; color:var(--ct-muted);
+    overflow-wrap:anywhere;
+  }
+  .ct-addr-text.ct-prompt{ color:var(--ct-green); font-weight:700; }
+  .ct-change{
+    display:inline-flex; align-items:center; gap:3px;
+    font-size:11.5px; font-weight:800; letter-spacing:.3px;
+    color:var(--ct-green); background:var(--ct-green-soft);
+    border:1px solid rgba(21,154,98,.18);
+    padding:6px 10px; border-radius:999px; white-space:nowrap;
+  }
+
+  /* ── Section heading inside cards ─────────────────────────────────── */
+  .ct-card-head{
+    display:flex; align-items:center; gap:7px;
+    font-size:12px; font-weight:800; letter-spacing:.5px;
+    text-transform:uppercase; color:var(--ct-muted);
+    padding-bottom:11px; margin-bottom:2px;
+    border-bottom:1px solid var(--ct-line-soft);
+  }
+
+  /* ── Item rows ────────────────────────────────────────────────────── */
+  #cart-items-list{ padding-top:2px; padding-bottom:2px; }
+  .ct-restaurant-group{ margin:12px 0 16px; }
+  .ct-restaurant-group > .ct-card-head{ margin:0 14px; padding:12px 2px 9px; }
+  .ct-restaurant-group > .ct-line-card{ margin-top:10px; }
+
+
+  .ct-row{
+    display:grid;
+    grid-template-columns:1fr var(--ct-right);
+    gap:12px;
+    padding:14px 0;
+    border-bottom:1px solid var(--ct-line-soft);
+    align-items:start;
+  }
+  .ct-row.has-media{ grid-template-columns:var(--ct-media) 1fr var(--ct-right); }
+  .ct-row:last-child{ border-bottom:none; padding-bottom:2px; }
+
+  .ct-media{
+    width:var(--ct-media); height:var(--ct-media);
+    border-radius:var(--ct-r-md); overflow:hidden;
+    background:#F5F6F7; border:1px solid rgba(28,32,36,.06);
+    position:relative; flex:0 0 var(--ct-media);
+  }
+  .ct-media img{
+    width:100%; height:100%; object-fit:cover; display:block;
+    position:relative; z-index:1;
+  }
+  .ct-media-fallback{
+    position:absolute; inset:0; display:flex;
+    align-items:center; justify-content:center;
+    color:#C2C8CE; font-size:16px; background:#F5F6F7;
+  }
+
+  .ct-info{ min-width:0; }
+  .ct-name-row{ display:flex; align-items:flex-start; gap:6px; }
+  .ct-name-row .nb-veg-mark{ margin-top:2px; }
+  /* Wraps, unlike the global .item-name which is nowrap + ellipsis. */
+  .ct-name{
+    font-size:14px; font-weight:700; line-height:1.3;
+    color:var(--ct-ink); letter-spacing:-.1px;
+    min-width:0; overflow-wrap:anywhere;
+  }
+  .ct-custom{
+    margin-top:4px; font-size:11px; font-weight:500; line-height:1.4;
+    color:var(--ct-muted); overflow-wrap:anywhere;
+  }
+  .ct-price-line{
+    display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+    margin-top:6px;
+  }
+  .ct-unit-price{ font-size:12.5px; font-weight:800; color:var(--ct-ink-2); }
+  .ct-was-price{ font-size:11px; font-weight:600; color:#9CA3AF; text-decoration:line-through; }
+  /* Named ct-off-badge, not *discount*, to escape the global amber rule. */
+  .ct-off-badge{
+    display:inline-flex; align-items:center; height:17px; padding:0 6px;
+    border-radius:5px; background:var(--ct-save-bg); color:var(--ct-save);
+    font-size:9.5px; font-weight:800; letter-spacing:.2px;
+    font-family:var(--font-micro);
+  }
+
+  .ct-right{ display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+  .ct-item-total{ font-size:14.5px; font-weight:800; color:var(--ct-ink); line-height:1.1; }
+  .ct-item-save{ font-size:9.5px; font-weight:800; color:var(--ct-save); margin-top:3px; text-align:right; }
+
+  .ct-stepper{
+    display:inline-flex; align-items:center;
+    background:var(--ct-green-soft);
+    border:1px solid rgba(21,154,98,.25);
+    border-radius:10px; overflow:hidden;
+  }
+  .ct-stepper button{
+    width:32px; height:32px; flex:0 0 32px;
+    background:transparent; border:none; padding:0;
+    color:var(--ct-green); font-size:16px; font-weight:800;
+    display:flex; align-items:center; justify-content:center;
+    transition:background .15s ease;
+  }
+  .ct-stepper button:active{ background:rgba(21,154,98,.12); }
+  .ct-stepper button:focus-visible{ outline:2px solid var(--ct-green); outline-offset:-2px; }
+  .ct-qty{
+    min-width:26px; text-align:center;
+    font-size:13px; font-weight:800; color:var(--ct-green);
+    font-family:var(--font-micro); font-variant-numeric:tabular-nums;
+  }
+
+  /* ── Delivery status strip ────────────────────────────────────────── */
+  .ct-strip{
+    display:flex; align-items:center; gap:9px;
+    margin:0 14px 12px; padding:11px 13px;
+    border-radius:var(--ct-r-md);
+    background:var(--ct-green-soft);
+    border:1px solid rgba(21,154,98,.2);
+    font-size:12px; font-weight:700; line-height:1.4; color:#0F5F3D;
+  }
+  .ct-strip i{ font-size:14px; flex:0 0 auto; color:var(--ct-green); }
+  .ct-strip.is-error{ background:var(--ct-danger-bg); border-color:#F6C9C9; color:#9F1D1D; }
+  .ct-strip.is-error i{ color:var(--ct-danger); }
+  .ct-strip.is-neutral{ background:#F6F7F8; border-color:var(--ct-line); color:var(--ct-muted); }
+  .ct-strip.is-neutral i{ color:var(--ct-muted); }
+  .ct-strip.has-sub{ align-items:flex-start; }
+  .ct-strip.has-sub i{ margin-top:1px; }
+  .ct-strip-copy{ min-width:0; }
+  .ct-strip-sub{ display:block; margin-top:3px; font-weight:600; opacity:.92; }
+  .ct-strip-sub[hidden]{ display:none; }
+
+  /* ── Bill ─────────────────────────────────────────────────────────── */
+  .ct-bill-row{
+    display:flex; justify-content:space-between; align-items:center;
+    gap:12px; font-size:13px; margin-top:11px;
+  }
+  .ct-bill-label{ color:var(--ct-muted); font-weight:500; }
+  .ct-bill-val{ font-weight:700; color:var(--ct-ink-2); font-variant-numeric:tabular-nums; }
+  .ct-bill-val.is-free{ color:var(--ct-save); font-weight:800; }
+  .ct-bill-val.is-off{ color:var(--ct-danger); font-weight:800; }
+  .ct-bill-row.is-saving .ct-bill-label,
+  .ct-bill-row.is-saving .ct-bill-val{ color:var(--ct-save); font-weight:800; }
+
+  .ct-bill-total{
+    display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+    margin-top:13px; padding-top:13px;
+    border-top:1px dashed var(--ct-line);
+  }
+  .ct-total-label{ font-size:14.5px; font-weight:800; color:var(--ct-ink); }
+  .ct-total-val{ font-size:18px; font-weight:800; color:var(--ct-ink); letter-spacing:-.4px; }
+
+  /* .skeleton (shimmer + reduced-motion) comes from style.css; this is the
+     flat fallback if that sheet ever fails to load. */
+  .ct-skel{
+    display:inline-block; width:58px; height:13px;
+    border-radius:5px; vertical-align:middle;
+    background:#EDEFF1;
+  }
+
+  /* ── Empty state ──────────────────────────────────────────────────── */
+  .ct-empty{ display:none; padding:64px 32px 40px; text-align:center; }
+  .ct-empty-art{ width:104px; height:104px; margin:0 auto 20px; display:block; }
+  .ct-empty-title{ font-size:19px; font-weight:800; letter-spacing:-.3px; color:var(--ct-ink); }
+  .ct-empty-sub{
+    font-size:13px; font-weight:500; color:var(--ct-muted);
+    line-height:1.55; margin:8px auto 24px; max-width:36ch;
+  }
+  .ct-empty-btn{
+    background:var(--ct-green); color:#fff; border:none;
+    padding:14px 26px; border-radius:13px;
+    font-size:14.5px; font-weight:800; letter-spacing:.2px;
+    box-shadow:0 6px 16px rgba(21,154,98,.24);
+  }
+
+  /* ── Footer ───────────────────────────────────────────────────────── */
+  .ct-footer{
+    position:fixed; left:0; right:0; bottom:0; z-index:100;
+    display:flex; flex-direction:column; gap:11px;
+    background:rgba(255,255,255,.97);
+    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    border-top:1px solid var(--ct-line);
+    box-shadow:0 -8px 28px rgba(28,32,36,.10);
+    padding:13px 14px calc(13px + env(safe-area-inset-bottom));
+  }
+
+  .ct-pay{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .ct-pay.is-single{ grid-template-columns:1fr; }
+  .ct-pay-label{
+    grid-column:1 / -1; margin:0 2px;
+    font-size:11px; font-weight:700; color:var(--ct-muted); line-height:1;
+  }
+
+  .payment-method-option{
+    position:relative;
+    display:flex; flex-direction:column; gap:7px;
+    padding:11px 12px;
+    background:var(--ct-surface);
+    border:1.5px solid var(--ct-line);
+    border-radius:var(--ct-r-md);
+    cursor:pointer; min-width:0;
+    transition:border-color .18s ease, background .18s ease, box-shadow .18s ease, transform .12s ease;
+  }
+  .payment-method-option:active{ transform:scale(.985); }
+  .payment-method-option.selected{
+    border-color:var(--ct-green);
+    background:var(--ct-green-soft);
+    box-shadow:0 3px 12px rgba(21,154,98,.12);
+  }
+  .ct-pay-head{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .upi-icon, .cod-icon{
+    width:30px; height:30px; flex:0 0 30px; border-radius:9px;
+    display:flex; align-items:center; justify-content:center; font-size:13px;
+  }
+  .upi-icon{ background:#F3E8FF; color:#9333EA; }
+  .cod-icon{ background:#ECFDF5; color:#059669; }
+  .payment-check{ font-size:16px; color:var(--ct-muted); flex:0 0 auto; }
+  .payment-method-option.selected .payment-check{ color:var(--ct-green); }
+  .payment-title{ font-size:12.5px; font-weight:800; color:var(--ct-ink); line-height:1.25; }
+  .payment-sub{ font-size:10px; font-weight:600; color:var(--ct-muted); line-height:1.3; margin-top:2px; }
+
+  .ct-cta{
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    width:100%; min-height:54px; padding:13px 18px;
+    background:var(--ct-green); color:#fff; border:none;
+    border-radius:var(--ct-r-md);
+    box-shadow:0 6px 18px rgba(21,154,98,.26);
+    cursor:pointer;
+    transition:transform .1s var(--ct-ease), background .2s ease, box-shadow .2s ease;
+  }
+  .ct-cta:active{ transform:scale(.98); background:var(--ct-green-deep); }
+  .ct-cta:focus-visible{ outline:3px solid rgba(21,154,98,.4); outline-offset:2px; }
+  .ct-cta-text{
+    font-size:14px; font-weight:800; letter-spacing:.3px;
+    text-align:left; line-height:1.2;
+  }
+  .ct-cta-sub{
+    display:block; font-size:10px; font-weight:600;
+    letter-spacing:.2px; opacity:.85; margin-top:2px;
+  }
+  .ct-cta-val{ font-size:17px; font-weight:800; letter-spacing:-.2px; }
+
+  .ct-cta.locked{
+    background:#E3E6E9; color:#98A0A8; box-shadow:none; cursor:not-allowed;
+  }
+  .ct-cta.locked .ct-cta-val{ color:#98A0A8; }
+  .ct-cta.locked:active{ transform:none; background:#E3E6E9; }
+
+  @keyframes ctShake{
+    0%,100%{ transform:translateX(0); }
+    20%{ transform:translateX(-6px); }
+    40%{ transform:translateX(6px); }
+    60%{ transform:translateX(-4px); }
+    80%{ transform:translateX(4px); }
+  }
+  .ct-shake{ animation:ctShake .4s ease; }
+
+  /* ── Toast ────────────────────────────────────────────────────────── */
+  #addr-toast{
+    position:fixed; left:50%; z-index:9999;
+    bottom:calc(var(--ct-footer-h) + 14px);
+    transform:translateX(-50%) translateY(14px);
+    display:flex; align-items:center; gap:9px;
+    max-width:calc(100vw - 40px);
+    background:#1C2024; color:#fff;
+    font-size:12.5px; font-weight:700; line-height:1.35;
+    padding:11px 18px; border-radius:14px;
+    box-shadow:0 10px 30px rgba(28,32,36,.3);
+    opacity:0; pointer-events:none;
+    transition:opacity .25s ease, transform .25s ease;
+  }
+  #addr-toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
+  #addr-toast i{ color:#5BD39B; flex:0 0 auto; }
+  #addr-toast.is-error i{ color:#FCA5A5; }
+
+
+  /* ══════════════════════════════════════════════════════════════════
+     PHASE 3.1 ADDITIONS — note / instructions / tip / coupon
+     Same `ct-` namespace, same tokens, no !important, no new colours.
+     ══════════════════════════════════════════════════════════════════ */
+
+  /* ── Tappable line cards (restaurant note, instructions, coupon) ─── */
+  .ct-line-card{
+    display:flex; align-items:center; gap:12px;
+    width:auto; box-sizing:border-box;
+    margin:12px 14px; padding:14px;
+    font:inherit; text-align:left; color:inherit;
+    background:var(--ct-surface);
+    border:1px solid var(--ct-line);
+    border-radius:var(--ct-r-lg);
+    box-shadow:var(--ct-shadow);
+    min-height:66px;
+  }
+  .ct-line-card:focus-visible{ outline:2px solid var(--ct-green); outline-offset:2px; }
+  .ct-line-ic{
+    width:34px; height:34px; flex:0 0 34px; border-radius:11px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:14px; background:#F3F5F6; color:var(--ct-ink-2);
+    transition:background .18s ease, color .18s ease;
+  }
+  .ct-line-card.is-set .ct-line-ic{ background:var(--ct-green-soft); color:var(--ct-green); }
+  .ct-line-copy{ flex:1; min-width:0; }
+  .ct-line-title{
+    display:block; font-size:13.5px; font-weight:800;
+    color:var(--ct-ink); line-height:1.25; letter-spacing:-.1px;
+  }
+  .ct-line-sub{
+    margin-top:3px; font-size:11.5px; font-weight:500; line-height:1.45;
+    color:var(--ct-muted); overflow-wrap:anywhere;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+  }
+  .ct-line-act{
+    flex:0 0 auto; white-space:nowrap;
+    font-size:11.5px; font-weight:800; letter-spacing:.3px; color:var(--ct-green);
+  }
+  .ct-line-act[hidden]{ display:none; }
+  .ct-line-chev{ flex:0 0 auto; font-size:11px; color:#B6BDC4; }
+  .ct-line-chev[hidden]{ display:none; }
+
+  /* ── Tip ──────────────────────────────────────────────────────────── */
+  .ct-tip-note{
+    margin:11px 0 0; font-size:11.5px; font-weight:500;
+    line-height:1.5; color:var(--ct-muted);
+  }
+  .ct-chip-row{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .ct-chip{
+    font:inherit; font-size:12.5px; font-weight:800;
+    color:var(--ct-ink-2); background:var(--ct-surface);
+    border:1.5px solid var(--ct-line); border-radius:999px;
+    padding:9px 15px; min-height:40px;
+    display:inline-flex; align-items:center; justify-content:center;
+    transition:border-color .16s ease, background .16s ease, color .16s ease;
+  }
+  .ct-chip:focus-visible{ outline:2px solid var(--ct-green); outline-offset:2px; }
+  .ct-chip[aria-pressed="true"]{
+    border-color:var(--ct-green);
+    background:var(--ct-green-soft);
+    color:var(--ct-green-deep);
+  }
+
+  /* ── Bottom sheets ────────────────────────────────────────────────── */
+  body.ct-sheet-open{ overflow:hidden; }
+
+  .ct-sheet-root{
+    position:fixed; inset:0; z-index:1200;
+    display:flex; align-items:flex-end; justify-content:center;
+    padding-bottom:var(--ct-kb, 0px);
+  }
+  .ct-sheet-root[hidden]{ display:none; }
+  .ct-scrim{
+    position:absolute; inset:0; background:rgba(16,20,24,.5);
+    opacity:0; transition:opacity .22s var(--ct-ease);
+  }
+  .ct-sheet-root.is-open .ct-scrim{ opacity:1; }
+  .ct-sheet{
+    position:relative; width:100%; max-width:520px;
+    background:var(--ct-surface);
+    border-radius:22px 22px 0 0;
+    padding:8px 16px calc(14px + env(safe-area-inset-bottom));
+    max-height:88vh;
+    max-height:calc(88dvh - var(--ct-kb, 0px));
+    overflow-y:auto; -webkit-overflow-scrolling:touch;
+    box-shadow:0 -14px 40px rgba(16,20,24,.22);
+    transform:translateY(100%);
+    transition:transform .26s var(--ct-ease);
+  }
+  .ct-sheet-root.is-open .ct-sheet{ transform:translateY(0); }
+  .ct-sheet-grab{
+    width:40px; height:4px; border-radius:999px;
+    background:#DDE1E5; margin:6px auto 12px;
+  }
+  .ct-sheet-head{
+    display:flex; align-items:flex-start; gap:12px;
+    padding-bottom:12px; border-bottom:1px solid var(--ct-line-soft);
+  }
+  .ct-sheet-title{
+    flex:1; margin:0; font-size:16px; font-weight:800;
+    letter-spacing:-.2px; line-height:1.3; color:var(--ct-ink);
+  }
+  .ct-sheet-x{
+    flex:0 0 32px; width:32px; height:32px; border-radius:50%;
+    border:1px solid var(--ct-line); background:#F6F7F8;
+    color:var(--ct-ink-2); font-size:13px;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .ct-sheet-x:focus-visible{ outline:2px solid var(--ct-green); outline-offset:2px; }
+  .ct-sheet-body{ padding:14px 0 2px; }
+
+  .ct-field-label{
+    display:block; margin-bottom:7px;
+    font-size:11px; font-weight:800; letter-spacing:.4px;
+    text-transform:uppercase; color:var(--ct-muted);
+  }
+  /* 16px keeps iOS Safari from zooming the page on focus. */
+  .ct-textarea, .ct-input{
+    width:100%; box-sizing:border-box; font:inherit;
+    font-size:16px; font-weight:500; line-height:1.5; color:var(--ct-ink);
+    background:#FAFBFB; border:1.5px solid var(--ct-line);
+    border-radius:var(--ct-r-md); padding:12px 13px; resize:none;
+  }
+  .ct-textarea:focus, .ct-input:focus{
+    outline:none; border-color:var(--ct-green); background:#fff;
+    box-shadow:0 0 0 3px rgba(21,154,98,.12);
+  }
+  .ct-field-foot{
+    display:flex; align-items:flex-start; justify-content:space-between;
+    gap:12px; margin-top:7px;
+  }
+  .ct-field-help{ font-size:11.5px; font-weight:500; line-height:1.45; color:var(--ct-muted); }
+  .ct-count{
+    flex:0 0 auto; font-family:var(--font-micro); font-variant-numeric:tabular-nums;
+    font-size:11px; font-weight:700; color:var(--ct-muted);
+  }
+  .ct-count.is-max{ color:var(--ct-danger); }
+
+  .ct-sug-row{ display:flex; flex-wrap:wrap; gap:7px; margin-top:13px; }
+  .ct-sug{
+    font:inherit; font-size:12px; font-weight:700; color:var(--ct-ink-2);
+    background:#F4F6F7; border:1px solid var(--ct-line);
+    border-radius:999px; padding:8px 12px; min-height:36px;
+  }
+  .ct-sug:focus-visible{ outline:2px solid var(--ct-green); outline-offset:2px; }
+
+  .ct-sheet-err{ margin:11px 0 0; font-size:12px; font-weight:700; color:var(--ct-danger); }
+  .ct-sheet-err[hidden]{ display:none; }
+
+  .ct-sheet-foot{ display:grid; grid-template-columns:1fr 1.4fr; gap:9px; margin-top:16px; }
+  .ct-sheet-foot.is-single{ grid-template-columns:1fr; }
+  .ct-btn{
+    font:inherit; font-size:14px; font-weight:800;
+    min-height:48px; padding:13px 16px;
+    border:1.5px solid transparent; border-radius:var(--ct-r-md);
+  }
+  .ct-btn:focus-visible{ outline:2px solid var(--ct-green); outline-offset:2px; }
+  .ct-btn-ghost{ background:#F4F6F7; border-color:var(--ct-line); color:var(--ct-ink-2); }
+  .ct-btn-primary{
+    background:var(--ct-green); color:#fff;
+    box-shadow:0 5px 14px rgba(21,154,98,.22);
+  }
+  .ct-btn-primary:active{ background:var(--ct-green-deep); }
+  .ct-btn-remove{
+    display:block; width:100%; margin-top:9px; min-height:44px;
+    font:inherit; font-size:13px; font-weight:800;
+    color:var(--ct-danger); background:transparent;
+    border:none; border-radius:var(--ct-r-md);
+  }
+  .ct-btn-remove[hidden]{ display:none; }
+
+  /* ── Checkout delivery summary ─────────────────────────────────────── */
+  .ct-delivery-eta-card{
+    display:flex; align-items:center; gap:13px;
+    min-height:72px;
+    padding:14px 16px;
+  }
+  .ct-delivery-eta-icon,
+  .ct-customer-icon{
+    width:40px; height:40px; flex:0 0 40px;
+    border-radius:13px;
+    background:var(--ct-green-soft);
+    color:var(--ct-green);
+    display:flex; align-items:center; justify-content:center;
+    font-size:17px;
+  }
+  .ct-delivery-eta-copy{ min-width:0; }
+  .ct-delivery-eta-title{
+    font-size:15px; line-height:1.35; color:var(--ct-ink);
+    font-weight:600;
+  }
+  .ct-delivery-eta-title strong{ font-weight:800; }
+  .ct-delivery-eta-sub{
+    margin-top:3px; font-size:11.5px; color:var(--ct-muted); font-weight:500;
+  }
+  .ct-customer-card{
+    display:flex; align-items:center; gap:12px;
+    min-height:70px;
+    padding:13px 16px;
+  }
+  .ct-customer-copy{ min-width:0; flex:1; }
+  .ct-customer-name{
+    font-size:14px; font-weight:800; color:var(--ct-ink);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .ct-customer-phone{
+    margin-top:3px; font-size:12px; font-weight:600; color:var(--ct-muted);
+  }
+  .ct-customer-chevron{
+    color:#aeb6bd; font-size:12px; padding-left:4px;
+  }
+
+  /* ── Compact bill row ───────────────────────────────────────────────── */
+  .ct-bill-peek{ display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+  .ct-bill-peek-val{
+    font-size:14.5px; font-weight:800; letter-spacing:-.2px; color:var(--ct-ink);
+    font-family:var(--font-micro); font-variant-numeric:tabular-nums;
+  }
+  .ct-bill-peek-val.is-pending{ color:var(--ct-muted); }
+
+  /* ── Coupon empty state ───────────────────────────────────────────── */
+  .ct-empty-mini{ text-align:center; padding:20px 8px 4px; }
+  .ct-empty-mini-ic{
+    width:56px; height:56px; margin:0 auto 14px; border-radius:18px;
+    background:var(--ct-green-soft); color:var(--ct-green);
+    display:flex; align-items:center; justify-content:center; font-size:22px;
+  }
+  .ct-empty-mini-title{ font-size:15px; font-weight:800; color:var(--ct-ink); }
+  .ct-empty-mini-sub{
+    margin:7px auto 0; max-width:34ch;
+    font-size:12.5px; font-weight:500; line-height:1.55; color:var(--ct-muted);
+  }
+
+  /* ── Narrow phones (360 / 375) ────────────────────────────────────── */
+  @media (max-width:380px){
+    :root{ --ct-media:50px; --ct-right:92px; }
+    .ct-card{ margin:12px 12px; padding:13px; }
+    .ct-strip{ margin:0 12px 12px; }
+    .ct-footer{ padding-left:12px; padding-right:12px; }
+    .ct-pay{ gap:7px; }
+    .ct-stepper button{ width:30px; flex:0 0 30px; }
+    .ct-cta{ padding:13px 15px; }
+    .ct-cta-text{ font-size:13px; }
+    .ct-cta-val{ font-size:16px; }
+    .ct-line-card{ margin:12px 12px; padding:13px; }
+    .ct-chip{ padding:9px 13px; font-size:12px; }
+    .ct-sheet{ padding-left:14px; padding-right:14px; }
+    .ct-sheet-foot{ grid-template-columns:1fr 1.3fr; gap:8px; }
+  }
+
+  @media (prefers-reduced-motion:reduce){
+    body.ct-page{ animation:none; }
+    .tap, .ct-cta, .payment-method-option, .ct-stepper button{ transition:none; }
+    .tap:active, .ct-cta:active, .payment-method-option:active{ transform:none; }
+    .ct-shake{ animation:none; }
+    #addr-toast{ transition:opacity .01s linear; }
+    .ct-scrim, .ct-chip, .ct-line-ic, .ct-btn{ transition:none; }
+    .ct-sheet{ transition:none; transform:translateY(0); }
+  }
+  </style>
+</head>
+
+<body class="ct-page">
+
+  <div class="ct-header">
+    <div class="ct-header-left">
+      <button class="ct-back tap" onclick="window.nearbiteSafeBack()" aria-label="Go back"><i class="fa-solid fa-arrow-left"></i></button>
+      <div class="ct-head-copy">
+        <div class="ct-head-title">Checkout</div>
+        <div class="ct-head-sub" id="cart-restaurant-name">Loading…</div>
+      </div>
+    </div>
+    <button class="ct-clear tap" id="btn-clear-cart" onclick="clearCart()">Clear</button>
+  </div>
+
+  <div id="cart-has-items">
+
+    <!-- ── Delivery ETA ─────────────────────────────────────────────────── -->
+    <div class="ct-card ct-delivery-eta-card" id="delivery-eta-card" aria-live="polite">
+      <div class="ct-delivery-eta-icon" aria-hidden="true">
+        <i class="fa-regular fa-clock"></i>
+      </div>
+      <div class="ct-delivery-eta-copy">
+        <div class="ct-delivery-eta-title">Delivery in <strong id="checkout-eta">35–40 mins</strong></div>
+        <div class="ct-delivery-eta-sub">Estimated delivery time</div>
+      </div>
+    </div>
+
+    <div class="ct-card tap" id="address-block" onclick="window.location.href='address.html?return=cart'">
+      <div class="ct-addr">
+        <div class="ct-addr-pin"><i class="fa-solid fa-location-dot"></i></div>
+        <div>
+          <div class="ct-addr-eyebrow">Deliver to</div>
+          <span class="ct-addr-tag" id="address-tag-label">Add delivery address</span>
+        </div>
+        <span class="ct-change">CHANGE <i class="fa-solid fa-chevron-right" style="font-size:9px;"></i></span>
+        <div class="ct-addr-text ct-prompt" id="address-display-text">Tap to add your delivery address</div>
+      </div>
+    </div>
+
+    <!-- ── Customer contact ─────────────────────────────────────────────── -->
+    <div class="ct-card ct-customer-card" id="customer-contact-card">
+      <div class="ct-customer-icon" aria-hidden="true"><i class="fa-regular fa-user"></i></div>
+      <div class="ct-customer-copy">
+        <div class="ct-customer-name" id="checkout-customer-name">Customer</div>
+        <div class="ct-customer-phone" id="checkout-customer-phone">Phone number</div>
+      </div>
+      <i class="fa-solid fa-chevron-right ct-customer-chevron" aria-hidden="true"></i>
+    </div>
+
+    <div class="ct-card" id="cart-items-list"></div>
+
+    <div class="ct-strip" id="free-delivery-nudge" style="display:none;" role="status" aria-live="polite">
+      <i class="fa-solid fa-motorcycle" id="nudge-icon" aria-hidden="true"></i>
+      <span class="ct-strip-copy">
+        <span id="nudge-text"></span>
+        <span class="ct-strip-sub" id="nudge-sub" hidden></span>
+      </span>
+    </div>
+
+    <!-- ── Apply coupon ──────────────────────────────────────────────────
+         Real control, honest content: it opens a real sheet that reports the
+         real state of the coupon system (currently: none active). No fake
+         code field, no fake APPLY button, nothing added to the order. -->
+    <button type="button" class="ct-line-card tap" id="coupon-card" aria-haspopup="dialog">
+      <span class="ct-line-ic" aria-hidden="true"><i class="fa-solid fa-ticket"></i></span>
+      <span class="ct-line-copy">
+        <span class="ct-line-title">Apply coupon</span>
+        <span class="ct-line-sub">No coupons are active for this order right now</span>
+      </span>
+      <i class="fa-solid fa-chevron-right ct-line-chev" aria-hidden="true"></i>
+    </button>
+
+    <!-- ── Delivery instructions (separate field, separate sheet) ─────── -->
+    <button type="button" class="ct-line-card tap" data-note-field="deliveryInstructions" aria-haspopup="dialog">
+      <span class="ct-line-ic" aria-hidden="true"><i class="fa-solid fa-motorcycle"></i></span>
+      <span class="ct-line-copy">
+        <span class="ct-line-title" data-role="title">Add delivery instructions</span>
+        <span class="ct-line-sub" data-role="sub">Tell your delivery partner how to reach you</span>
+      </span>
+      <span class="ct-line-act" data-role="act" hidden>Edit</span>
+      <i class="fa-solid fa-chevron-right ct-line-chev" data-role="chev" aria-hidden="true"></i>
+    </button>
+
+    <!-- ── Tip ───────────────────────────────────────────────────────── -->
+    <div class="ct-card">
+      <div class="ct-card-head" id="tip-heading"><i class="fa-solid fa-hand-holding-heart"></i> Tip your delivery partner</div>
+      <p class="ct-tip-note">A tip is added to your order total and goes to the partner who delivers this order.</p>
+      <div class="ct-chip-row" id="tip-options" role="group" aria-labelledby="tip-heading">
+        <button type="button" class="ct-chip" data-tip="0" aria-pressed="true">No tip</button>
+        <button type="button" class="ct-chip" data-tip="10" aria-pressed="false">&#8377;10</button>
+        <button type="button" class="ct-chip" data-tip="20" aria-pressed="false">&#8377;20</button>
+        <button type="button" class="ct-chip" data-tip="30" aria-pressed="false">&#8377;30</button>
+        <button type="button" class="ct-chip" data-tip="50" aria-pressed="false">&#8377;50</button>
+        <button type="button" class="ct-chip" data-tip="custom" id="tip-custom-chip" aria-pressed="false" aria-haspopup="dialog">Custom</button>
+      </div>
+    </div>
+
+    <!-- ── Bill details (compact) ─────────────────────────────────────
+         The full breakdown moved into #ct-bill-sheet. Every bill element id
+         is unchanged and simply lives inside the sheet now, so paintBill(),
+         applyTotals() and applyDelivery() keep writing to the same nodes. -->
+    <button type="button" class="ct-line-card tap" id="bill-card" aria-haspopup="dialog">
+      <span class="ct-line-ic" aria-hidden="true"><i class="fa-solid fa-receipt"></i></span>
+      <span class="ct-line-copy">
+        <span class="ct-line-title">Bill details</span>
+        <span class="ct-line-sub" id="bill-compact-line">Item total &middot; Delivery fee</span>
+      </span>
+      <span class="ct-bill-peek">
+        <span class="ct-bill-peek-val" id="bill-peek-total">&#8377;0</span>
+        <i class="fa-solid fa-chevron-right ct-line-chev" aria-hidden="true"></i>
+      </span>
+    </button>
+  </div>
+
+  <div class="ct-empty" id="empty-cart">
+    <svg class="ct-empty-art" viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="M22 32h52l-5 44a8 8 0 0 1-8 7H35a8 8 0 0 1-8-7L22 32Z" fill="#EFF2F4" stroke="#CBD3DA" stroke-width="3" stroke-linejoin="round"/>
+      <path d="M36 32v-6a12 12 0 0 1 24 0v6" stroke="#159A62" stroke-width="3.5" stroke-linecap="round"/>
+      <circle cx="39" cy="55" r="3" fill="#CBD3DA"/>
+      <circle cx="57" cy="55" r="3" fill="#CBD3DA"/>
+      <path d="M39 68c4.5-4 13.5-4 18 0" stroke="#CBD3DA" stroke-width="3" stroke-linecap="round"/>
+    </svg>
+    <div class="ct-empty-title">Your cart is empty</div>
+    <div class="ct-empty-sub">Pick a restaurant and add a few dishes — your order will show up here.</div>
+    <button class="ct-empty-btn tap" onclick="window.location.href='index.html'">Browse restaurants</button>
+  </div>
+
+  <div id="addr-toast" role="status" aria-live="polite">
+    <i class="fa-solid fa-circle-info"></i><span id="addr-toast-text">Add a delivery address first</span>
+  </div>
+
+  <div class="ct-footer" id="checkout-footer">
+    <div id="payment-options" class="ct-pay">
+      <div class="ct-pay-label">Payment method</div>
+
+      <div class="payment-method-option selected" data-method="upi" onclick="selectPaymentMethod('upi')">
+        <div class="ct-pay-head">
+          <div class="upi-icon"><i class="fa-solid fa-qrcode"></i></div>
+          <i class="fa-solid fa-circle-check payment-check"></i>
+        </div>
+        <div>
+          <div class="payment-title">Online</div>
+          <div class="payment-sub">UPI · GPay · PhonePe</div>
+        </div>
+      </div>
+
+      <div id="cod-payment-option" class="payment-method-option" data-method="cod" onclick="selectPaymentMethod('cod')" style="display:none;">
+        <div class="ct-pay-head">
+          <div class="cod-icon"><i class="fa-solid fa-money-bill-wave"></i></div>
+          <i class="fa-regular fa-circle payment-check"></i>
+        </div>
+        <div>
+          <div class="payment-title">Cash on delivery</div>
+          <div class="payment-sub">Pay at your doorstep</div>
+        </div>
+      </div>
+    </div>
+
+    <button class="ct-cta locked" id="btn-checkout" onclick="placeOrder()">
+      <span class="ct-cta-text" id="checkout-label">Place order</span>
+      <span class="ct-cta-val" id="checkout-total">₹0</span>
+    </button>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       BOTTOM SHEETS
+       One generic note sheet (configured for restaurant note OR delivery
+       instructions), one custom-tip sheet, one coupon sheet.
+       ══════════════════════════════════════════════════════════════════ -->
+
+  <div class="ct-sheet-root" id="ct-note-sheet" hidden>
+    <div class="ct-scrim" data-sheet-close></div>
+    <div class="ct-sheet" role="dialog" aria-modal="true" aria-labelledby="note-sheet-title">
+      <div class="ct-sheet-grab" aria-hidden="true"></div>
+      <div class="ct-sheet-head">
+        <h2 class="ct-sheet-title" id="note-sheet-title">Add a note for the restaurant</h2>
+        <button type="button" class="ct-sheet-x" data-sheet-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+      <div class="ct-sheet-body">
+        <label class="ct-field-label" for="note-input" id="note-field-label">Your note</label>
+        <textarea id="note-input" class="ct-textarea" rows="3" maxlength="250"
+                  data-autofocus aria-describedby="note-help note-count"></textarea>
+        <div class="ct-field-foot">
+          <span class="ct-field-help" id="note-help">Example: Please make it less spicy</span>
+          <span class="ct-count" id="note-count" aria-live="off">0/250</span>
+        </div>
+        <div class="ct-sug-row" id="note-suggestions"></div>
+      </div>
+      <div class="ct-sheet-foot">
+        <button type="button" class="ct-btn ct-btn-ghost" data-sheet-close>Cancel</button>
+        <button type="button" class="ct-btn ct-btn-primary" id="note-save">Save note</button>
+      </div>
+      <button type="button" class="ct-btn-remove" id="note-remove" hidden>Remove note</button>
+    </div>
+  </div>
+
+  <div class="ct-sheet-root" id="ct-bill-sheet" hidden>
+    <div class="ct-scrim" data-sheet-close></div>
+    <div class="ct-sheet" role="dialog" aria-modal="true" aria-labelledby="bill-sheet-title">
+      <div class="ct-sheet-grab" aria-hidden="true"></div>
+      <div class="ct-sheet-head">
+        <h2 class="ct-sheet-title" id="bill-sheet-title">Bill details</h2>
+        <button type="button" class="ct-sheet-x" data-sheet-close data-autofocus aria-label="Close bill details"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+
+      <div class="ct-sheet-body">
+        <div class="ct-bill-row">
+          <span class="ct-bill-label">Item total</span>
+          <span class="ct-bill-val" id="bill-subtotal">₹0</span>
+        </div>
+
+        <div class="ct-bill-row" id="bill-mrp-row" style="display:none;">
+          <span class="ct-bill-label">Item MRP</span>
+          <span class="ct-bill-val" id="bill-mrp">₹0</span>
+        </div>
+
+        <div class="ct-bill-row is-saving" id="bill-savings-row" style="display:none;">
+          <span class="ct-bill-label">You save</span>
+          <span class="ct-bill-val" id="bill-savings-val">₹0</span>
+        </div>
+
+        <div class="ct-bill-row">
+          <span class="ct-bill-label">Delivery fee</span>
+          <span class="ct-bill-val" id="bill-delivery-val"><span class="ct-skel skeleton"></span></span>
+        </div>
+
+        <div class="ct-bill-row" id="bill-free-delivery-row" style="display:none;">
+          <span class="ct-bill-label">Free delivery</span>
+          <span class="ct-bill-val" id="bill-free-delivery-val"></span>
+        </div>
+
+        <!-- Tip is the only new bill line. It appears only when the customer
+             actually selects one. There is deliberately no GST / packaging /
+             platform-fee row: the backend exposes no such value, and a real
+             coupon row can be added here when the coupon system has data. -->
+        <div class="ct-bill-row" id="bill-tip-row" style="display:none;">
+          <span class="ct-bill-label">Delivery partner tip</span>
+          <span class="ct-bill-val" id="bill-tip-val">&#8377;0</span>
+        </div>
+
+        <div id="bill-savings" style="display:none;"></div>
+
+        <div class="ct-bill-total">
+          <span class="ct-total-label">To pay</span>
+          <span class="ct-total-val" id="bill-total">₹0</span>
+        </div>
+
+      </div>
+
+      <div class="ct-sheet-foot is-single">
+        <button type="button" class="ct-btn ct-btn-ghost" data-sheet-close>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="ct-sheet-root" id="ct-tip-sheet" hidden>
+    <div class="ct-scrim" data-sheet-close></div>
+    <div class="ct-sheet" role="dialog" aria-modal="true" aria-labelledby="tip-sheet-title">
+      <div class="ct-sheet-grab" aria-hidden="true"></div>
+      <div class="ct-sheet-head">
+        <h2 class="ct-sheet-title" id="tip-sheet-title">Custom tip</h2>
+        <button type="button" class="ct-sheet-x" data-sheet-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+      <div class="ct-sheet-body">
+        <label class="ct-field-label" for="tip-input">Tip amount (&#8377;)</label>
+        <input id="tip-input" class="ct-input" type="number" inputmode="numeric"
+               min="1" max="1000" step="1" data-autofocus
+               aria-describedby="tip-help tip-error">
+        <div class="ct-field-foot">
+          <span class="ct-field-help" id="tip-help">Whole rupees, between &#8377;1 and &#8377;1000.</span>
+        </div>
+        <p class="ct-sheet-err" id="tip-error" role="alert" hidden></p>
+      </div>
+      <div class="ct-sheet-foot">
+        <button type="button" class="ct-btn ct-btn-ghost" data-sheet-close>Cancel</button>
+        <button type="button" class="ct-btn ct-btn-primary" id="tip-save">Save tip</button>
+      </div>
+      <button type="button" class="ct-btn-remove" id="tip-remove" hidden>Remove tip</button>
+    </div>
+  </div>
+
+  <div class="ct-sheet-root" id="ct-coupon-sheet" hidden>
+    <div class="ct-scrim" data-sheet-close></div>
+    <div class="ct-sheet" role="dialog" aria-modal="true" aria-labelledby="coupon-sheet-title">
+      <div class="ct-sheet-grab" aria-hidden="true"></div>
+      <div class="ct-sheet-head">
+        <h2 class="ct-sheet-title" id="coupon-sheet-title">Apply coupon</h2>
+        <button type="button" class="ct-sheet-x" data-sheet-close aria-label="Close"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+      </div>
+      <!-- Honest empty state. When the backend starts serving active coupons,
+           this container is the only markup that changes: the trigger, the
+           sheet shell, the a11y wiring and the bill row slot already exist. -->
+      <div class="ct-sheet-body" id="coupon-sheet-body">
+        <div class="ct-empty-mini">
+          <div class="ct-empty-mini-ic" aria-hidden="true"><i class="fa-solid fa-ticket"></i></div>
+          <div class="ct-empty-mini-title">No coupons available</div>
+          <p class="ct-empty-mini-sub">We don&rsquo;t have any active coupons for this order right now.</p>
+        </div>
+      </div>
+      <div class="ct-sheet-foot is-single">
+        <button type="button" class="ct-btn ct-btn-ghost" data-sheet-close data-autofocus>Close</button>
+      </div>
+    </div>
+  </div>
+
+<script src="config.js"></script>
+<script>
+/* ============================================================================
+   EATSWADA CART — Phase 3.1
+   Preserved verbatim in behaviour: cart schema, localStorage keys, the three
+   API endpoints, Haversine distance, fee tiers, free-delivery rule, radius
+   validation, MRP/savings/total math, COD gating, payment persistence,
+   guest-login stash, address flow, OTP storage, track-order redirect.
+   ========================================================================= */
+
+(function sanitizeLegacyCarts() {
+  try {
+      const cart = JSON.parse(localStorage.getItem('nearbite_cart'));
+      if (!cart) return;
+
+      let isCorrupted = false;
+
+      // Scan all items in the cart object
+      for (const itemName in cart) {
+          const item = cart[itemName];
+          if (!item.resId || item.resId === "undefined" || item.resId === "null") {
+              isCorrupted = true;
+              break;
+          }
+      }
+
+      if (isCorrupted) {
+          console.warn("Corrupted legacy cart detected. Flushing storage to prevent Mongoose crash.");
+          localStorage.removeItem('nearbite_cart');
+          alert("We updated our system and had to reset your cart. Please add your items again.");
+          window.location.reload();
+      }
+  } catch (error) {
+      console.error("Error sanitizing cart:", error);
+  }
+})();
+
+/* ── Escaping ────────────────────────────────────────────────────────────
+   The old build interpolated raw item names into onclick="" and innerHTML,
+   which broke on apostrophes and injected on angle brackets. Names are now
+   escaped for display and carried on data-name for delegated handlers. */
+const CT_ESC = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+function esc(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, ch => CT_ESC[ch]);
+}
+
+/* ── Geo + fee primitives (unchanged) ───────────────────────────────────── */
+function normalizeCoords(value) {
+  // GeoJSON: { type: 'Point', coordinates: [lng, lat] }
+  if (value && Array.isArray(value.coordinates) && value.coordinates.length === 2) {
+    const lng = Number(value.coordinates[0]);
+    const lat = Number(value.coordinates[1]);
+    if (Number.isFinite(lng) && Number.isFinite(lat) && Math.abs(lng) <= 180 && Math.abs(lat) <= 90) {
+      return [lng, lat];
+    }
+  }
+  // Legacy/local format: { longitude, latitude }
+  if (value && Number.isFinite(Number(value.longitude)) && Number.isFinite(Number(value.latitude))) {
+    const lng = Number(value.longitude);
+    const lat = Number(value.latitude);
+    if (Math.abs(lng) <= 180 && Math.abs(lat) <= 90) return [lng, lat];
+  }
+  return null;
+}
+
+function distanceKm(from, to) {
+  const [fromLng, fromLat] = from;
+  const [toLng, toLat] = to;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(toLat - fromLat);
+  const dLng = toRad(toLng - fromLng);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(fromLat)) * Math.cos(toRad(toLat)) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function deliveryFeeForDistance(distance) {
+  if (!Number.isFinite(distance) || distance < 0) return null;
+  if (distance < 10) return 30;
+  if (distance <= 15) return 40;
+  return 50;
+}
+
+function getCartRestaurantId(savedCart) {
+  for (const [, info] of Object.entries(savedCart || {})) {
+    if (info && info.resId && info.resId !== 'undefined' && info.resId !== 'null') return String(info.resId);
+  }
+  return null;
+}
+
+/* ── Restaurant lookup, now cached for UI reads ──────────────────────────
+   Same request, same parsed shape. force:true bypasses the cache and is
+   what placeOrder() uses, so the order path still hits the network exactly
+   as before. Only repeated +/- taps are spared the round trip. */
+let ctResCache = { id: null, data: null };
+
+/* The restaurant document is the only source for the ETA. Field naming
+   varies across the collection, so the known shapes are read in order and
+   anything unrecognised yields '' (rendered as "Not available"). No range,
+   padding or default is ever synthesised here. */
+function ctEtaText(restaurant) {
+  if (!restaurant || typeof restaurant !== 'object') return '';
+
+  // Read the ETA from the backend restaurant record without inventing a value.
+  const sources = [restaurant, restaurant.delivery, restaurant.deliveryInfo,
+                   restaurant.deliveryDetails, restaurant.timings]
+    .filter(v => v && typeof v === 'object');
+
+  for (const source of sources) {
+    const direct = source.deliveryTime != null ? source.deliveryTime
+                 : source.deliveryTimeText != null ? source.deliveryTimeText
+                 : source.estimatedDeliveryTime != null ? source.estimatedDeliveryTime
+                 : source.eta != null ? source.eta
+                 : source.etaText;
+
+    if (typeof direct === 'string' && direct.trim()) {
+      const text = direct.trim().replace(/-/g, '–');
+      return /min|hr|hour/i.test(text) ? text : text + ' mins';
+    }
+
+    const pair = (direct && typeof direct === 'object') ? direct : source;
+    const min = Number(pair.deliveryTimeMin != null ? pair.deliveryTimeMin :
+                       pair.minMinutes != null ? pair.minMinutes : pair.min);
+    const max = Number(pair.deliveryTimeMax != null ? pair.deliveryTimeMax :
+                       pair.maxMinutes != null ? pair.maxMinutes : pair.max);
+    if (Number.isFinite(min) && min > 0 && Number.isFinite(max) && max > 0 && max >= min) {
+      return Math.round(min) + '–' + Math.round(max) + ' mins';
+    }
+
+    const single = Number(typeof direct === 'number' ? direct :
+      source.deliveryTimeMinutes != null ? source.deliveryTimeMinutes :
+      source.avgDeliveryTime != null ? source.avgDeliveryTime : source.averageDeliveryTime);
+    if (Number.isFinite(single) && single > 0) return Math.round(single) + ' mins';
+  }
+  return '';
+}
+
+/* Name and phone are captured from the /profile responses the cart already
+   makes. No extra request is added to the render path; the bill sheet tops
+   this up lazily only if it is still empty. */
+const ctProfile = { name: '', phone: '', fetched: false };
+// True only within a single renderCart() pass once the delivery calculation has
+// already refreshed /profile (address hydration), so ctEnsureProfile() can skip
+// a second identical GET /profile in that same pass. renderCart() resets it.
+let ctProfileRefreshedThisPass = false;
+
+/* Backend /profile returns the authenticated User document directly in
+   result.data. The User model uses the exact fields: name and phone. */
+function ctCaptureProfile(user) {
+  if (!user || typeof user !== 'object') return;
+
+  const name = typeof user.name === 'string' ? user.name.trim() : '';
+  const phone = typeof user.phone === 'string' ? user.phone.trim() : '';
+
+  // Never replace a real profile name with the OTP onboarding placeholder.
+  if (name && name !== 'Nearbite User') ctProfile.name = name;
+  if (phone) ctProfile.phone = phone;
+  ctProfile.fetched = true;
+}
+
+/* Login already stores the same backend User object in localStorage. Use it
+   immediately so the card can paint without waiting for the network; the
+   authenticated /profile request below remains the authoritative refresh. */
+(function hydrateCachedCustomer() {
+  try {
+    const cached = JSON.parse(localStorage.getItem('nearbite_user') || 'null');
+    if (cached && typeof cached === 'object') {
+      if (typeof cached.name === 'string' && cached.name.trim() && cached.name.trim() !== 'Nearbite User') {
+        ctProfile.name = cached.name.trim();
+      }
+      if (typeof cached.phone === 'string' && cached.phone.trim()) {
+        ctProfile.phone = cached.phone.trim();
+      }
+    }
+  } catch (_) {}
+})();
+
+async function getRestaurantLocation(restaurantId, force) {
+  if (!restaurantId) return null;
+  if (!force && ctResCache.id === restaurantId && ctResCache.data) return ctResCache.data;
+  try {
+    const response = await fetch(`${CONFIG.API_BASE_URL}/restaurants/${encodeURIComponent(restaurantId)}`, { cache: 'no-store' });
+    const result = await response.json();
+    if (!response.ok || !result.success) return null;
+    const restaurant = result.data || {};
+    const parsed = {
+      ...restaurant,
+      coords: normalizeCoords(restaurant.location),
+      minOrder: Number(restaurant.minOrder || 0),
+      freeDeliveryEnabled: restaurant.freeDeliveryEnabled !== false,
+      freeDeliveryAbove: Number(restaurant.freeDeliveryAbove || 0),
+      deliveryRadiusKm: Number(restaurant.deliveryRadiusKm || 15),
+      codEnabled: restaurant.codEnabled === true,
+      etaText: '35–40 mins',
+    };
+    ctResCache = { id: restaurantId, data: parsed };
+    return parsed;
+  } catch (error) {
+    console.warn('Could not load restaurant GPS:', error);
+    return null;
+  }
+}
+
+/* Address hydration is likewise cached per selected address id. */
+let ctAddrHydratedFor = null;
+
+async function calculateSingleRestaurantDelivery(options) {
+  const force = !!(options && options.force);
+  let savedCart = {};
+  let savedAddress = null;
+  try { savedCart = JSON.parse(localStorage.getItem('nearbite_cart')) || {}; } catch (e) {}
+  try { savedAddress = JSON.parse(localStorage.getItem('nearbite_address')); } catch (e) {}
+  // Current checkout address is distinct from the user's default address.
+  // The address page updates both the selected ID and its local cache.
+  const selectedAddressId = localStorage.getItem('nearbite_selected_address_id');
+
+  const restaurantId = getCartRestaurantId(savedCart);
+  const subtotal = Object.entries(savedCart).reduce((sum, [, item]) => sum + Number(item.quantity || 0) * Number(item.price || 0), 0);
+  let customerCoords = normalizeCoords(savedAddress && (savedAddress.location || savedAddress));
+  const restaurantInfo = await getRestaurantLocation(restaurantId, force);
+  const restaurantCoords = restaurantInfo?.coords;
+
+  // If a selected server-side address exists, hydrate its coordinates before
+  // calculating delivery. This prevents Home/Work switches from using stale GPS.
+  const token = localStorage.getItem('nearbite_token') || localStorage.getItem('token');
+  const needsHydration = force || ctAddrHydratedFor !== selectedAddressId;
+  if (token && selectedAddressId && needsHydration) {
+    try {
+      const response = await fetch(`${CONFIG.API_BASE_URL}/profile`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      const result = await response.json();
+      if (response.ok && result.success) {
+        ctCaptureProfile(result.data);
+        ctProfileRefreshedThisPass = true;   // profile is now current for this pass
+        const list = Array.isArray(result.data?.addresses) ? result.data.addresses : [];
+        const selected = list.find(a => String(a._id) === String(selectedAddressId));
+        if (selected) {
+          customerCoords = normalizeCoords(selected.location || selected);
+          localStorage.setItem('nearbite_address', JSON.stringify(selected));
+          savedAddress = selected;
+          ctAddrHydratedFor = selectedAddressId;
+        }
+      }
+    } catch (e) { console.warn('Could not refresh selected delivery address:', e); }
+  }
+
+  if (!customerCoords || !restaurantCoords) {
+    const freeDelivery = !!(restaurantInfo?.freeDeliveryEnabled && restaurantInfo?.freeDeliveryAbove > 0 && subtotal >= restaurantInfo.freeDeliveryAbove);
+    return {
+      fee: freeDelivery ? 0 : 30,
+      distance: null,
+      source: 'fallback',
+      freeDelivery,
+      freeDeliveryEnabled: restaurantInfo?.freeDeliveryEnabled !== false,
+      freeDeliveryAbove: restaurantInfo?.freeDeliveryAbove || 0,
+      minOrder: restaurantInfo?.minOrder || 0,
+      codEnabled: restaurantInfo?.codEnabled === true
+    };
+  }
+
+  const distance = distanceKm(restaurantCoords, customerCoords);
+  const radius = Number(restaurantInfo?.deliveryRadiusKm);
+  if (Number.isFinite(radius) && radius > 0 && distance > radius) {
+    return { fee: null, distance, source: 'gps', outsideRadius: true, radius, codEnabled: restaurantInfo?.codEnabled === true };
+  }
+
+  const baseFee = deliveryFeeForDistance(distance);
+  const freeDelivery = restaurantInfo?.freeDeliveryEnabled && restaurantInfo?.freeDeliveryAbove > 0 && subtotal >= restaurantInfo.freeDeliveryAbove;
+  return { fee: freeDelivery ? 0 : baseFee, distance, source: 'gps', freeDelivery, freeDeliveryEnabled: restaurantInfo?.freeDeliveryEnabled !== false, freeDeliveryAbove: restaurantInfo?.freeDeliveryAbove || 0, minOrder: restaurantInfo?.minOrder || 0, codEnabled: restaurantInfo?.codEnabled === true };
+}
+
+async function calculateCurrentDelivery(options) {
+  const savedCart = readCart() || {};
+  const groups = cartGroups(savedCart);
+  if (groups.length <= 1) return calculateSingleRestaurantDelivery(options);
+
+  const savedAddress = ctSelectedAddress();
+  const selectedAddressId = localStorage.getItem('nearbite_selected_address_id');
+  let customerCoords = normalizeCoords(savedAddress && (savedAddress.location || savedAddress));
+  const token = localStorage.getItem('nearbite_token') || localStorage.getItem('token');
+  const force = !!(options && options.force);
+  if (token && selectedAddressId && (force || ctAddrHydratedFor !== selectedAddressId)) {
+    try {
+      const response = await fetch(`${CONFIG.API_BASE_URL}/profile`, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' });
+      const result = await response.json();
+      if (response.ok && result.success) {
+        ctCaptureProfile(result.data);
+        ctProfileRefreshedThisPass = true;
+        const list = Array.isArray(result.data?.addresses) ? result.data.addresses : [];
+        const selected = list.find(a => String(a._id) === String(selectedAddressId));
+        if (selected) { customerCoords = normalizeCoords(selected.location || selected); localStorage.setItem('nearbite_address', JSON.stringify(selected)); ctAddrHydratedFor = selectedAddressId; }
+      }
+    } catch (e) { console.warn('Could not refresh selected delivery address:', e); }
+  }
+
+  const results = await Promise.all(groups.map(async group => {
+    const info = await getRestaurantLocation(group.id, force);
+    const subtotal = group.items.reduce((sum, [, item]) => sum + Number(item.quantity || 0) * Number(item.price || 0), 0);
+    if (!customerCoords || !info?.coords) return { id: group.id, name: group.name, fee: 30, subtotal, info, distance: null, outsideRadius: false, unresolved: true };
+    const distance = distanceKm(info.coords, customerCoords);
+    const radius = Number(info.deliveryRadiusKm || 15);
+    if (Number.isFinite(radius) && radius > 0 && distance > radius) return { id: group.id, name: info.name || group.name, fee: 0, subtotal, info, distance, outsideRadius: true, radius };
+    const base = deliveryFeeForDistance(distance);
+    const free = info.freeDeliveryEnabled && info.freeDeliveryAbove > 0 && subtotal >= info.freeDeliveryAbove;
+    return { id: group.id, name: info.name || group.name, fee: free ? 0 : base, subtotal, info, distance, outsideRadius: false, freeDelivery: free };
+  }));
+
+  const unavailable = results.find(r => r.outsideRadius);
+  const fee = results.reduce((sum, r) => sum + Number(r.fee || 0), 0);
+  const minOrderFailures = results.filter(r => Number(r.info?.minOrder || 0) > r.subtotal);
+  return {
+    fee: unavailable ? null : fee,
+    distance: unavailable ? unavailable.distance : null,
+    radius: unavailable ? unavailable.radius : null,
+    outsideRadius: !!unavailable,
+    multi: true,
+    restaurants: results,
+    unresolved: results.some(r => r.unresolved),
+    minOrderFailures,
+    codEnabled: results.every(r => r.info?.codEnabled === true),
+    freeDelivery: false,
+    freeDeliveryEnabled: false,
+    freeDeliveryAbove: 0,
+  multiMinOrderFailures: [],
+  multiDelivery: null,
+    minOrder: 0
+  };
+}
+
+/* ── Payment (behaviour unchanged) ──────────────────────────────────────── */
+let selectedPaymentMethod = localStorage.getItem('nearbite_payment_method') || 'upi';
+
+function selectPaymentMethod(method) {
+  selectedPaymentMethod = method === 'cod' ? 'cod' : 'upi';
+  localStorage.setItem('nearbite_payment_method', selectedPaymentMethod);
+  document.querySelectorAll('.payment-method-option').forEach(el => {
+    const active = el.dataset.method === selectedPaymentMethod && el.style.display !== 'none';
+    el.classList.toggle('selected', active);
+    const icon = el.querySelector('.payment-check');
+    if (icon) icon.className = active ? 'fa-solid fa-circle-check payment-check' : 'fa-regular fa-circle payment-check';
+  });
+}
+
+function syncPaymentOptions(codEnabled) {
+  const codOption = document.getElementById('cod-payment-option');
+  if (!codOption) return;
+  codOption.style.display = codEnabled ? 'flex' : 'none';
+  const grid = document.getElementById('payment-options');
+  if (grid) grid.classList.toggle('is-single', !codEnabled);
+  if (!codEnabled && selectedPaymentMethod === 'cod') {
+    selectedPaymentMethod = 'upi';
+    localStorage.setItem('nearbite_payment_method', 'upi');
+  }
+  selectPaymentMethod(selectedPaymentMethod);
+}
+
+/* ── Shared UI state ────────────────────────────────────────────────────── */
+const ctState = {
+  subtotal: 0,
+  units: 0,
+  loggedIn: false,
+  addressOk: false,
+  unavailable: false,
+  deliveryReady: false,
+  deliveryFee: 0,
+  minOrder: 0,
+  freeDeliveryEnabled: false,
+  freeDeliveryAbove: 0,
+  multiMinOrderFailures: [],
+  multiDelivery: null,
+  // Phase 3.1 — sent to the existing POST /orders endpoint.
+  restaurantNotes: {},
+  restaurantNote: '',
+  deliveryInstructions: '',
+  tipAmount: 0
+};
+
+/* ══════════════════════════════════════════════════════════════════════════
+   CART EXTRAS — restaurant note, delivery instructions, tip
+   These live on ctState, so every existing repaint (+/-, address change,
+   delivery refresh, payment change) already preserves them. They are ALSO
+   mirrored to localStorage, because the cart legitimately leaves the page
+   during checkout (address.html, login.html) and returns on a fresh load;
+   without the mirror, "address changes preserve note/instructions/tip"
+   cannot hold. localStorage is the durability layer only — the values are
+   sent to the backend on POST /orders, which is what actually persists them.
+   ═══════════════════════════════════════════════════════════════════════ */
+const CT_EXTRAS_KEY  = 'nearbite_cart_extras';
+const CT_NOTE_MAX    = 250;
+const CT_TIP_MIN     = 1;
+const CT_TIP_MAX     = 1000;     // frontend sanity bound; the backend validates too
+const CT_TIP_PRESETS = [10, 20, 30, 50];
+
+const CT_NOTE_CFG = {
+  restaurantNote: {
+    idleTitle:    'Add a note for the restaurant',
+    idleSub:      'Spice level, allergies, packaging — anything the kitchen should know',
+    setTitle:     'Note added',
+    sheetTitle:   'Add a note for the restaurant',
+    fieldLabel:   'Your note for the restaurant',
+    help:         'Example: Please make it less spicy',
+    saveLabel:    'Save note',
+    removeLabel:  'Remove note',
+    savedToast:   'Note saved for the restaurant',
+    removedToast: 'Restaurant note removed',
+    suggestions:  ['Please make it less spicy', 'Extra napkins, please', 'No onion', 'Pack the sauces separately']
+  },
+  deliveryInstructions: {
+    idleTitle:    'Add delivery instructions',
+    idleSub:      'Tell your delivery partner how to reach you',
+    setTitle:     'Instructions added',
+    sheetTitle:   'Delivery instructions',
+    fieldLabel:   'Instructions for your delivery partner',
+    help:         'Example: Call when you arrive',
+    saveLabel:    'Save instructions',
+    removeLabel:  'Remove instructions',
+    savedToast:   'Delivery instructions saved',
+    removedToast: 'Delivery instructions removed',
+    suggestions:  ['Call when you arrive', 'Leave at the gate', 'Ring the bell', "Don't call, just deliver"]
+  }
+};
+
+/* Notes are single-line by intent: newlines and control characters are
+   collapsed, so a long note can never break the card or the sheet layout. */
+function ctCleanNote(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, CT_NOTE_MAX);
+}
+
+function ctCleanTip(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < CT_TIP_MIN) return 0;   // 0 means "no tip"
+  return Math.min(n, CT_TIP_MAX);
+}
+
+function loadCartExtras() {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(CT_EXTRAS_KEY)); } catch (e) {}
+  const data = (raw && typeof raw === 'object') ? raw : {};
+  const notes = (data.restaurantNotes && typeof data.restaurantNotes === 'object' && !Array.isArray(data.restaurantNotes)) ? data.restaurantNotes : {};
+  ctState.restaurantNotes = Object.fromEntries(Object.entries(notes).map(([id, note]) => [String(id), ctCleanNote(note)]).filter(([, note]) => note));
+  // Migrate the old single-note format without breaking existing carts.
+  ctState.restaurantNote = ctCleanNote(data.restaurantNote);
+  if (ctState.restaurantNote && Object.keys(ctState.restaurantNotes).length === 0) {
+    const cart = readCart();
+    const first = cart && Object.values(cart).find(item => item && item.resId);
+    if (first && first.resId) ctState.restaurantNotes[String(first.resId)] = ctState.restaurantNote;
+  }
+  ctState.deliveryInstructions = ctCleanNote(data.deliveryInstructions);
+  ctState.tipAmount = ctCleanTip(data.tipAmount);
+}
+
+function saveCartExtras() {
+  try {
+    localStorage.setItem(CT_EXTRAS_KEY, JSON.stringify({
+      restaurantNotes: ctState.restaurantNotes,
+      // Keep legacy field for older builds; only mirror the note when exactly one restaurant exists.
+      restaurantNote: Object.keys(ctState.restaurantNotes).length === 1 ? Object.values(ctState.restaurantNotes)[0] : '',
+      deliveryInstructions: ctState.deliveryInstructions,
+      tipAmount: ctState.tipAmount
+    }));
+  } catch (e) { console.warn('Could not persist cart extras:', e); }
+}
+
+function clearCartExtras() {
+  ctState.restaurantNotes = {};
+  ctState.restaurantNote = '';
+  ctState.deliveryInstructions = '';
+  ctState.tipAmount = 0;
+  try { localStorage.removeItem(CT_EXTRAS_KEY); } catch (e) {}
+}
+
+loadCartExtras();
+
+function readCart() {
+  try { return JSON.parse(localStorage.getItem('nearbite_cart')) || null; }
+  catch (e) { return null; }
+}
+
+/* Optional media: rendered only when the cart object actually carries an
+   image. Nothing is invented when the field is absent. */
+function itemImage(info) {
+  const url = info && (info.image || info.imageUrl);
+  return (typeof url === 'string' && url.trim()) ? url.trim() : '';
+}
+
+/* Veg mark: strictly boolean. Unknown/null/undefined renders nothing. */
+function vegMark(info) {
+  if (!info) return '';
+  const flag = info.isVeg;
+  if (flag === true)  return '<span class="nb-veg-mark veg" title="Veg"><span></span></span>';
+  if (flag === false) return '<span class="nb-veg-mark nonveg" title="Non-veg"><span></span></span>';
+  return '';
+}
+
+/* Customizations exist in the cart schema; shape is not guaranteed. */
+function customLine(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value.trim();
+  const flat = v => {
+    if (v == null || v === '' || v === false) return '';
+    if (Array.isArray(v)) return v.map(flat).filter(Boolean).join(', ');
+    if (typeof v === 'object') return String(v.name || v.label || v.title || v.value || '');
+    return String(v);
+  };
+  if (Array.isArray(value)) return value.map(flat).filter(Boolean).join(', ');
+  if (typeof value === 'object') {
+    return Object.entries(value).map(([key, v]) => {
+      if (v === true) return key;
+      return flat(v);
+    }).filter(Boolean).join(', ');
+  }
+  return '';
+}
+
+/* ── Item painting: synchronous, never waits on the network ─────────────── */
+function cartGroups(savedCart) {
+  const groups = new Map();
+  Object.entries(savedCart).forEach(([name, info]) => {
+    const rid = info && info.resId ? String(info.resId) : '';
+    if (!rid) return;
+    if (!groups.has(rid)) groups.set(rid, { id: rid, name: info.restaurantName || info.resName || 'Restaurant', items: [] });
+    groups.get(rid).items.push([name, info]);
+  });
+  return Array.from(groups.values());
+}
+
+function restaurantNoteCard(group) {
+  const rid = esc(group.id);
+  const value = ctState.restaurantNotes[group.id] || '';
+  return `<button type="button" class="ct-line-card tap" data-note-field="restaurantNote" data-note-restaurant-id="${rid}" aria-haspopup="dialog" aria-label="${value ? 'Edit note for ' + esc(group.name) : 'Add a note for ' + esc(group.name)}">
+    <span class="ct-line-ic" aria-hidden="true"><i class="fa-regular fa-note-sticky"></i></span>
+    <span class="ct-line-copy">
+      <span class="ct-line-title" data-role="title">${value ? 'Note added' : 'Add a note for ' + esc(group.name)}</span>
+      <span class="ct-line-sub" data-role="sub">${value ? esc(value) : 'Spice level, allergies, packaging — anything the kitchen should know'}</span>
+    </span>
+    <span class="ct-line-act" data-role="act" ${value ? '' : 'hidden'}>Edit</span>
+    <i class="fa-solid fa-chevron-right ct-line-chev" data-role="chev" ${value ? 'hidden' : ''} aria-hidden="true"></i>
+  </button>`;
+}
+
+function paintItems(savedCart) {
+  const listEl = document.getElementById('cart-items-list');
+  const groups = cartGroups(savedCart);
+  const allItems = Object.entries(savedCart);
+  const anyMedia = allItems.some(([, info]) => itemImage(info));
+
+  listEl.innerHTML = groups.map(group => `
+    <div class="ct-restaurant-group" data-restaurant-id="${esc(group.id)}">
+      <div class="ct-card-head"><i class="fa-solid fa-store"></i> ${esc(group.name)} <span style="margin-left:auto;font-size:10px;text-transform:none;letter-spacing:0;">${group.items.length} ${group.items.length === 1 ? 'item' : 'items'}</span></div>
+      ${group.items.map(([name, info]) => {
+        const price = Number(info.price || 0);
+        const original = Number(info.originalPrice || 0);
+        const hasDiscount = original > price;
+        const discountPct = hasDiscount ? Math.round(((original - price) / original) * 100) : 0;
+        const quantity = Number(info.quantity || 0);
+        const itemTotal = quantity * price;
+        const itemSavings = hasDiscount ? quantity * (original - price) : 0;
+        const img = itemImage(info);
+        const media = anyMedia ? `<div class="ct-media"><div class="ct-media-fallback"><i class="fa-solid fa-utensils"></i></div>${img ? `<img src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</div>` : '';
+        const custom = customLine(info.customizations);
+        return `<div class="ct-row${anyMedia ? ' has-media' : ''}" data-name="${esc(name)}">
+          ${media}<div class="ct-info"><div class="ct-name-row">${vegMark(info)}<span class="ct-name">${esc(name)}</span></div>
+          ${custom ? `<div class="ct-custom">${esc(custom)}</div>` : ''}<div class="ct-price-line"><span class="ct-unit-price ct-num">₹${price}</span>${hasDiscount ? `<span class="ct-was-price ct-num">₹${original}</span><span class="ct-off-badge">${discountPct}% OFF</span>` : ''}</div></div>
+          <div class="ct-right"><div><div class="ct-item-total ct-num">₹${itemTotal}</div>${hasDiscount ? `<div class="ct-item-save ct-num">Save ₹${itemSavings.toFixed(0)}</div>` : ''}</div>
+          <div class="ct-stepper" role="group" aria-label="Quantity for ${esc(name)}"><button type="button" data-step="-1" aria-label="Decrease quantity">−</button><span class="ct-qty">${quantity}</span><button type="button" data-step="1" aria-label="Increase quantity">+</button></div></div>
+        </div>`;
+      }).join('')}
+      ${restaurantNoteCard(group)}
+    </div>`).join('');
+
+  document.getElementById('cart-restaurant-name').innerText = groups.length === 1 ? groups[0].name : `${groups.length} restaurants`;
+}
+
+/* ── Bill painting: money math identical to the previous build ───────────── */
+function paintBill(savedCart) {
+  const items = Object.entries(savedCart);
+  const subtotal = items.reduce((s, [, v]) => s + Number(v.quantity || 0) * Number(v.price || 0), 0);
+  ctState.subtotal = subtotal;
+  ctState.units = items.reduce((s, [, v]) => s + Number(v.quantity || 0), 0);
+
+  document.getElementById('bill-subtotal').innerText = '₹' + subtotal;
+
+  const originalCartTotal = items.reduce((sum, [, v]) => sum + Number(v.quantity || 0) * (Number(v.originalPrice) > Number(v.price) ? Number(v.originalPrice) : Number(v.price)), 0);
+  const savings = Math.max(0, originalCartTotal - subtotal);
+
+  const mrpRow = document.getElementById('bill-mrp-row');
+  const mrpEl = document.getElementById('bill-mrp');
+  const savingsRow = document.getElementById('bill-savings-row');
+  const savingsVal = document.getElementById('bill-savings-val');
+
+  if (mrpRow && mrpEl) {
+    mrpRow.style.display = savings > 0 ? 'flex' : 'none';
+    mrpEl.textContent = '₹' + originalCartTotal.toFixed(0);
+  }
+  if (savingsRow && savingsVal) {
+    savingsRow.style.display = savings > 0 ? 'flex' : 'none';
+    savingsVal.textContent = '₹' + savings.toFixed(0);
+  }
+
+  const legacySavings = document.getElementById('bill-savings');
+  if (legacySavings) {
+    legacySavings.textContent = '';
+    legacySavings.style.display = 'none';
+  }
+
+  // Totals stay on the last known fee until the delivery refresh resolves.
+  paintNoteCards();
+  paintTipChips();
+  applyTotals();
+  updateCheckoutCta();
+}
+
+/* Display-only preview of what the customer expects to pay, including the
+   selected tip. The backend recalculates and stays authoritative for what
+   is actually charged. */
+function applyTotals() {
+  const tip = ctCleanTip(ctState.tipAmount);
+  const total = ctState.subtotal + ctState.deliveryFee + tip;
+
+  const tipRow = document.getElementById('bill-tip-row');
+  const tipVal = document.getElementById('bill-tip-val');
+  if (tipRow && tipVal) {
+    tipRow.style.display = tip > 0 ? 'flex' : 'none';
+    tipVal.textContent = '₹' + tip;
+  }
+
+  const freeRow = document.getElementById('bill-free-delivery-row');
+  const freeVal = document.getElementById('bill-free-delivery-val');
+  if (freeRow && freeVal) {
+    const threshold = Number(ctState.freeDeliveryAbove || 0);
+    if (ctState.deliveryReady && ctState.freeDeliveryEnabled && threshold > 0) {
+      if (ctState.deliveryFee === 0) {
+        freeRow.style.display = 'flex';
+        freeVal.textContent = 'FREE';
+      } else {
+        freeRow.style.display = 'flex';
+        freeVal.textContent = 'Above ₹' + threshold.toLocaleString('en-IN');
+      }
+    } else if (ctState.deliveryReady && ctState.deliveryFee === 0 && ctState.freeDeliveryEnabled) {
+      freeRow.style.display = 'flex';
+      freeVal.textContent = 'FREE';
+    } else {
+      freeRow.style.display = 'none';
+    }
+  }
+
+  // One number, written everywhere it appears: the sheet's "To pay", the
+  // compact row and the checkout CTA can never disagree.
+  const deliveryVal = document.getElementById('bill-delivery-val');
+  if (deliveryVal && ctState.deliveryReady && !ctState.unavailable) {
+    const isFree = Number(ctState.deliveryFee) === 0 && ctState.freeDeliveryEnabled === true;
+    deliveryVal.classList.toggle('is-free', isFree);
+    deliveryVal.textContent = isFree ? 'FREE' : '₹' + Number(ctState.deliveryFee || 0);
+  }
+
+  document.getElementById('bill-total').innerText = '₹' + total;
+  document.getElementById('checkout-total').innerText = '₹' + total;
+  updateBillCompact(total);
+}
+
+/* Collapsed summary of the same figures shown in the sheet. */
+function updateBillCompact(total) {
+  const peek = document.getElementById('bill-peek-total');
+  if (peek) {
+    // Never expose a stale/placeholder total while delivery pricing is unresolved.
+    if (!ctState.deliveryReady) {
+      peek.textContent = '—';
+      peek.classList.add('is-pending');
+    } else {
+      peek.textContent = '₹' + total;
+      peek.classList.remove('is-pending');
+    }
+  }
+
+  const line = document.getElementById('bill-compact-line');
+  if (!line) return;
+
+  const parts = ['Item total ₹' + ctState.subtotal];
+  if (!ctState.deliveryReady) {
+    parts.push('Checking delivery…');
+  } else if (ctState.unavailable) {
+    parts.push('Delivery unavailable');
+  } else if (ctState.deliveryFee === 0) {
+    parts.push('Free delivery');
+  } else {
+    parts.push('Delivery ₹' + ctState.deliveryFee);
+  }
+
+  const tip = ctCleanTip(ctState.tipAmount);
+  if (tip > 0) parts.push('Tip ₹' + tip);
+
+  line.textContent = parts.join(' · ');
+}
+
+/* ── Delivery presentation ──────────────────────────────────────────────── */
+function setDeliveryPending() {
+  ctState.deliveryReady = false;
+  const feeEl = document.getElementById('bill-delivery-val');
+  feeEl.className = 'ct-bill-val';
+  feeEl.innerHTML = '<span class="ct-skel skeleton"></span>';
+
+  const strip = document.getElementById('free-delivery-nudge');
+  const stripSub = document.getElementById('nudge-sub');
+  const stripIcon = document.getElementById('nudge-icon');
+  strip.className = 'ct-strip is-neutral';
+  strip.style.display = 'flex';
+  if (stripIcon) stripIcon.className = 'fa-solid fa-motorcycle';
+  document.getElementById('nudge-text').textContent = 'Checking delivery for this address…';
+  if (stripSub) { stripSub.textContent = ''; stripSub.hidden = true; }
+}
+
+function applyDelivery(delivery) {
+  // Multi-restaurant delivery is authoritative per restaurant. Keep the
+  // shared state in sync so the bill, CTA and bill sheet never stay on a
+  // skeleton or stale total.
+  const feeEl = document.getElementById('bill-delivery-val');
+  let deliveryFee = delivery.fee;
+
+  // The delivery calculation can arrive with a stale `fee/freeDelivery`
+  // pair (for example, the banner may already know the threshold is reached
+  // while `fee` is still the distance fee). Re-derive the free-delivery state
+  // from the authoritative threshold + current subtotal before rendering the
+  // bill, so the banner and Bill Details can never disagree.
+  const deliveryThreshold = Number(delivery.freeDeliveryAbove || 0);
+  const thresholdUnlocked = delivery.freeDeliveryEnabled !== false &&
+    deliveryThreshold > 0 && Number(ctState.subtotal || 0) >= deliveryThreshold;
+  if (!delivery.multi && !delivery.outsideRadius && (delivery.freeDelivery === true || thresholdUnlocked)) {
+    deliveryFee = 0;
+    delivery.freeDelivery = true;
+  }
+
+  if (delivery.multi) {
+    ctState.deliveryFee = deliveryFee == null ? 0 : Number(deliveryFee);
+    ctState.unavailable = !!delivery.outsideRadius;
+    ctState.multiDelivery = delivery;
+    ctState.multiMinOrderFailures = delivery.minOrderFailures || [];
+    ctState.deliveryReady = !delivery.unresolved && !delivery.outsideRadius;
+
+    const freeRestaurants = (delivery.restaurants || []).filter(r => r.freeDelivery);
+    const freeAll = (delivery.restaurants || []).length > 0 &&
+      freeRestaurants.length === (delivery.restaurants || []).length;
+
+    // A single restaurant can still expose its backend threshold in the
+    // bill. For multiple restaurants, the bill shows FREE only when every
+    // restaurant's delivery fee is free.
+    if ((delivery.restaurants || []).length === 1) {
+      const r = delivery.restaurants[0];
+      ctState.freeDeliveryEnabled = r.info?.freeDeliveryEnabled !== false;
+      ctState.freeDeliveryAbove = Number(r.info?.freeDeliveryAbove || 0);
+      ctState.minOrder = Number(r.info?.minOrder || 0);
+    } else {
+      ctState.freeDeliveryEnabled = freeAll;
+      ctState.freeDeliveryAbove = 0;
+      ctState.minOrder = 0;
+    }
+
+    if (delivery.unresolved) {
+      feeEl.className = 'ct-bill-val'; feeEl.textContent = 'Checking…';
+      setStrip('is-neutral', 'fa-solid fa-motorcycle', 'Checking delivery for all restaurants…', 'Each restaurant is priced separately.');
+    } else if (delivery.outsideRadius) {
+      feeEl.className = 'ct-bill-val is-off'; feeEl.textContent = 'Unavailable';
+      setStrip('is-error', 'fa-solid fa-circle-exclamation', 'Delivery unavailable', `${delivery.name || 'One restaurant'} is outside its delivery radius.`);
+    } else if (freeAll) {
+      feeEl.className = 'ct-bill-val is-free'; feeEl.textContent = 'FREE';
+      const detail = (delivery.restaurants || []).map(r => `${r.name}: FREE`).join(' · ');
+      setStrip('', 'fa-solid fa-motorcycle', 'Free delivery on this order', detail);
+    } else {
+      feeEl.className = 'ct-bill-val'; feeEl.textContent = '₹' + ctState.deliveryFee;
+      const detail = (delivery.restaurants || []).map(r => `${r.name}: ${r.fee === 0 ? 'FREE' : '₹' + r.fee}`).join(' · ');
+      const freeCount = freeRestaurants.length;
+      setStrip('', 'fa-solid fa-motorcycle', `${delivery.restaurants.length} restaurants · ₹${ctState.deliveryFee} delivery`, detail + (freeCount ? ` · ${freeCount} free` : ''));
+    }
+    applyTotals(); updateCheckoutCta(); return;
+  }
+
+  if (delivery.outsideRadius) {
+    deliveryFee = 0;
+  } else if (delivery.freeDelivery === true) {
+    // Backend says free delivery is unlocked: never keep a stale fee.
+    deliveryFee = 0;
+  } else if (deliveryFee == null) {
+    deliveryFee = 30;
+  }
+
+  ctState.deliveryFee = Number(deliveryFee) || 0;
+  ctState.minOrder = Number(delivery.minOrder || ctState.minOrder || 0);
+  ctState.freeDeliveryAbove = Number(delivery.freeDeliveryAbove || ctState.freeDeliveryAbove || 0);
+  ctState.freeDeliveryEnabled = delivery.freeDeliveryEnabled !== false;
+  ctState.unavailable = !!delivery.outsideRadius;
+  ctState.multiDelivery = delivery.multi ? delivery : null;
+  ctState.multiMinOrderFailures = delivery.multi ? (delivery.minOrderFailures || []) : [];
+  ctState.deliveryReady = !delivery.unresolved;
+
+  const strip = document.getElementById('free-delivery-nudge');
+  const stripText = document.getElementById('nudge-text');
+  const stripSub = document.getElementById('nudge-sub');
+  const stripIcon = document.getElementById('nudge-icon');
+
+  const setStrip = (tone, icon, title, sub) => {
+    strip.className = 'ct-strip' + (tone ? ' ' + tone : '') + (sub ? ' has-sub' : '');
+    strip.style.display = 'flex';
+    if (stripIcon) stripIcon.className = icon;
+    stripText.textContent = title;
+    if (stripSub) {
+      stripSub.textContent = sub || '';
+      stripSub.hidden = !sub;
+    }
+  };
+
+  if (delivery.outsideRadius) {
+    // ₹0 here means "not deliverable", never "free". Say so.
+    // The limit shown is the restaurant's real deliveryRadiusKm from the
+    // backend (15 km by default) — it is not a hardcoded frontend number.
+    const limit = delivery.radius.toFixed(1).replace(/\.0$/, '');
+    feeEl.className = 'ct-bill-val is-off';
+    feeEl.textContent = 'Unavailable';
+    setStrip('is-error', 'fa-solid fa-circle-exclamation',
+      'Delivery unavailable',
+      `You are ${delivery.distance.toFixed(1)} km away. This restaurant currently delivers within ${limit} km.`);
+  } else if (delivery.freeDelivery) {
+    feeEl.className = 'ct-bill-val is-free';
+    feeEl.textContent = 'FREE';
+    setStrip('', 'fa-solid fa-motorcycle', delivery.distance != null
+      ? `Free delivery on this order · ${delivery.distance.toFixed(1)} km away`
+      : 'Free delivery on this order', '');
+  } else if (delivery.freeDeliveryAbove > 0 && !delivery.freeDelivery) {
+    feeEl.className = 'ct-bill-val';
+    feeEl.textContent = '₹' + deliveryFee;
+    const remaining = Math.max(0, Math.ceil(delivery.freeDeliveryAbove - ctState.subtotal));
+    const title = remaining > 0
+      ? `Add ₹${remaining.toLocaleString('en-IN')} more for FREE delivery`
+      : 'FREE delivery unlocked';
+    const sub = delivery.distance != null
+      ? `${delivery.distance.toFixed(1)} km away · ₹${deliveryFee} delivery fee`
+      : `Free delivery above ₹${Number(delivery.freeDeliveryAbove).toLocaleString('en-IN')}`;
+    setStrip('', 'fa-solid fa-motorcycle', title, sub);
+  } else if (delivery.distance != null) {
+    feeEl.className = 'ct-bill-val';
+    feeEl.textContent = '₹' + deliveryFee;
+    setStrip('', 'fa-solid fa-motorcycle',
+      `${delivery.distance.toFixed(1)} km away · ₹${deliveryFee} delivery fee`, '');
+  } else {
+    feeEl.className = 'ct-bill-val';
+    feeEl.textContent = '₹' + deliveryFee;
+    setStrip('is-neutral', 'fa-solid fa-motorcycle',
+      'Delivery fee is calculated from the restaurant and your address GPS.', '');
+  }
+
+  applyTotals();
+  updateCheckoutCta();
+}
+
+/* Monotonic request id: a slow reply from an older cart state can never
+   overwrite a newer one. */
+let ctDeliveryReq = 0;
+let ctDeliveryTimer = null;
+
+async function refreshDelivery(options) {
+  const myReq = ++ctDeliveryReq;
+  setDeliveryPending();
+  updateCheckoutCta();
+  try {
+    const delivery = await calculateCurrentDelivery(options);
+    if (myReq !== ctDeliveryReq) return;          // superseded, drop it
+    syncPaymentOptions(delivery.codEnabled === true);
+    applyDelivery(delivery);
+  } catch (e) {
+    if (myReq !== ctDeliveryReq) return;
+    console.warn('Delivery refresh failed:', e);
+    applyDelivery({ fee: null, distance: null, source: 'fallback' });
+  }
+}
+
+function scheduleDelivery() {
+  clearTimeout(ctDeliveryTimer);
+  ctDeliveryTimer = setTimeout(() => refreshDelivery(), 320);
+}
+
+/* ── CTA ─────────────────────────────────────────────────────────────────── */
+function updateCheckoutCta() {
+  const btn = document.getElementById('btn-checkout');
+  const label = document.getElementById('checkout-label');
+  if (!btn || !label) return;
+
+  const plural = ctState.units === 1 ? 'item' : 'items';
+
+  if (ctState.unavailable) {
+    btn.classList.add('locked');
+    btn.setAttribute('aria-disabled', 'true');
+    label.innerHTML = 'Delivery unavailable<span class="ct-cta-sub">Change your address to continue</span>';
+    return;
+  }
+  if (!ctState.loggedIn) {
+    btn.classList.remove('locked');
+    btn.setAttribute('aria-disabled', 'false');
+    label.innerHTML = `Log in to order<span class="ct-cta-sub">${ctState.units} ${plural}</span>`;
+    return;
+  }
+  if (ctState.multiMinOrderFailures && ctState.multiMinOrderFailures.length) {
+    btn.classList.add('locked'); btn.setAttribute('aria-disabled', 'true');
+    const first = ctState.multiMinOrderFailures[0];
+    const add = Math.max(0, Math.ceil(Number(first.info?.minOrder || 0) - Number(first.subtotal || 0)));
+    label.innerHTML = `Add ₹${add.toLocaleString('en-IN')} more<span class="ct-cta-sub">${esc(first.info?.name || first.name || 'Restaurant')} minimum ₹${Number(first.info?.minOrder || 0).toLocaleString('en-IN')}</span>`;
+    return;
+  }
+  if (ctState.minOrder > 0 && ctState.subtotal < ctState.minOrder) {
+    const remaining = Math.ceil(ctState.minOrder - ctState.subtotal);
+    btn.classList.add('locked');
+    btn.setAttribute('aria-disabled', 'true');
+    label.innerHTML = `Add ₹${remaining.toLocaleString('en-IN')} more<span class="ct-cta-sub">Minimum order ₹${ctState.minOrder.toLocaleString('en-IN')}</span>`;
+    return;
+  }
+  if (!ctState.addressOk) {
+    btn.classList.add('locked');
+    btn.setAttribute('aria-disabled', 'true');
+    label.innerHTML = 'Add address<span class="ct-cta-sub">Needed before you can order</span>';
+    return;
+  }
+  btn.classList.remove('locked');
+  btn.setAttribute('aria-disabled', 'false');
+  label.innerHTML = `Place order<span class="ct-cta-sub">${ctState.units} ${plural}</span>`;
+}
+
+/* ── Render ─────────────────────────────────────────────────────────────── */
+async function renderCart() {
+  const savedCart = readCart();
+
+  const emptyEl = document.getElementById('empty-cart');
+  const hasItemsEl = document.getElementById('cart-has-items');
+  const footerEl = document.getElementById('checkout-footer');
+  const clearBtn = document.getElementById('btn-clear-cart');
+
+  if (!savedCart || Object.keys(savedCart).length === 0) {
+    ctDeliveryReq++;                       // cancel any in-flight refresh
+    clearTimeout(ctDeliveryTimer);
+    // A note/tip belongs to a cart. No cart, no extras.
+    clearCartExtras();
+    closeSheet(true);
+    emptyEl.style.display = 'block';
+    hasItemsEl.style.display = 'none';
+    footerEl.style.display = 'none';
+    if (clearBtn) clearBtn.style.display = 'none';
+    return;
+  }
+
+  emptyEl.style.display = 'none';
+  hasItemsEl.style.display = 'block';
+  footerEl.style.display = 'flex';
+  if (clearBtn) clearBtn.style.display = '';
+
+  paintItems(savedCart);   // instant
+  paintBill(savedCart);    // instant
+  syncFooterOffset();
+  ctProfileRefreshedThisPass = false;   // new pass: the delivery calc below may refresh /profile
+  await refreshDelivery(); // network, guarded
+  paintCheckoutDeliverySummary();
+  await ctEnsureProfile();
+}
+
+/* Repaints only — used by +/- so the tap never waits on a request. */
+function repaintCart() {
+  const savedCart = readCart();
+  if (!savedCart || Object.keys(savedCart).length === 0) { renderCart(); return; }
+  paintItems(savedCart);
+  paintBill(savedCart);
+  paintCheckoutDeliverySummary();
+  syncFooterOffset();
+}
+
+/* ── Quantity / remove (schema + semantics unchanged) ───────────────────── */
+function cartAdjust(name, change) {
+  let savedCart = JSON.parse(localStorage.getItem('nearbite_cart')) || {};
+  if (savedCart[name]) {
+    savedCart[name].quantity += change;
+    if (savedCart[name].quantity <= 0) delete savedCart[name];
+    localStorage.setItem('nearbite_cart', JSON.stringify(savedCart));
+    repaintCart();       // instant feedback
+    scheduleDelivery();  // debounced; free-delivery threshold depends on subtotal
+  }
+}
+
+function clearCart() {
+  localStorage.removeItem('nearbite_cart');
+  localStorage.removeItem('nearbite_payment_method');
+  clearCartExtras();
+  selectedPaymentMethod = 'upi';
+  renderCart();
+}
+
+/* Delegated stepper handling — no name interpolation into markup. */
+document.getElementById('cart-items-list').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-step]');
+  if (!button) return;
+  const row = button.closest('.ct-row');
+  if (!row) return;
+  cartAdjust(row.dataset.name, Number(button.dataset.step));
+});
+
+/* ── Address (logic unchanged; presentation centralised) ────────────────── */
+function hasAddress() {
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem('nearbite_address')); } catch(e) {}
+  return !!(saved && saved.house && saved.area && normalizeCoords(saved.location || saved));
+}
+
+async function loadAddress() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('nearbite_address')); } catch(e) {}
+
+  const token = localStorage.getItem('nearbite_token') || localStorage.getItem('token');
+  const tagLabel = document.getElementById('address-tag-label');
+  const addrText = document.getElementById('address-display-text');
+
+  // Returning customers may have their address on the server but not in this
+  // browser's localStorage. Hydrate the local cart UI from their saved profile.
+  if (token && !hasAddress()) {
+    try {
+      const response = await fetch(`${CONFIG.API_BASE_URL}/profile`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const result = await response.json();
+      if (response.ok && result.success) {
+        const user = result.data || {};
+        ctCaptureProfile(user);
+        const selectedId = localStorage.getItem('nearbite_selected_address_id');
+        const addressList = Array.isArray(user.addresses) ? user.addresses : [];
+        const address = (selectedId && addressList.find(a => String(a._id) === String(selectedId))) ||
+          user.defaultAddress ||
+          addressList.find(a => a.isDefault) ||
+          addressList[0];
+
+        if (address && address.house && address.area && normalizeCoords(address.location || address)) {
+          saved = {
+            tag: address.tag || 'Home',
+            house: address.house || '',
+            area: address.area || '',
+            landmark: address.landmark || '',
+            city: address.city || 'Maynaguri',
+            pincode: address.pincode || '',
+            location: address.location || null,
+            latitude: address.latitude,
+            longitude: address.longitude,
+            receiverName: address.receiverName || '',
+            receiverPhone: address.receiverPhone || '',
+            _id: address._id
+          };
+          localStorage.setItem('nearbite_address', JSON.stringify(saved));
+          if (address._id) localStorage.setItem('nearbite_selected_address_id', String(address._id));
+        }
+      }
+    } catch (e) {
+      console.warn('Could not hydrate saved address:', e);
+    }
+  }
+
+  ctState.loggedIn = !!token;
+  ctState.addressOk = hasAddress();
+
+  if (ctState.addressOk && saved) {
+    const tag = saved.tag || 'Home';
+    const parts = [saved.house, saved.area, saved.landmark, saved.city].filter(Boolean);
+    tagLabel.textContent = tag;
+    addrText.textContent = parts.join(', ');
+    addrText.classList.remove('ct-prompt');
+  } else if (!token) {
+    // Guest users can browse and build a cart. Login is required only here.
+    tagLabel.textContent = 'Log in to order';
+    addrText.textContent = 'Log in with your phone to add a delivery address';
+    addrText.classList.add('ct-prompt');
+  } else {
+    tagLabel.textContent = 'Add delivery address';
+    addrText.textContent = 'Tap to add your delivery address';
+    addrText.classList.add('ct-prompt');
+  }
+
+  updateCheckoutCta();
+}
+
+/* ── Toast (now actually wired up) ──────────────────────────────────────── */
+function showToast(msg, tone) {
+  const toast = document.getElementById('addr-toast');
+  const text = document.getElementById('addr-toast-text');
+  if (!toast) return;
+  if (text && msg) text.textContent = msg;
+  toast.classList.toggle('is-error', tone === 'error');
+  const icon = toast.querySelector('i');
+  if (icon) icon.className = tone === 'error' ? 'fa-solid fa-triangle-exclamation' : 'fa-solid fa-circle-info';
+  toast.classList.add('show');
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
+}
+
+function shakeCheckout() {
+  const btn = document.getElementById('btn-checkout');
+  if (!btn) return;
+  btn.classList.remove('ct-shake');
+  void btn.offsetWidth;
+  btn.classList.add('ct-shake');
+  setTimeout(() => btn.classList.remove('ct-shake'), 450);
+}
+
+/* Footer height drives body padding and toast offset, so the footer can
+   never sit on top of cart content at any width or COD state. */
+function syncFooterOffset() {
+  const footer = document.getElementById('checkout-footer');
+  if (!footer || footer.style.display === 'none') return;
+  const height = Math.ceil(footer.getBoundingClientRect().height);
+  if (height > 0) document.documentElement.style.setProperty('--ct-footer-h', height + 'px');
+}
+
+/* ── Checkout ───────────────────────────────────────────────────────────── */
+async function placeOrder() {
+  const token = localStorage.getItem('nearbite_token') || localStorage.getItem('token');
+
+  // UI guard only. Backend validation below is untouched.
+  if (ctState.unavailable) {
+    shakeCheckout();
+    showToast('This restaurant does not deliver to your address', 'error');
+    return;
+  }
+
+  // Guest cart is allowed. Authentication starts only when they press Order.
+  if (!token) {
+    // Preserve the current guest cart while the user completes authentication.
+    const currentCart = localStorage.getItem('nearbite_cart');
+    if (currentCart) {
+      localStorage.setItem('nearbite_cart_before_auth', currentCart);
+    }
+    localStorage.setItem('nearbite_after_login', 'cart.html');
+    window.location.href = 'login.html';
+    return;
+  }
+
+  if (ctState.minOrder > 0 && ctState.subtotal < ctState.minOrder) {
+    const remaining = Math.ceil(ctState.minOrder - ctState.subtotal);
+    showToast('Add ₹' + remaining.toLocaleString('en-IN') + ' more to reach the minimum order.');
+    shakeCheckout();
+    return;
+  }
+
+  if (!hasAddress()) {
+    window.location.href = 'address.html';
+    return;
+  }
+
+  const btn = document.getElementById('btn-checkout');
+  const originalHTML = btn.innerHTML;
+
+  btn.innerHTML = '<span class="ct-cta-text" style="display:flex;align-items:center;gap:8px;"><i class="fa-solid fa-circle-notch fa-spin"></i> Placing order…</span>';
+  btn.style.pointerEvents = 'none';
+
+  try {
+    const savedCart = JSON.parse(localStorage.getItem('nearbite_cart')) || {};
+    const groups = cartGroups(savedCart);
+    const itemsArray = Object.entries(savedCart).map(([name, info]) => ({
+      menuItem: (info.menuItem && info.menuItem !== 'undefined') ? info.menuItem : null,
+      name, price: info.price, quantity: info.quantity, customizations: info.customizations || {}
+    }));
+    if (!groups.length) throw new Error('Your cart is empty.');
+    if (itemsArray.some(i => !i.menuItem)) throw new Error('Your cart contains an outdated item. Please refresh and add it again.');
+
+    // The backend is authoritative. This preview check is only for a fast, precise UI message.
+    const delivery = await calculateCurrentDelivery({ force: true });
+    if (delivery.outsideRadius) throw new Error('One or more restaurants do not deliver to your selected address.');
+    if (delivery.minOrderFailures && delivery.minOrderFailures.length) {
+      const msg = delivery.minOrderFailures.map(r => `${r.info.name || r.name}: add ₹${Math.ceil(Number(r.info.minOrder) - r.subtotal).toLocaleString('en-IN')}`).join('; ');
+      throw new Error('Minimum order not met — ' + msg + '.');
+    }
+
+    let savedAddress;
+    try { savedAddress = JSON.parse(localStorage.getItem('nearbite_address')); } catch (e) { savedAddress = null; }
+    const subtotal = itemsArray.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 0), 0);
+    const deliveryFee = Number(delivery.fee || 0);
+    const total = subtotal + deliveryFee + ctCleanTip(ctState.tipAmount);
+    const restaurantId = groups[0].id;
+    const restaurantName = groups.length === 1 ? groups[0].name : `${groups.length} restaurants`;
+    const restaurantNotes = Object.fromEntries(Object.entries(ctState.restaurantNotes || {}).filter(([id, note]) => groups.some(g => g.id === id) && note));
+
+    const payload = {
+      items: itemsArray,
+      deliveryAddress: savedAddress,
+      addressId: localStorage.getItem('nearbite_selected_address_id') || (savedAddress && savedAddress._id) || null,
+      // Legacy fields remain for older backend builds; the new backend ignores the client restaurantId for ownership.
+      restaurantId, restaurantName, subtotal, deliveryFee, total,
+      paymentMethod: selectedPaymentMethod,
+      restaurantNotes,
+      restaurantNote: groups.length === 1 ? (restaurantNotes[restaurantId] || '') : '',
+      deliveryInstructions: ctState.deliveryInstructions || '',
+      tipAmount: ctCleanTip(ctState.tipAmount)
+    };
+    // Idempotency: reuse one key for this cart so a double-tap, a dropped
+    // response, or a network retry returns the SAME order(s) instead of
+    // creating a second set. Cleared once the order succeeds.
+    let idempotencyKey = localStorage.getItem('nearbite_checkout_key');
+    if (!idempotencyKey) {
+      idempotencyKey = (self.crypto && self.crypto.randomUUID)
+        ? self.crypto.randomUUID()
+        : 'ck_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+      localStorage.setItem('nearbite_checkout_key', idempotencyKey);
+    }
+
+    const response = await fetch(`${CONFIG.API_BASE_URL}/orders`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'Idempotency-Key': idempotencyKey
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await response.json();
+
+    if (response.ok && result.success) {
+      localStorage.removeItem('nearbite_cart');
+      localStorage.removeItem('nearbite_checkout_key');
+      clearCartExtras();
+
+      if (result.multiple && result.deliveryOtps && typeof result.deliveryOtps === 'object') {
+        // Multi-restaurant checkout created one order per restaurant. Keep each
+        // one-time delivery PIN, then send the customer to their orders list
+        // where every order in this checkout is shown and independently tracked.
+        Object.keys(result.deliveryOtps).forEach(oid => {
+          const otp = result.deliveryOtps[oid];
+          if (otp) localStorage.setItem(`nearbite_delivery_otp_${oid}`, otp);
+        });
+        window.location.href = 'orders.html';
+      } else {
+        // Single-restaurant checkout — unchanged behaviour.
+        if (result.deliveryOtp) {
+          localStorage.setItem(`nearbite_delivery_otp_${result.data._id}`, result.deliveryOtp);
+        }
+        window.location.href = `track-order.html?id=${encodeURIComponent(result.data._id)}`;
+      }
+    } else {
+      throw new Error(result.message || "Failed to place order.");
+    }
+  } catch (error) {
+    console.error(error);
+    showToast(error.message, 'error');
+    shakeCheckout();
+    btn.innerHTML = originalHTML;
+    btn.style.pointerEvents = 'auto';
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   BOTTOM SHEETS
+   One controller for all three sheets: scrim + Escape + close button, focus
+   trap, focus restore, background scroll lock, aria-hidden on the page
+   behind, and a visual-viewport inset so the on-screen keyboard never sits
+   on top of the textarea. The fixed checkout footer is below the scrim in
+   the stacking order, so it can never cover sheet content.
+   ═══════════════════════════════════════════════════════════════════════ */
+const ctSheet = { openId: null, lastFocus: null };
+const CT_BG_NODES = ['.ct-header', '#cart-has-items', '#empty-cart', '#checkout-footer', '#addr-toast'];
+
+function ctReducedMotion() {
+  return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+function ctSetBackgroundHidden(hidden) {
+  CT_BG_NODES.forEach(sel => {
+    const el = document.querySelector(sel);
+    if (!el) return;
+    if (hidden) el.setAttribute('aria-hidden', 'true');
+    else el.removeAttribute('aria-hidden');
+  });
+}
+
+/* iOS does not resize the layout viewport for the keyboard, so the sheet is
+   lifted by the measured visual-viewport inset instead. */
+function ctSyncKeyboardInset() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const inset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+  document.documentElement.style.setProperty('--ct-kb', inset + 'px');
+}
+function ctAttachViewportSync() {
+  if (!window.visualViewport) return;
+  window.visualViewport.addEventListener('resize', ctSyncKeyboardInset);
+  window.visualViewport.addEventListener('scroll', ctSyncKeyboardInset);
+  ctSyncKeyboardInset();
+}
+function ctDetachViewportSync() {
+  if (window.visualViewport) {
+    window.visualViewport.removeEventListener('resize', ctSyncKeyboardInset);
+    window.visualViewport.removeEventListener('scroll', ctSyncKeyboardInset);
+  }
+  document.documentElement.style.setProperty('--ct-kb', '0px');
+}
+
+function ctFocusables(root) {
+  const sel = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  return Array.from(root.querySelectorAll(sel))
+    .filter(el => !el.hasAttribute('hidden') && el.offsetParent !== null);
+}
+
+function openSheet(id, prepare) {
+  const root = document.getElementById(id);
+  if (!root) return;
+  if (ctSheet.openId) closeSheet(true);
+  if (typeof prepare === 'function') prepare(root);
+
+  ctSheet.lastFocus = document.activeElement;
+  if (ctSheet.lastFocus && typeof ctSheet.lastFocus.blur === 'function') ctSheet.lastFocus.blur();
+  ctSheet.openId = id;
+  root.hidden = false;
+  document.body.classList.add('ct-sheet-open');
+  ctSetBackgroundHidden(true);
+  ctAttachViewportSync();
+  requestAnimationFrame(() => root.classList.add('is-open'));
+
+  const target = root.querySelector('[data-autofocus]') || root.querySelector('.ct-sheet-x');
+  if (target) setTimeout(() => { try { target.focus({ preventScroll: true }); } catch (e) { target.focus(); } }, 80);
+}
+
+function closeSheet(immediate) {
+  const id = ctSheet.openId;
+  if (!id) return;
+  const root = document.getElementById(id);
+  ctSheet.openId = null;
+
+  document.body.classList.remove('ct-sheet-open');
+  ctSetBackgroundHidden(false);
+  ctDetachViewportSync();
+
+  if (root) {
+    root.classList.remove('is-open');
+    if (immediate || ctReducedMotion()) root.hidden = true;
+    else setTimeout(() => { if (!ctSheet.openId) root.hidden = true; }, 240);
+  }
+
+  const back = ctSheet.lastFocus;
+  ctSheet.lastFocus = null;
+  if (!immediate && back && document.contains(back)) {
+    setTimeout(() => { try { back.focus({ preventScroll: true }); } catch (e) { back.focus(); } }, 0);
+  }
+}
+
+/* Escape closes; Tab is trapped inside the open sheet. */
+document.addEventListener('keydown', (event) => {
+  if (!ctSheet.openId) return;
+
+  if (event.key === 'Escape') { event.preventDefault(); closeSheet(); return; }
+  if (event.key !== 'Tab') return;
+
+  const root = document.getElementById(ctSheet.openId);
+  if (!root) return;
+  const items = ctFocusables(root);
+  if (!items.length) return;
+
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+
+  if (!root.contains(active)) { event.preventDefault(); first.focus(); return; }
+  if (event.shiftKey && active === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   RESTAURANT NOTE + DELIVERY INSTRUCTIONS
+   Two independent fields sharing one sheet. Which field is being edited is
+   held in ctNoteField, and the value is written back to ctState[field] —
+   never read out of the DOM at checkout time.
+   ═══════════════════════════════════════════════════════════════════════ */
+let ctNoteField = null;
+let ctNoteRestaurantId = null;
+
+function paintNoteCards() {
+  document.querySelectorAll('.ct-line-card[data-note-field="restaurantNote"]').forEach(card => {
+    const rid = String(card.dataset.noteRestaurantId || '');
+    const value = ctState.restaurantNotes[rid] || '';
+    const group = card.closest('.ct-restaurant-group');
+    const name = group ? (group.querySelector('.ct-card-head')?.textContent || 'restaurant').replace(/\d+\s+items?$/, '').trim() : 'restaurant';
+    const title = card.querySelector('[data-role="title"]');
+    const sub = card.querySelector('[data-role="sub"]');
+    const act = card.querySelector('[data-role="act"]');
+    const chev = card.querySelector('[data-role="chev"]');
+    card.classList.toggle('is-set', !!value);
+    if (title) title.textContent = value ? 'Note added' : 'Add a note for ' + name;
+    if (sub) sub.textContent = value || 'Spice level, allergies, packaging — anything the kitchen should know';
+    if (act) act.hidden = !value;
+    if (chev) chev.hidden = !!value;
+    card.setAttribute('aria-label', value ? 'Edit note for ' + name : 'Add a note for ' + name);
+  });
+  const deliveryCard = document.querySelector('.ct-line-card[data-note-field="deliveryInstructions"]');
+  if (deliveryCard) {
+    const value = ctState.deliveryInstructions;
+    const cfg = CT_NOTE_CFG.deliveryInstructions;
+    deliveryCard.classList.toggle('is-set', !!value);
+    deliveryCard.querySelector('[data-role="title"]').textContent = value ? cfg.setTitle : cfg.idleTitle;
+    deliveryCard.querySelector('[data-role="sub"]').textContent = value || cfg.idleSub;
+    deliveryCard.querySelector('[data-role="act"]').hidden = !value;
+    deliveryCard.querySelector('[data-role="chev"]').hidden = !!value;
+  }
+}
+
+function updateNoteCount() {
+  const input = document.getElementById('note-input'); const count = document.getElementById('note-count');
+  if (!input || !count) return; count.textContent = input.value.length + '/' + CT_NOTE_MAX; count.classList.toggle('is-max', input.value.length >= CT_NOTE_MAX);
+}
+
+function openNoteSheet(field, restaurantId) {
+  const cfg = CT_NOTE_CFG[field]; if (!cfg) return;
+  ctNoteField = field; ctNoteRestaurantId = field === 'restaurantNote' ? String(restaurantId || '') : null;
+  if (field === 'restaurantNote' && !ctNoteRestaurantId) return;
+  openSheet('ct-note-sheet', () => {
+    const restaurantName = ctNoteRestaurantId ? (cartGroups(readCart() || {}).find(g => g.id === ctNoteRestaurantId)?.name || 'restaurant') : '';
+    document.getElementById('note-sheet-title').textContent = field === 'restaurantNote' ? 'Note for ' + restaurantName : cfg.sheetTitle;
+    document.getElementById('note-field-label').textContent = cfg.fieldLabel;
+    document.getElementById('note-help').textContent = cfg.help;
+    document.getElementById('note-save').textContent = cfg.saveLabel;
+    const value = field === 'restaurantNote' ? (ctState.restaurantNotes[ctNoteRestaurantId] || '') : ctState[field];
+    const input = document.getElementById('note-input'); input.value = value || ''; input.setAttribute('maxlength', String(CT_NOTE_MAX)); updateNoteCount();
+    const removeBtn = document.getElementById('note-remove'); removeBtn.textContent = cfg.removeLabel; removeBtn.hidden = !value;
+    document.getElementById('note-suggestions').innerHTML = cfg.suggestions.map(text => '<button type="button" class="ct-sug" data-suggest="' + esc(text) + '">' + esc(text) + '</button>').join('');
+  });
+}
+
+function saveNoteSheet() {
+  const field = ctNoteField; const cfg = CT_NOTE_CFG[field]; if (!cfg) { closeSheet(); return; }
+  const value = ctCleanNote(document.getElementById('note-input')?.value || '');
+  const old = field === 'restaurantNote' ? (ctState.restaurantNotes[ctNoteRestaurantId] || '') : ctState[field];
+  if (field === 'restaurantNote') { if (value) ctState.restaurantNotes[ctNoteRestaurantId] = value; else delete ctState.restaurantNotes[ctNoteRestaurantId]; ctState.restaurantNote = Object.keys(ctState.restaurantNotes).length === 1 ? Object.values(ctState.restaurantNotes)[0] : ''; }
+  else ctState[field] = value;
+  saveCartExtras(); paintNoteCards(); closeSheet();
+  if (value) showToast(field === 'restaurantNote' ? 'Note saved for the restaurant' : cfg.savedToast); else if (old) showToast(cfg.removedToast);
+}
+
+function removeNoteSheet() {
+  const field = ctNoteField; const cfg = CT_NOTE_CFG[field]; if (!cfg) { closeSheet(); return; }
+  if (field === 'restaurantNote') { delete ctState.restaurantNotes[ctNoteRestaurantId]; ctState.restaurantNote = Object.keys(ctState.restaurantNotes).length === 1 ? Object.values(ctState.restaurantNotes)[0] : ''; }
+  else ctState[field] = '';
+  saveCartExtras(); paintNoteCards(); closeSheet(); showToast(field === 'restaurantNote' ? 'Restaurant note removed' : cfg.removedToast);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   TIP
+   The amount is state, not markup. Nothing here claims the tip is paid —
+   that only becomes true when the existing order flow succeeds.
+   ═══════════════════════════════════════════════════════════════════════ */
+function setTip(amount) {
+  ctState.tipAmount = ctCleanTip(amount);
+  saveCartExtras();
+  paintTipChips();
+  applyTotals();
+}
+
+function paintTipChips() {
+  const row = document.getElementById('tip-options');
+  if (!row) return;
+
+  const tip = ctCleanTip(ctState.tipAmount);
+  const isPreset = CT_TIP_PRESETS.indexOf(tip) !== -1;
+  const isCustom = tip > 0 && !isPreset;
+
+  const customChip = document.getElementById('tip-custom-chip');
+  if (customChip) {
+    customChip.textContent = isCustom ? ('₹' + tip) : 'Custom';
+    customChip.setAttribute('aria-label', isCustom
+      ? 'Custom tip of ₹' + tip + '. Tap to change.'
+      : 'Enter a custom tip amount');
+  }
+
+  row.querySelectorAll('.ct-chip').forEach(chip => {
+    const raw = chip.dataset.tip;
+    const active = raw === 'custom' ? isCustom : (Number(raw) === tip);
+    chip.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+function setTipError(message) {
+  const el = document.getElementById('tip-error');
+  if (!el) return;
+  el.textContent = message || '';
+  el.hidden = !message;
+}
+
+function openTipSheet() {
+  openSheet('ct-tip-sheet', () => {
+    const tip = ctCleanTip(ctState.tipAmount);
+    const isCustom = tip > 0 && CT_TIP_PRESETS.indexOf(tip) === -1;
+    const input = document.getElementById('tip-input');
+    input.value = isCustom ? String(tip) : '';
+    setTipError('');
+    document.getElementById('tip-remove').hidden = tip <= 0;
+  });
+}
+
+function saveTipSheet() {
+  const input = document.getElementById('tip-input');
+  const raw = (input ? input.value : '').trim();
+  const refocus = () => { if (input) input.focus(); };
+
+  if (!raw) { setTipError('Enter a tip amount, or choose Remove tip.'); refocus(); return; }
+  const value = Number(raw);
+  if (!Number.isFinite(value))  { setTipError('Enter a valid amount in rupees.'); refocus(); return; }
+  if (!Number.isInteger(value)) { setTipError('Enter a whole rupee amount, with no paise.'); refocus(); return; }
+  if (value < CT_TIP_MIN) { setTipError('The smallest tip is ₹' + CT_TIP_MIN + '. Choose Remove tip if you would rather not tip.'); refocus(); return; }
+  if (value > CT_TIP_MAX) { setTipError('The largest tip you can add here is ₹' + CT_TIP_MAX + '.'); refocus(); return; }
+
+  setTip(value);
+  closeSheet();
+  showToast('₹' + value + ' tip added for your delivery partner');
+}
+
+function removeTipSheet() {
+  setTip(0);
+  closeSheet();
+  showToast('Tip removed');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   BILL DETAILS SHEET
+   The bill rows themselves are painted by the existing paintBill() /
+   applyTotals() / applyDelivery() — this only fills the delivery-details
+   block, from data the cart already has. Nothing here is fabricated: a
+   missing value renders as "Not available".
+   ═══════════════════════════════════════════════════════════════════════ */
+const CT_UNAVAILABLE = 'Not available';
+
+function ctSetDetail(id, value, emptyText) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const text = (value == null ? '' : String(value)).trim();
+  el.textContent = text || (emptyText || CT_UNAVAILABLE);
+  el.classList.toggle('is-empty', !text);
+}
+
+/* The receiver on the selected address is who the rider actually calls, so
+   it wins over the account holder; the profile is the fallback. */
+function ctSelectedAddress() {
+  try { return JSON.parse(localStorage.getItem('nearbite_address')); } catch (e) { return null; }
+}
+
+function ctCustomerContact() {
+  const address = ctSelectedAddress();
+  return {
+    name: (address && (address.receiverName || address.name || address.contactName)) || ctProfile.name || '',
+    phone: (address && (address.receiverPhone || address.phone || address.mobile || address.contactPhone)) || ctProfile.phone || ''
+  };
+}
+
+function ctAddressTag() {
+  const address = ctSelectedAddress();
+  return address ? (address.tag || address.label || 'Home') : '';
+}
+
+function ctAddressLine() {
+  const address = ctSelectedAddress();
+  if (!hasAddress() || !address) return '';
+  return [address.house, address.area, address.landmark, address.city, address.pincode]
+    .filter(Boolean).join(', ');
+}
+
+function paintCheckoutDeliverySummary() {
+  const etaEl = document.getElementById('checkout-eta');
+  if (etaEl) etaEl.textContent = '35–40 mins';
+
+  const address = ctSelectedAddress();
+  const tag = address ? (address.tag || address.label || 'Home') : '';
+  const addressText = ctAddressLine();
+
+  const tagLabel = document.getElementById('address-tag-label');
+  const addressDisplay = document.getElementById('address-display-text');
+  if (tagLabel && tag) tagLabel.textContent = tag;
+  if (addressDisplay && addressText) {
+    addressDisplay.textContent = addressText.replace(/,\s*[^,]+$/, '');
+  }
+
+  const contact = ctCustomerContact();
+  const nameEl = document.getElementById('checkout-customer-name');
+  const phoneEl = document.getElementById('checkout-customer-phone');
+
+  if (nameEl) nameEl.textContent = contact.name || 'Customer name not available';
+  if (phoneEl) phoneEl.textContent = contact.phone || 'Phone number not available';
+}
+
+/* Profile is only needed for the visible customer contact card when the
+   selected address does not already contain receiver details. */
+async function ctEnsureProfile() {
+  const token = localStorage.getItem('nearbite_token') || localStorage.getItem('token');
+  // A cached login profile is enough to paint immediately, but when a token is
+  // present always refresh from the authenticated backend so edited profile
+  // data is reflected on Cart.
+  if (!token) {
+    paintCheckoutDeliverySummary();
+    return;
+  }
+  if (!token) {
+    paintCheckoutDeliverySummary();
+    return;
+  }
+  // The delivery calculation earlier in this same renderCart() pass may already
+  // have refreshed /profile (address hydration). If so, the display data is
+  // current — skip the duplicate GET /profile and just repaint.
+  if (ctProfileRefreshedThisPass) {
+    ctProfileRefreshedThisPass = false;
+    paintCheckoutDeliverySummary();
+    return;
+  }
+  try {
+    const response = await fetch(`${CONFIG.API_BASE_URL}/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store'
+    });
+    const result = await response.json();
+    if (response.ok && result.success) ctCaptureProfile(result.data);
+  } catch (e) {
+    console.warn('Could not load customer details:', e);
+  }
+  paintCheckoutDeliverySummary();
+}
+
+function openBillSheet() {
+  /* IMPORTANT: Bill details opens ONLY the bill breakdown. */
+  openSheet('ct-bill-sheet');
+  applyTotals();
+
+  // If pricing is still resolving, refresh it immediately. The backend
+  // restaurant settings remain the source of truth for minimum order,
+  // free-delivery threshold and delivery fee.
+  if (!ctState.deliveryReady) refreshDelivery({ force: true });
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WIRING — one delegated listener for every new control.
+   ═══════════════════════════════════════════════════════════════════════ */
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!target || typeof target.closest !== 'function') return;
+
+  if (target.closest('[data-sheet-close]')) { closeSheet(); return; }
+
+  const suggestion = target.closest('.ct-sug[data-suggest]');
+  if (suggestion) {
+    const input = document.getElementById('note-input');
+    if (input) {
+      input.value = ctCleanNote(suggestion.dataset.suggest);
+      updateNoteCount();
+      input.focus();
+    }
+    return;
+  }
+
+  const noteCard = target.closest('.ct-line-card[data-note-field]');
+  if (noteCard) { openNoteSheet(noteCard.dataset.noteField, noteCard.dataset.noteRestaurantId); return; }
+
+  if (target.closest('#bill-card')) { openBillSheet(); return; }
+
+  if (target.closest('#coupon-card')) { openSheet('ct-coupon-sheet'); return; }
+
+  const chip = target.closest('#tip-options .ct-chip');
+  if (chip) {
+    if (chip.dataset.tip === 'custom') { openTipSheet(); return; }
+    const value = ctCleanTip(chip.dataset.tip);
+    if (value === ctCleanTip(ctState.tipAmount)) return;    // already selected
+    setTip(value);
+    showToast(value > 0 ? '₹' + value + ' tip added for your delivery partner' : 'Tip removed');
+    return;
+  }
+});
+
+document.getElementById('note-input').addEventListener('input', updateNoteCount);
+document.getElementById('note-save').addEventListener('click', saveNoteSheet);
+document.getElementById('note-remove').addEventListener('click', removeNoteSheet);
+document.getElementById('tip-save').addEventListener('click', saveTipSheet);
+document.getElementById('tip-remove').addEventListener('click', removeTipSheet);
+document.getElementById('tip-input').addEventListener('input', () => setTipError(''));
+document.getElementById('tip-input').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') { event.preventDefault(); saveTipSheet(); }
+});
+
+/* ── Lifecycle (listeners preserved) ────────────────────────────────────── */
+window.addEventListener('pageshow',(e)=>{
+  // On a fresh load or a full navigation the DOMContentLoaded handler below
+  // already runs the complete init (a strict superset of the work here), so
+  // re-running it on the initial pageshow just duplicates the address fetch,
+  // the delivery calc and the cart render. Only a back/forward bfcache restore
+  // skips DOMContentLoaded — that is the one case that must re-hydrate here.
+  if(!e.persisted) return;
+  // Rehydrate what a bfcache freeze could have missed: extras (storage events
+  // don't fire while frozen) and the selected address, then render exactly once.
+  // renderCart() runs the delivery pipeline and paints the summary itself, so no
+  // separate paintCheckoutDeliverySummary() is needed here.
+  loadCartExtras();
+  loadAddress().then(renderCart);
+});
+window.addEventListener('storage',(e)=>{
+  if(['nearbite_address','nearbite_selected_address_id'].includes(e.key)){
+    ctAddrHydratedFor = null;
+    // Load the changed address, then render once — renderCart() recalculates
+    // delivery and repaints the summary through its own pipeline.
+    loadAddress().then(renderCart);
+  }
+  if(e.key === CT_EXTRAS_KEY){
+    loadCartExtras();
+    paintNoteCards(); paintTipChips(); applyTotals();
+  }
+});
+// address.html dispatches this when the selected address changes; refresh
+// address text + recalculate distance/fee/total using the existing pipeline.
+window.addEventListener('nearbite:address-changed',()=>{
+  ctAddrHydratedFor = null;
+  // renderCart() recalculates distance/fee/total and repaints the summary via
+  // its own pipeline, so load the new address first and then render exactly once.
+  loadAddress().then(renderCart);
+});
+window.addEventListener('resize', syncFooterOffset);
+
+document.addEventListener('DOMContentLoaded', async () => {
+  // Cart extras were already primed once at script-parse time (the loadCartExtras()
+  // call beside their definition), and nothing mutates that localStorage before
+  // this point — so re-reading here would just duplicate the same work.
+  syncFooterOffset();
+  if (window.ResizeObserver) {
+    const footer = document.getElementById('checkout-footer');
+    if (footer) new ResizeObserver(syncFooterOffset).observe(footer);
+  }
+  await loadAddress();
+  // renderCart() paints the checkout summary as part of its pipeline, so a
+  // separate paintCheckoutDeliverySummary() here would just repaint the same state.
+  await renderCart();
+});
+</script>
+
+<script src="navigation.js"></script>
+</body>
+</html>
