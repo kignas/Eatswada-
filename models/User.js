@@ -35,6 +35,12 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    // Bumped to revoke all existing JWTs for this account (password reset /
+    // logout). Tokens carry the value they were minted with; a mismatch in
+    // authMiddleware means "log in again". Missing claim is treated as 0 so
+    // tokens issued before this field existed keep working until they expire.
+    tokenVersion: { type: Number, default: 0 },
+
     role: {
       type: String,
       // 🚨 'vendor' and 'rider' included in allowed roles
@@ -46,12 +52,6 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Restaurant',
       default: null,
-    },
-    // Incremented whenever existing JWT sessions must be revoked.
-    tokenVersion: {
-      type: Number,
-      default: 0,
-      min: 0,
     },
     isActive: {
       // Reused as the rider Active / Inactive flag (same pattern as vendor).
@@ -122,6 +122,13 @@ const userSchema = new mongoose.Schema(
       isOnline: {
         type: Boolean,
         default: false,
+      },
+      // Latest live GPS position, sent by the rider app while delivering.
+      // [lng, lat] to match the rest of the codebase. Shown to the customer
+      // only while their order is picked_up / out_for_delivery.
+      currentLocation: {
+        coordinates: { type: [Number], default: undefined },
+        updatedAt:   { type: Date },
       },
     },
   },
