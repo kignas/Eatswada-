@@ -4,7 +4,7 @@ const rateLimit = require('express-rate-limit'); // Ensure you ran: npm install 
 const router   = express.Router();
 
 const {
-  sendOTPHandler, verifyOTPHandler, register, login,
+  sendOTPHandler, verifyOTPHandler, register, login, logout,
   requestPasswordReset, verifyPasswordResetOTP, resetPassword,
   getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
@@ -90,6 +90,8 @@ router.post('/login',
   ],
   validate, login
 );
+
+router.post('/logout', protect, logout);
 
 // ── Profile ───────────────────────────────────────────────────
 router.get('/profile',  protect, getProfile);
