@@ -47,6 +47,12 @@ const userSchema = new mongoose.Schema(
       ref: 'Restaurant',
       default: null,
     },
+    // Incremented whenever existing JWT sessions must be revoked.
+    tokenVersion: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     isActive: {
       // Reused as the rider Active / Inactive flag (same pattern as vendor).
       type: Boolean,
