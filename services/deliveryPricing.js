@@ -28,7 +28,7 @@ const DELIVERY_RULES = Object.freeze({
   ABOVE_15_KM: 50,
 });
 
-const MAX_DELIVERY_RADIUS_KM = 15;
+const MAX_DELIVERY_RADIUS_KM = 10;
 
 function validCoordinates(coords) {
   return Array.isArray(coords) &&
