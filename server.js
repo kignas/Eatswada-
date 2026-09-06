@@ -8,6 +8,7 @@ const mongoSanitize  = require('express-mongo-sanitize');
 const xssClean       = require('xss-clean');
 const hpp            = require('hpp');
 const compression    = require('compression');
+const mongoose       = require('mongoose');
 const morgan         = require('morgan');
 
 const connectDB      = require('./config/db');
@@ -102,6 +103,9 @@ app.use(xssClean());
 app.use(hpp({ whitelist: ['sort', 'category', 'cuisine'] }));
 
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
+if (process.env.NODE_ENV === 'production') {
+  app.use(morgan(':method :url :status :res[content-length] - :response-time ms'));
+}
 
 // ── OTP diagnostic logging ────────────────────────────────────
 // Keep this lightweight and production-safe: log request flow and a masked phone,
@@ -124,7 +128,14 @@ if (process.env.NODE_ENV === 'development') {
 
 // ── Health & Welcome Routes ───────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ success: true, service: 'Nearbite API', version: '1.0.0', uptime: process.uptime().toFixed(2) + 's' });
+  const dbConnected = mongoose.connection.readyState === 1;
+  res.status(dbConnected ? 200 : 503).json({
+    success: dbConnected,
+    service: 'Eatswada API',
+    version: '1.0.0',
+    db: dbConnected ? 'connected' : 'disconnected',
+    uptime: process.uptime().toFixed(2) + 's',
+  });
 });
 
 app.get('/', (req, res) => {
