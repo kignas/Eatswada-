@@ -7,7 +7,7 @@ const {
   getRestaurants, toggleRestaurant, getRecentOrders, getPeakHours,
   getCustomers, getRevenueAnalytics, getTopRestaurants,
   getVendors, getVendorById, updateVendor, toggleVendorStatus,
-  getReviews, moderateReview,
+  getReviews, moderateReview, getPlatformRatings,
 } = require('../controllers/adminController');
 
 // server.js applies authLimiter to /api/users and /api/auth but not to
@@ -36,6 +36,7 @@ router.get('/analytics/revenue', protect, authorize('admin'), getRevenueAnalytic
 router.get('/analytics/top-restaurants', protect, authorize('admin'), getTopRestaurants);
 router.get('/reviews', protect, authorize('admin'), getReviews);
 router.patch('/reviews/:id', protect, authorize('admin'), moderateReview);
+router.get('/platform-ratings', protect, authorize('admin'), getPlatformRatings);
 
 // Vendor account management (vendor *creation* is POST /api/auth/admin/create-vendor)
 router.get('/vendors', protect, authorize('admin'), getVendors);
