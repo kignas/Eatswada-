@@ -26,6 +26,7 @@ const categoryRoutes   = require('./routes/categoryRoutes');
 const menuRoutes       = require('./routes/menuRoutes');
 const riderRoutes      = require('./routes/riderRoutes');
 const adminRiderRoutes = require('./routes/adminRiderRoutes');
+const platformRatingRoutes = require('./routes/platformRatingRoutes');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 // (connection is awaited below, right before the server starts listening)
@@ -120,6 +121,7 @@ app.use('/api/categories',  categoryRoutes);
 app.use('/api/menu',        menuRoutes);
 app.use('/api/riders',      riderRoutes);
 app.use('/api/admin/riders', adminRiderRoutes);
+app.use('/api/ratings',      platformRatingRoutes);
 
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
@@ -129,7 +131,14 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 5000;
 let server;
 
+const { startAssignmentRecovery } = require('./services/riderAssignmentService');
+
 connectDB().then(() => {
+  // Durable safety net for rider auto-assignment: an in-process setTimeout is
+  // lost on restart/sleep, so on boot (and periodically) sweep for orders left
+  // in 'assigned' past the accept window and reassign them.
+  startAssignmentRecovery();
+
   server = app.listen(PORT, '0.0.0.0', () => {
     console.log('╔══════════════════════════════════════════════╗');
     console.log(`║  🍔  Nearbite API running on port ${PORT}       ║`);
