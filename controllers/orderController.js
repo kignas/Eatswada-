@@ -499,7 +499,15 @@ function enrichRiderLive(data, orderDoc) {
       updatedAt: rider.riderDetails.currentLocation.updatedAt || null,
     };
     data.riderDistanceKm = Number(distanceKm.toFixed(2));
-    data.riderEtaMinutes = Math.max(1, Math.round((distanceKm / AVG_DELIVERY_SPEED_KMH) * 60));
+
+    // Keep the API numeric for existing clients, but never fabricate a large
+    // fallback ETA from estimatedDelivery when a live GPS fix is available.
+    // A very short remaining distance is represented as 1 minute at API level;
+    // the customer UIs can render that as "Arriving soon".
+    data.riderEtaMinutes = Math.max(
+      1,
+      Math.ceil((distanceKm / AVG_DELIVERY_SPEED_KMH) * 60)
+    );
   }
   return data;
 }
