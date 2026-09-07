@@ -71,18 +71,61 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
   if (view === 'queue')   statusFilter = { status: { $in: QUEUE_STATUSES } };
   if (view === 'history') statusFilter = { status: { $in: HISTORY_STATUSES } };
 
-  const orders = await Order.find({
+  // Same filter as before — extracted so the count and the page share it.
+  const query = {
     ...orderOwnershipFilter(req),
     ...statusFilter,
     $or: [
       { paymentMethod: 'cod' },
       { paymentMethod: { $ne: 'cod' }, paymentStatus: 'paid' },
     ],
-  })
-    .populate(VENDOR_ORDER_POPULATE)
-    .sort({ createdAt: -1 });
+  };
 
-  res.status(200).json({ success: true, data: orders.map(serializeVendorOrder) });
+  // ── Pagination (Phase 2 — Performance at Scale) ──────────────────────
+  // ONLY the history view paginates. The live queue (and the unfiltered
+  // default) return every matching order uncapped, so the kitchen never loses
+  // sight of an active order behind a page boundary. The queue path is the
+  // original query verbatim — just with consistent meta appended.
+  if (view !== 'history') {
+    const orders = await Order.find(query)
+      .populate(VENDOR_ORDER_POPULATE)
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      data: orders.map(serializeVendorOrder),
+      // An uncapped view is simply "page 1 of 1" holding everything, so clients
+      // can read the same meta fields regardless of which view they requested.
+      currentPage: 1,
+      totalPages: 1,
+      totalOrders: orders.length,
+    });
+  }
+
+  // History view: page 1 / limit 20 by default; limit clamped to a sane ceiling
+  // so a client can't request an unbounded page (mirrors getVendorReviews below).
+  const page  = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+  const skip  = (page - 1) * limit;
+
+  const [orders, totalOrders] = await Promise.all([
+    Order.find(query)
+      .populate(VENDOR_ORDER_POPULATE)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    Order.countDocuments(query),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    data: orders.map(serializeVendorOrder),
+    // New pagination metadata — appended alongside the existing shape, never
+    // replacing `success`/`data`, so current clients keep working unchanged.
+    currentPage: page,
+    totalPages: Math.ceil(totalOrders / limit),
+    totalOrders,
+  });
 });
 
 exports.acceptOrder = asyncHandler(async (req, res) => {
