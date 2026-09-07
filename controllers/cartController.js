@@ -124,9 +124,9 @@ async function buildCartResponse(cart) {
     const minimumOrderMet = subtotal >= minimumOrder;
     const minimumOrderRemaining = minimumOrderMet ? 0 : round2(minimumOrder - subtotal);
 
-    const freeDeliveryEnabled = rest.freeDeliveryEnabled !== false;
+    const freeDeliveryEnabled = Number(rest.freeDeliveryAbove || 0) > 0;
     const freeDeliveryAbove = Number(rest.freeDeliveryAbove || 0);
-    const freeDeliveryMet = freeDeliveryEnabled && freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove;
+    const freeDeliveryMet = freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove;
     const deliveryFee = freeDeliveryMet ? 0 : PREVIEW_DELIVERY_FEE;
 
     const total = round2(subtotal + deliveryFee);

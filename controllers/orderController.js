@@ -294,9 +294,8 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
 
   // Per-restaurant delivery fee + per-restaurant free-delivery threshold.
   const baseDeliveryFee = calculateDeliveryFee(distanceKm);
-  const freeDeliveryEnabled = restaurant.freeDeliveryEnabled !== false;
   const freeDeliveryAbove = Number(restaurant.freeDeliveryAbove || 0);
-  const deliveryFee = freeDeliveryEnabled && freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove
+  const deliveryFee = freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove
     ? 0
     : baseDeliveryFee;
 
