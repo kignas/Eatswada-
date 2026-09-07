@@ -1,47 +1,81 @@
 /**
- * paymentService.js
- * Integrates Razorpay for UPI / card payments.
- * Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env to activate.
+ * Production Razorpay integration helpers.
+ * Secrets stay server-side. Never expose RAZORPAY_KEY_SECRET to the browser.
  */
-
-let Razorpay;
-try { Razorpay = require('razorpay'); } catch (_) { /* optional dep */ }
-
 const crypto = require('crypto');
 
-const getRazorpay = () => {
-  if (!Razorpay) throw new Error('razorpay package not installed. Run: npm install razorpay');
+let Razorpay;
+try { Razorpay = require('razorpay'); } catch (_) { Razorpay = null; }
+
+function assertConfigured() {
+  if (!Razorpay) {
+    const err = new Error('Razorpay SDK is not installed. Run npm install.');
+    err.statusCode = 503;
+    throw err;
+  }
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    const err = new Error('Razorpay is not configured on the server.');
+    err.statusCode = 503;
+    throw err;
+  }
+}
+
+function getRazorpay() {
+  assertConfigured();
   return new Razorpay({
-    key_id:     process.env.RAZORPAY_KEY_ID,
+    key_id: process.env.RAZORPAY_KEY_ID,
     key_secret: process.env.RAZORPAY_KEY_SECRET,
   });
-};
+}
 
-/**
- * Create a Razorpay order
- * @param {number} amount  - amount in paise (₹1 = 100 paise)
- * @param {string} receipt - usually the MongoDB order _id
- */
-const createRazorpayOrder = async (amount, receipt) => {
+function toPaise(amountRupees) {
+  const n = Number(amountRupees);
+  if (!Number.isFinite(n) || n <= 0) {
+    const err = new Error('Payment amount must be greater than zero.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return Math.round(n * 100);
+}
+
+async function createRazorpayOrder(amountRupees, receipt, notes = {}) {
   const instance = getRazorpay();
-  const order = await instance.orders.create({
-    amount:   Math.round(amount * 100),
+  const amount = toPaise(amountRupees);
+  return instance.orders.create({
+    amount,
     currency: 'INR',
-    receipt:  receipt.toString(),
+    receipt: String(receipt).slice(0, 40),
+    notes,
   });
-  return order;
-};
+}
 
-/**
- * Verify Razorpay payment signature (call after payment on frontend)
- */
-const verifyRazorpaySignature = (razorpayOrderId, razorpayPaymentId, razorpaySignature) => {
-  const body      = razorpayOrderId + '|' + razorpayPaymentId;
-  const expected  = crypto
-    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-    .update(body)
-    .digest('hex');
-  return expected === razorpaySignature;
-};
+async function fetchPayment(paymentId) {
+  const instance = getRazorpay();
+  return instance.payments.fetch(String(paymentId));
+}
 
-module.exports = { createRazorpayOrder, verifyRazorpaySignature };
+function verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature) {
+  if (!process.env.RAZORPAY_KEY_SECRET) return false;
+  const body = `${razorpayOrderId}|${razorpayPaymentId}`;
+  const expected = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body).digest('hex');
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(String(razorpaySignature || ''), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function verifyWebhookSignature(rawBody, signature) {
+  if (!process.env.RAZORPAY_WEBHOOK_SECRET) return false;
+  const expected = crypto.createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET).update(rawBody).digest('hex');
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(String(signature || ''), 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+module.exports = {
+  assertConfigured,
+  createRazorpayOrder,
+  fetchPayment,
+  verifyRazorpaySignature,
+  verifyWebhookSignature,
+  toPaise,
+};
