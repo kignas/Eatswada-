@@ -7,6 +7,7 @@ const Restaurant = require('../models/Restaurant');
 const Menu       = require('../models/Menu');
 const User       = require('../models/User');
 const Review     = require('../models/Review');
+const IdempotencyKey = require('../models/IdempotencyKey');
 const asyncHandler = require('express-async-handler');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 const {
@@ -433,49 +434,88 @@ const createOrder = asyncHandler(async (req, res) => {
   const sharedDeliveryInstructions = typeof deliveryInstructions === 'string'
     ? deliveryInstructions.trim().slice(0, 250) : '';
 
-  // ── Create one order per restaurant ─────────────────────────────────
-  const created = [];
-  for (let i = 0; i < priced.length; i += 1) {
-    const p = priced[i];
-    const note = resolveRestaurantNote({
-      restaurantId: String(p.restaurant._id),
-      perRestaurantNotes,
-      flatNote: restaurantNote,
-      isSingleRestaurant: isSingle,
-      globalNote: globalNote === true,
-    });
-    const tip = tipShares[i] || 0;
-
-    const order = await Order.create({
-      user: req.user._id,
-      restaurant: p.restaurant._id,
-      restaurantName: p.restaurant.name,
-      restaurantImage: p.restaurant.image || '',
-      customerName: customer?.name || '',
-      customerPhone: customer?.phone || '',
-      items: p.serverItems,
-      deliveryAddress: { ...addressSnapshot, coordinates: customerCoords },
-      deliveryDistanceKm: p.distanceKm,
-      subtotal: p.subtotal,
-      deliveryFee: p.deliveryFee,
-      restaurantNote: note,
-      deliveryInstructions: sharedDeliveryInstructions,
-      tipAmount: tip,
-      total: p.subtotal + p.deliveryFee + tip,
-      paymentMethod,
-      paymentStatus: 'pending',
-      ...(idempotencyKey ? { idempotencyKey } : {}),
-    });
-
-    order._capturedOtp = order._plainDeliveryOtp;
-    order.clearOtpSecrets();
-    await order.populate(ORDER_POPULATE_PATHS);
-    created.push(order);
+  // ── Atomic idempotency lock ─────────────────────────────────────────
+  // Address resolution, pricing and the closed / out-of-stock checks above can
+  // all legitimately reject a checkout, so we only CLAIM the key here — right
+  // before creating orders — and a rejected checkout never traps the key.
+  //
+  // The unique _id on the IdempotencyKey collection is the atomic guarantee: if
+  // a second, truly-simultaneous POST with the same key reaches this line, its
+  // insert throws a duplicate-key error (E11000) and it does NOT create a second
+  // order set. The order-replay read near the top of createOrder still handles
+  // ordinary sequential retries; this only closes the concurrent double-tap
+  // window the old check-then-write left open.
+  const idempotencyLockId = idempotencyKey ? `${req.user._id}:${idempotencyKey}` : null;
+  if (idempotencyLockId) {
+    try {
+      await IdempotencyKey.create({ _id: idempotencyLockId, user: req.user._id, key: idempotencyKey });
+    } catch (err) {
+      if (err && err.code === 11000) {
+        // Another request already claimed this key. If it has finished creating
+        // the orders, replay them; otherwise tell the client to wait rather than
+        // duplicating the checkout.
+        const inFlight = await Order.find({ user: req.user._id, idempotencyKey })
+          .select('+deliveryOtp')
+          .populate(ORDER_POPULATE_PATHS)
+          .sort({ createdAt: 1 });
+        if (inFlight.length) {
+          return res.status(200).json(buildCheckoutResponse(inFlight, true));
+        }
+        const e = new Error('This order is already being placed. Please wait a moment, then check My Orders.');
+        e.statusCode = 409;
+        throw e;
+      }
+      throw err;
+    }
   }
 
-  if (paymentMethod === 'upi') {
-    const checkoutTotal = created.reduce((sum, order) => sum + Number(order.total || 0), 0);
-    try {
+  // ── Create one order per restaurant ─────────────────────────────────
+  // Everything from here through the payment step is wrapped so that ANY failure
+  // (a mid-loop create error, or Razorpay init failing) rolls back the pending
+  // orders AND releases the idempotency lock — otherwise a held lock would wedge
+  // the customer behind the 409 above and they could never retry.
+  const created = [];
+  try {
+    for (let i = 0; i < priced.length; i += 1) {
+      const p = priced[i];
+      const note = resolveRestaurantNote({
+        restaurantId: String(p.restaurant._id),
+        perRestaurantNotes,
+        flatNote: restaurantNote,
+        isSingleRestaurant: isSingle,
+        globalNote: globalNote === true,
+      });
+      const tip = tipShares[i] || 0;
+
+      const order = await Order.create({
+        user: req.user._id,
+        restaurant: p.restaurant._id,
+        restaurantName: p.restaurant.name,
+        restaurantImage: p.restaurant.image || '',
+        customerName: customer?.name || '',
+        customerPhone: customer?.phone || '',
+        items: p.serverItems,
+        deliveryAddress: { ...addressSnapshot, coordinates: customerCoords },
+        deliveryDistanceKm: p.distanceKm,
+        subtotal: p.subtotal,
+        deliveryFee: p.deliveryFee,
+        restaurantNote: note,
+        deliveryInstructions: sharedDeliveryInstructions,
+        tipAmount: tip,
+        total: p.subtotal + p.deliveryFee + tip,
+        paymentMethod,
+        paymentStatus: 'pending',
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      });
+
+      order._capturedOtp = order._plainDeliveryOtp;
+      order.clearOtpSecrets();
+      await order.populate(ORDER_POPULATE_PATHS);
+      created.push(order);
+    }
+
+    if (paymentMethod === 'upi') {
+      const checkoutTotal = created.reduce((sum, order) => sum + Number(order.total || 0), 0);
       const razorpayOrder = await createRazorpayOrder(
         checkoutTotal,
         created[0].orderNumber || created[0]._id,
@@ -489,15 +529,23 @@ const createOrder = asyncHandler(async (req, res) => {
         { $set: { razorpayOrderId: razorpayOrder.id } }
       );
       created.forEach(order => { order.razorpayOrderId = razorpayOrder.id; });
-    } catch (err) {
-      await Order.deleteMany({ _id: { $in: created.map(o => o._id) }, user: req.user._id, paymentStatus: 'pending' }).catch(() => {});
-      throw err;
+    } else {
+      // Defensive guard: paymentMethod is already restricted to UPI above.
+      const e = new Error('Cash on Delivery is disabled. Only UPI online payment is available.');
+      e.statusCode = 400;
+      throw e;
     }
-  } else {
-    // Defensive guard: paymentMethod is already restricted to UPI above.
-    const e = new Error('Cash on Delivery is disabled. Only UPI online payment is available.');
-    e.statusCode = 400;
-    throw e;
+  } catch (err) {
+    // Roll back everything this checkout created and release the lock so the
+    // customer can safely retry. Mirrors (and unifies) the original
+    // Razorpay-failure cleanup.
+    if (created.length) {
+      await Order.deleteMany({ _id: { $in: created.map(o => o._id) }, user: req.user._id, paymentStatus: 'pending' }).catch(() => {});
+    }
+    if (idempotencyLockId) {
+      await IdempotencyKey.deleteOne({ _id: idempotencyLockId }).catch(() => {});
+    }
+    throw err;
   }
 
   return res.status(201).json(buildCheckoutResponse(created, false));
