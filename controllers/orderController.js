@@ -421,10 +421,25 @@ const createOrder = asyncHandler(async (req, res) => {
     }));
   }
 
-  // COD availability is per restaurant.
+  // Payment policy: COD is a single-restaurant checkout method only.
+  // A multi-restaurant checkout creates separate child orders but shares one
+  // payment choice/Razorpay checkout, so COD must be disabled for the entire
+  // checkout whenever 2+ restaurants are present. For a single restaurant,
+  // COD is allowed only when that restaurant explicitly enables it.
   if (paymentMethod === 'cod') {
-    const noCod = priced.find(p => p.restaurant.codEnabled !== true);
-    if (noCod) { const e = new Error(`Cash on Delivery is not available for ${noCod.restaurant.name}.`); e.statusCode = 403; throw e; }
+    if (priced.length > 1) {
+      const e = new Error('Cash on Delivery is available only for single-restaurant orders. Please choose online payment.');
+      e.statusCode = 403;
+      throw e;
+    }
+
+    const restaurant = priced[0]?.restaurant;
+    if (!restaurant || restaurant.codEnabled !== true) {
+      const name = restaurant?.name || 'this restaurant';
+      const e = new Error(`Cash on Delivery is not available for ${name}.`);
+      e.statusCode = 403;
+      throw e;
+    }
   }
 
   // Split the tip across restaurants by delivery fee (never duplicated).

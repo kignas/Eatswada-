@@ -326,7 +326,9 @@ const setPaymentMethod = asyncHandler(async (req, res) => {
 
   await backfillItemRestaurants(cart);
 
-  // COD must be available for EVERY restaurant represented in the cart.
+  // COD is a single-restaurant checkout method only. The cart model remains
+  // backward-compatible and COD-only; this endpoint must not permit COD for a
+  // cart containing multiple restaurants.
   const restaurantIds = [...new Set(cart.items.map(i => String(i.restaurant)).filter(Boolean))];
   const restaurants = await Restaurant.find({ _id: { $in: restaurantIds } })
     .select('codEnabled isActive name');
@@ -335,11 +337,18 @@ const setPaymentMethod = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'One or more restaurants in your cart are unavailable.' });
 
   if (paymentMethod === 'cod') {
+    if (restaurantIds.length > 1) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cash on Delivery is available only for single-restaurant orders. Please choose online payment.',
+      });
+    }
+
     const noCod = restaurants.find(r => !r.isActive || r.codEnabled !== true);
     if (noCod)
       return res.status(403).json({
         success: false,
-        message: `Cash on Delivery is not available for ${noCod.name || 'one of the restaurants'} in your cart.`,
+        message: `Cash on Delivery is not available for ${noCod.name || 'this restaurant'}.`,
       });
   }
 
