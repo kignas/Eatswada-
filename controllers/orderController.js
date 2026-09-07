@@ -231,7 +231,7 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
   }
 
   const restaurant = await Restaurant.findOne({ _id: restaurantId, isActive: true })
-    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove codEnabled');
+    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove');
   if (!restaurant) { const e = new Error('Restaurant not found or unavailable'); e.statusCode = 404; throw e; }
 
   if (restaurant.availability?.isOpen === false || restaurant.isOpen === false) {
@@ -351,7 +351,7 @@ const createOrder = asyncHandler(async (req, res) => {
     items,
     deliveryAddress,
     addressId,
-    paymentMethod = 'cod',
+    paymentMethod = 'upi',
     restaurantNote,
     restaurantNotes,
     globalNote,
@@ -359,11 +359,11 @@ const createOrder = asyncHandler(async (req, res) => {
     tipAmount = 0,
   } = req.body;
 
-  const validPaymentMethods = ['upi', 'card', 'wallet', 'cod'];
+  const validPaymentMethods = ['upi'];
   if (!validPaymentMethods.includes(paymentMethod)) {
-    const e = new Error('Invalid payment method.'); e.statusCode = 400; throw e;
+    const e = new Error('Only UPI online payment is available. Cash on Delivery is disabled.'); e.statusCode = 400; throw e;
   }
-  if (paymentMethod !== 'cod') assertConfigured();
+  assertConfigured();
   if (!Array.isArray(items) || items.length === 0) {
     const e = new Error('Cart is empty'); e.statusCode = 400; throw e;
   }
@@ -421,26 +421,8 @@ const createOrder = asyncHandler(async (req, res) => {
     }));
   }
 
-  // Payment policy: COD is a single-restaurant checkout method only.
-  // A multi-restaurant checkout creates separate child orders but shares one
-  // payment choice/Razorpay checkout, so COD must be disabled for the entire
-  // checkout whenever 2+ restaurants are present. For a single restaurant,
-  // COD is allowed only when that restaurant explicitly enables it.
-  if (paymentMethod === 'cod') {
-    if (priced.length > 1) {
-      const e = new Error('Cash on Delivery is available only for single-restaurant orders. Please choose online payment.');
-      e.statusCode = 403;
-      throw e;
-    }
-
-    const restaurant = priced[0]?.restaurant;
-    if (!restaurant || restaurant.codEnabled !== true) {
-      const name = restaurant?.name || 'this restaurant';
-      const e = new Error(`Cash on Delivery is not available for ${name}.`);
-      e.statusCode = 403;
-      throw e;
-    }
-  }
+  // Platform payment policy: COD is permanently disabled for all new orders.
+  // The only accepted checkout method is UPI through the existing Razorpay flow.
 
   // Split the tip across restaurants by delivery fee (never duplicated).
   const tipShares = allocateTip(totalTip, priced.map(p => p.deliveryFee));
@@ -491,7 +473,7 @@ const createOrder = asyncHandler(async (req, res) => {
     created.push(order);
   }
 
-  if (paymentMethod !== 'cod') {
+  if (paymentMethod === 'upi') {
     const checkoutTotal = created.reduce((sum, order) => sum + Number(order.total || 0), 0);
     try {
       const razorpayOrder = await createRazorpayOrder(
@@ -512,10 +494,10 @@ const createOrder = asyncHandler(async (req, res) => {
       throw err;
     }
   } else {
-    await Cart.findOneAndUpdate(
-      { user: req.user._id },
-      { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'cod' } }
-    );
+    // Defensive guard: paymentMethod is already restricted to UPI above.
+    const e = new Error('Cash on Delivery is disabled. Only UPI online payment is available.');
+    e.statusCode = 400;
+    throw e;
   }
 
   return res.status(201).json(buildCheckoutResponse(created, false));

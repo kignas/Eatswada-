@@ -177,7 +177,7 @@ async function buildCartResponse(cart) {
 
     itemCount: items.reduce((s, i) => s + i.quantity, 0),
     deliveryAddress: plain.deliveryAddress || null,
-    paymentMethod: plain.paymentMethod || 'cod',
+    paymentMethod: plain.paymentMethod === 'cod' ? 'upi' : (plain.paymentMethod || 'upi'),
     updatedAt: plain.updatedAt,
     createdAt: plain.createdAt,
   };
@@ -316,43 +316,19 @@ const setDeliveryAddress = asyncHandler(async (req, res) => {
 // PATCH /api/cart/payment
 const setPaymentMethod = asyncHandler(async (req, res) => {
   const { paymentMethod } = req.body;
-  const valid = ['cod'];
-  if (!valid.includes(paymentMethod))
-    return res.status(400).json({ success: false, message: 'Invalid payment method' });
+  if (paymentMethod !== 'upi') {
+    return res.status(400).json({
+      success: false,
+      message: 'Only UPI online payment is available. Cash on Delivery is disabled.',
+    });
+  }
 
   const cart = await Cart.findOne({ user: req.user._id });
   if (!cart || cart.items.length === 0)
     return res.status(404).json({ success: false, message: 'Cart is empty' });
 
   await backfillItemRestaurants(cart);
-
-  // COD is a single-restaurant checkout method only. The cart model remains
-  // backward-compatible and COD-only; this endpoint must not permit COD for a
-  // cart containing multiple restaurants.
-  const restaurantIds = [...new Set(cart.items.map(i => String(i.restaurant)).filter(Boolean))];
-  const restaurants = await Restaurant.find({ _id: { $in: restaurantIds } })
-    .select('codEnabled isActive name');
-
-  if (restaurants.length !== restaurantIds.length)
-    return res.status(404).json({ success: false, message: 'One or more restaurants in your cart are unavailable.' });
-
-  if (paymentMethod === 'cod') {
-    if (restaurantIds.length > 1) {
-      return res.status(403).json({
-        success: false,
-        message: 'Cash on Delivery is available only for single-restaurant orders. Please choose online payment.',
-      });
-    }
-
-    const noCod = restaurants.find(r => !r.isActive || r.codEnabled !== true);
-    if (noCod)
-      return res.status(403).json({
-        success: false,
-        message: `Cash on Delivery is not available for ${noCod.name || 'this restaurant'}.`,
-      });
-  }
-
-  cart.paymentMethod = paymentMethod;
+  cart.paymentMethod = 'upi';
   await cart.save();
   res.json({ success: true, data: await buildCartResponse(cart) });
 });

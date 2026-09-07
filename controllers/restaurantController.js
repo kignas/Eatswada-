@@ -203,6 +203,9 @@ const createRestaurant = asyncHandler(async (req, res) => {
   if (!req.body.cuisine && req.body.cuisineDisplay) req.body.cuisine = [req.body.cuisineDisplay]; 
   else if (!req.body.cuisine) req.body.cuisine = ['General'];
   if (!req.body.slug && req.body.name) req.body.slug = req.body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '-' + Date.now();
+  // Platform-wide policy: every newly created restaurant is online-payment only.
+  // Ignore any legacy/forged codEnabled value supplied by the client.
+  req.body.codEnabled = false;
   const restaurant = await Restaurant.create(req.body);
   res.status(201).json({ success: true, data: restaurant });
 });
@@ -220,6 +223,10 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   // be able to change admin-controlled ranking/badge fields.
   const isPrivilegedAdmin = req.user.role === 'admin' || req.user.role === 'ceo';
   const update = { ...req.body };
+
+  // Platform-wide policy: COD cannot be enabled by Admin, CEO, vendor, or a
+  // forged request. Existing restaurants are also forced off when updated.
+  update.codEnabled = false;
 
   if (!isPrivilegedAdmin) {
     delete update.owner;

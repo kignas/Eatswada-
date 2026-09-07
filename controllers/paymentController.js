@@ -37,7 +37,7 @@ async function markCheckoutPaid(orders, paymentId) {
   );
   await Cart.findOneAndUpdate(
     { user: orders[0].user },
-    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'cod' } }
+    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
   );
 }
 
