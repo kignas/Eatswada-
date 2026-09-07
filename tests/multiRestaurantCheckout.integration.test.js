@@ -150,12 +150,12 @@ test('single-restaurant checkout returns the legacy shape and one order', async 
   assert.equal(all.length, 1);
 });
 
-// ── #2 / #3  Multi-restaurant checkout creates one order per restaurant ──
-test('multi-restaurant checkout creates one order per restaurant sharing a checkoutGroupId', async () => {
+// ── #2 / #3  Multi-restaurant checkout is online-payment-only ───────────
+test('multi-restaurant checkout rejects COD even when every restaurant allows it', async () => {
   const user = await seedUser();
   const address = await seedAddress(user._id);
-  const a = await seedRestaurant({ name: 'A' });
-  const b = await seedRestaurant({ name: 'B' });
+  const a = await seedRestaurant({ name: 'A', codEnabled: true });
+  const b = await seedRestaurant({ name: 'B', codEnabled: true });
   const da = await seedMenu(a, { price: 120 });
   const db = await seedMenu(b, { price: 200 });
 
@@ -169,13 +169,9 @@ test('multi-restaurant checkout creates one order per restaurant sharing a check
     tipAmount: 20,
   }));
 
-  assert.equal(status, 201);
-  assert.equal(body.orders.length, 2);
-  assert.ok(body.checkoutGroupId);
-  const orders = await Order.find({ checkoutGroupId: body.checkoutGroupId });
-  assert.equal(orders.length, 2);
-  // Each order is single-restaurant.
-  for (const o of orders) assert.ok(o.restaurant);
+  assert.equal(status, 403);
+  assert.match(body?.message || '', /single-restaurant/i);
+  assert.equal(await Order.countDocuments({}), 0);
 });
 
 // ── #7  Client cannot fake menu price ────────────────────────────────────
@@ -266,7 +262,7 @@ test('restaurant note persists on the order', async () => {
   assert.equal(order.restaurantNote, 'extra spicy');
 });
 
-// ── #24  COD must be enabled for EVERY restaurant ────────────────────────
+// ── #24  Multi-restaurant COD remains blocked when any restaurant is UPI-only
 test('multi-restaurant checkout fails if any restaurant has COD disabled', async () => {
   const user = await seedUser();
   const address = await seedAddress(user._id);
