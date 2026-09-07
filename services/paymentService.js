@@ -45,11 +45,6 @@ async function createRazorpayOrder(amountRupees, receipt, notes = {}) {
     amount,
     currency: 'INR',
     receipt: String(receipt).slice(0, 40),
-    // Auto-capture the payment the moment it is authorised. Without this,
-    // an account that does not default to auto-capture leaves the payment
-    // in `authorized` (not `captured`) — which verifyPayment then rejects
-    // with a 409, failing an otherwise successful checkout.
-    payment_capture: 1,
     notes,
   });
 }
