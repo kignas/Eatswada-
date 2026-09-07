@@ -239,7 +239,7 @@ const seed = async () => {
     const mappedRestaurants = restaurants.map((r, i) => ({
       ...r,
       owner: seedVendors[i]._id,
-      codEnabled: true,
+      codEnabled: false,
       ratingCount: Number(r.ratingCount) || 0,
       slug: r.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '')
     }));
