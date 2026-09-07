@@ -16,6 +16,7 @@ const {
   resolveRestaurantNote,
   normalizeRestaurantNotes,
 } = require('../services/checkoutMath');
+const { createRazorpayOrder, assertConfigured } = require('../services/paymentService');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -322,8 +323,16 @@ function buildCheckoutResponse(orders, replay) {
     };
   });
 
+  const primary = orders[0];
+  const isOnline = primary && primary.paymentMethod !== 'cod';
+  const razorpayOrderId = orders.find(o => o.razorpayOrderId)?.razorpayOrderId || '';
+  const amountPaise = Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+  const payment = isOnline && razorpayOrderId && process.env.RAZORPAY_KEY_ID
+    ? { provider: 'razorpay', keyId: process.env.RAZORPAY_KEY_ID, orderId: razorpayOrderId, amount: amountPaise, currency: 'INR' }
+    : null;
+
   if (shaped.length === 1) {
-    return { success: true, replay: !!replay, data: shaped[0].order, deliveryOtp: shaped[0].deliveryOtp };
+    return { success: true, replay: !!replay, data: shaped[0].order, deliveryOtp: shaped[0].deliveryOtp, ...(payment ? { payment } : {}) };
   }
 
   return {
@@ -331,9 +340,10 @@ function buildCheckoutResponse(orders, replay) {
     replay: !!replay,
     multiple: true,
     count: shaped.length,
-    data: shaped[0].order, // backward-compatible primary order
+    data: shaped[0].order,
     orders: shaped.map(s => s.order),
     deliveryOtps: shaped.reduce((acc, s) => { acc[s.order._id] = s.deliveryOtp; return acc; }, {}),
+    ...(payment ? { payment } : {}),
   };
 }
 
@@ -354,6 +364,7 @@ const createOrder = asyncHandler(async (req, res) => {
   if (!validPaymentMethods.includes(paymentMethod)) {
     const e = new Error('Invalid payment method.'); e.statusCode = 400; throw e;
   }
+  if (paymentMethod !== 'cod') assertConfigured();
   if (!Array.isArray(items) || items.length === 0) {
     const e = new Error('Cart is empty'); e.statusCode = 400; throw e;
   }
@@ -466,10 +477,32 @@ const createOrder = asyncHandler(async (req, res) => {
     created.push(order);
   }
 
-  await Cart.findOneAndUpdate(
-    { user: req.user._id },
-    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'cod' } }
-  );
+  if (paymentMethod !== 'cod') {
+    const checkoutTotal = created.reduce((sum, order) => sum + Number(order.total || 0), 0);
+    try {
+      const razorpayOrder = await createRazorpayOrder(
+        checkoutTotal,
+        created[0].orderNumber || created[0]._id,
+        {
+          userId: String(req.user._id),
+          orderIds: created.map(o => String(o._id)).join(',').slice(0, 240),
+        }
+      );
+      await Order.updateMany(
+        { _id: { $in: created.map(o => o._id) }, user: req.user._id },
+        { $set: { razorpayOrderId: razorpayOrder.id } }
+      );
+      created.forEach(order => { order.razorpayOrderId = razorpayOrder.id; });
+    } catch (err) {
+      await Order.deleteMany({ _id: { $in: created.map(o => o._id) }, user: req.user._id, paymentStatus: 'pending' }).catch(() => {});
+      throw err;
+    }
+  } else {
+    await Cart.findOneAndUpdate(
+      { user: req.user._id },
+      { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'cod' } }
+    );
+  }
 
   return res.status(201).json(buildCheckoutResponse(created, false));
 });
@@ -499,15 +532,7 @@ function enrichRiderLive(data, orderDoc) {
       updatedAt: rider.riderDetails.currentLocation.updatedAt || null,
     };
     data.riderDistanceKm = Number(distanceKm.toFixed(2));
-
-    // Keep the API numeric for existing clients, but never fabricate a large
-    // fallback ETA from estimatedDelivery when a live GPS fix is available.
-    // A very short remaining distance is represented as 1 minute at API level;
-    // the customer UIs can render that as "Arriving soon".
-    data.riderEtaMinutes = Math.max(
-      1,
-      Math.ceil((distanceKm / AVG_DELIVERY_SPEED_KMH) * 60)
-    );
+    data.riderEtaMinutes = Math.max(1, Math.round((distanceKm / AVG_DELIVERY_SPEED_KMH) * 60));
   }
   return data;
 }
@@ -672,6 +697,10 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
         ? `Cannot move order from "${order.status}" to "${status}". Allowed next status: ${allowed.join(', ')}.`
         : `Cannot update order — it is currently "${order.status}", which cannot be changed from this endpoint.`,
     });
+  }
+
+  if (order.paymentMethod !== 'cod' && order.paymentStatus !== 'paid') {
+    return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
   }
 
   if (status === 'delivered' && !order.deliveryOtpVerified) {

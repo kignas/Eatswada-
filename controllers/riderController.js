@@ -217,6 +217,10 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   // Without this, an order manually assigned via PUT
   // /api/orders/:id/assign-rider before that point could let order.status
   // skip straight from e.g. 'preparing' to 'assigned'.
+  if (order.paymentMethod !== 'cod' && order.paymentStatus !== 'paid') {
+    return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
+  }
+
   if (status === 'accepted' && order.status !== 'waiting_for_rider') {
     return res.status(409).json({
       success: false,

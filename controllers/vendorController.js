@@ -74,6 +74,10 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
   const orders = await Order.find({
     ...orderOwnershipFilter(req),
     ...statusFilter,
+    $or: [
+      { paymentMethod: 'cod' },
+      { paymentMethod: { $ne: 'cod' }, paymentStatus: 'paid' },
+    ],
   })
     .populate(VENDOR_ORDER_POPULATE)
     .sort({ createdAt: -1 });
@@ -86,6 +90,10 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
 
   const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
+
+  if (order.paymentMethod !== 'cod' && order.paymentStatus !== 'paid') {
+    return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
+  }
 
   if (order.status !== 'placed') {
     return res.status(409).json({
@@ -130,6 +138,10 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 
   const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
+
+  if (order.paymentMethod !== 'cod' && order.paymentStatus !== 'paid') {
+    return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
+  }
 
   const nextStatus = VENDOR_STATUS_TRANSITIONS[order.status];
   if (!nextStatus) {
