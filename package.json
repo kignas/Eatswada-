@@ -14,7 +14,8 @@
     "test:security": "node tests/security-gate.js",
     "test:deployment": "node tests/deployment-gate.js",
     "audit:deps": "npm audit --audit-level=high",
-    "outdated:deps": "npm outdated"
+    "outdated:deps": "npm outdated",
+    "test:payment-security": "node tests/payment-security.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -36,7 +37,8 @@
     "multer": "^2.2.0",
     "streamifier": "^0.1.1",
     "axios": "^1.18.0",
-    "twilio": "^5.4.0"
+    "twilio": "^5.4.0",
+    "razorpay": "^2.9.6"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

@@ -8,7 +8,6 @@ const mongoSanitize  = require('express-mongo-sanitize');
 const xssClean       = require('xss-clean');
 const hpp            = require('hpp');
 const compression    = require('compression');
-const mongoose       = require('mongoose');
 const morgan         = require('morgan');
 
 const connectDB      = require('./config/db');
@@ -28,6 +27,8 @@ const menuRoutes       = require('./routes/menuRoutes');
 const riderRoutes      = require('./routes/riderRoutes');
 const adminRiderRoutes = require('./routes/adminRiderRoutes');
 const platformRatingRoutes = require('./routes/platformRatingRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+const { handleWebhook } = require('./controllers/paymentController');
 
 // ── Connect to MongoDB ────────────────────────────────────────
 // (connection is awaited below, right before the server starts listening)
@@ -91,6 +92,9 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
+// Razorpay webhooks need the exact raw request bytes for HMAC verification.
+app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), handleWebhook);
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many auth attempts. Try again in 15 minutes.' },
@@ -103,9 +107,6 @@ app.use(xssClean());
 app.use(hpp({ whitelist: ['sort', 'category', 'cuisine'] }));
 
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
-if (process.env.NODE_ENV === 'production') {
-  app.use(morgan(':method :url :status :res[content-length] - :response-time ms'));
-}
 
 // ── OTP diagnostic logging ────────────────────────────────────
 // Keep this lightweight and production-safe: log request flow and a masked phone,
@@ -128,14 +129,7 @@ if (process.env.NODE_ENV === 'development') {
 
 // ── Health & Welcome Routes ───────────────────────────────────
 app.get('/health', (req, res) => {
-  const dbConnected = mongoose.connection.readyState === 1;
-  res.status(dbConnected ? 200 : 503).json({
-    success: dbConnected,
-    service: 'Eatswada API',
-    version: '1.0.0',
-    db: dbConnected ? 'connected' : 'disconnected',
-    uptime: process.uptime().toFixed(2) + 's',
-  });
+  res.json({ success: true, service: 'Nearbite API', version: '1.0.0', uptime: process.uptime().toFixed(2) + 's' });
 });
 
 app.get('/', (req, res) => {
@@ -155,6 +149,7 @@ app.use('/api/menu',        menuRoutes);
 app.use('/api/riders',      riderRoutes);
 app.use('/api/admin/riders', adminRiderRoutes);
 app.use('/api/ratings',      platformRatingRoutes);
+app.use('/api/payments',      paymentRoutes);
 
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
