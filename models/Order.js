@@ -335,9 +335,11 @@ orderSchema.methods.verifyDeliveryOtp = function (enteredOtp) {
     return { ok: false, reason: 'not_set' };
   }
 
-  if (this.deliveryOtpExpiresAt && this.deliveryOtpExpiresAt < now) {
-    return { ok: false, reason: 'expired' };
-  }
+  // A delivery PIN is a door-handoff code, not a login credential: it must stay
+  // valid until the order is actually delivered, however long the delivery
+  // takes. It is NOT time-expired here — abuse is bounded by the assigned-rider
+  // check, the "out_for_delivery" status gate, and the attempt lockout below.
+  // (deliveryOtpExpiresAt is still stored but no longer used to reject.)
 
   const receivedOtp   = String(enteredOtp).trim();
   const receivedHash  = hashOtp(receivedOtp, this.deliveryOtpSalt);
