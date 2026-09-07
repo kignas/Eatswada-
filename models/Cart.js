@@ -80,8 +80,8 @@ const cartSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ['cod'],
-      default: 'cod',
+      enum: ['upi', 'cod'],
+      default: 'upi',
     },
   },
   { timestamps: true }
