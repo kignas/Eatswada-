@@ -155,7 +155,7 @@ const orderSchema = new mongoose.Schema(
 
     paymentMethod: {
       type: String,
-      enum: ['cod'],
+      enum: ['upi', 'card', 'wallet', 'cod'],
       default: 'cod',
     },
     paymentStatus: {
@@ -335,10 +335,11 @@ orderSchema.methods.verifyDeliveryOtp = function (enteredOtp) {
     return { ok: false, reason: 'not_set' };
   }
 
-  // Delivery PIN remains valid until handoff is completed.
-  // Do not reject it based on deliveryOtpExpiresAt; that timestamp is
-  // retained for compatibility/auditing only. Security is provided by the
-  // assigned-rider check, out_for_delivery status gate and attempt lockout.
+  // A delivery PIN is a door-handoff code, not a login credential: it must stay
+  // valid until the order is actually delivered, however long the delivery
+  // takes. It is NOT time-expired here — abuse is bounded by the assigned-rider
+  // check, the "out_for_delivery" status gate, and the attempt lockout below.
+  // (deliveryOtpExpiresAt is still stored but no longer used to reject.)
 
   const receivedOtp   = String(enteredOtp).trim();
   const receivedHash  = hashOtp(receivedOtp, this.deliveryOtpSalt);
