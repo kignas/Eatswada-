@@ -13,21 +13,23 @@ function check(name,fn){
   catch(e){tests.push(['FAIL',name,e.message]);}
 }
 
-check('Order model is COD-only',()=>{
+check('New orders default to UPI-only',()=>{
   const s=read('models/Order.js');
-  assert(s.includes("enum: ['cod']"));
-  assert(s.includes("default: 'cod'"));
+  assert(s.includes("enum: ['upi', 'card', 'wallet', 'cod']"));
+  assert(s.includes("default: 'upi'"));
+  assert(read('controllers/orderController.js').includes("const validPaymentMethods = ['upi'];"));
 });
-check('Cart model is COD-only',()=>{
-  const s=read('models/Cart.js');
-  assert(s.includes("enum: ['cod']"));
-  assert(s.includes("default: 'cod'"));
+check('Cart payment endpoint accepts UPI only',()=>{
+  assert(read('controllers/cartController.js').includes("paymentMethod !== 'upi'"));
+  assert(read('models/Cart.js').includes("default: 'upi'"));
 });
-check('Cart controller rejects non-COD',()=>{
-  assert(read('controllers/cartController.js').includes("const valid = ['cod'];"));
+check('Order checkout resets cart to UPI',()=>{
+  assert(read('controllers/paymentController.js').includes("paymentMethod: 'upi'"));
 });
-check('Order clear resets to COD',()=>{
-  assert(read('controllers/orderController.js').includes("paymentMethod: 'cod'"));
+check('Restaurant creation/update cannot enable COD',()=>{
+  assert(read('controllers/restaurantController.js').includes('req.body.codEnabled = false'));
+  assert(read('controllers/restaurantController.js').includes('update.codEnabled = false'));
+  assert(read('controllers/authController.js').includes('codEnabled: false'));
 });
 check('Rider history persists riderId',()=>{
   const s=read('models/Order.js');
