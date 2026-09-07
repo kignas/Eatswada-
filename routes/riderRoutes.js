@@ -15,6 +15,7 @@ const {
   getEarningsSummary,
   updateAssignedOrderStatus,
   verifyDeliveryOtp,
+  updateLocation,
 } = require('../controllers/riderController');
 
 const { protect, authorize } = require('../middleware/authMiddleware');
@@ -26,6 +27,7 @@ router.get('/profile', getMyProfile);
 router.put('/profile', updateMyProfile);
 router.put('/profile/photo', upload.single('photo'), updateMyPhoto);
 router.put('/status', toggleOnline);
+router.put('/location', updateLocation);
 
 router.get('/earnings', getEarningsSummary);
 
