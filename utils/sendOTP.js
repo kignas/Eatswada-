@@ -5,11 +5,17 @@
  * In production set OTP_PROVIDER=twilio or msg91 in .env
  */
 
+const crypto = require('crypto');
+
 const generateOTPCode = () =>
-  Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit OTP
+  crypto.randomInt(1000, 10000).toString(); // cryptographically random 4-digit OTP
 
 const sendOTP = async (phone, otp) => {
   const provider = process.env.OTP_PROVIDER || 'mock';
+
+  if (process.env.NODE_ENV === 'production' && provider === 'mock') {
+    throw new Error('OTP_PROVIDER=mock is not allowed in production. Configure twilio or msg91.');
+  }
 
   if (provider === 'mock') {
     // Development: just log the OTP
