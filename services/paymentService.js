@@ -54,6 +54,22 @@ async function fetchPayment(paymentId) {
   return instance.payments.fetch(String(paymentId));
 }
 
+/**
+ * Issue a refund against a captured Razorpay payment.
+ * `amountRupees` is the rupee amount to refund (converted to paise here).
+ * Returns the Razorpay refund object; its `status` is 'processed' (instant) or
+ * 'pending' (confirmed later via the refund.processed webhook).
+ */
+async function refundPayment(paymentId, amountRupees, notes = {}) {
+  const instance = getRazorpay();
+  const amount = toPaise(amountRupees);
+  return instance.payments.refund(String(paymentId), {
+    amount,
+    speed: 'normal',
+    notes,
+  });
+}
+
 function verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature) {
   if (!process.env.RAZORPAY_KEY_SECRET) return false;
   const body = `${razorpayOrderId}|${razorpayPaymentId}`;
@@ -75,6 +91,7 @@ module.exports = {
   assertConfigured,
   createRazorpayOrder,
   fetchPayment,
+  refundPayment,
   verifyRazorpaySignature,
   verifyWebhookSignature,
   toPaise,
