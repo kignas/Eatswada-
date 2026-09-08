@@ -196,6 +196,26 @@ const orderSchema = new mongoose.Schema(
       type: Boolean,
       default: true,   // becomes false once 'preparing' or beyond
     },
+
+    // ── Refund lifecycle ──
+    // Populated only when a PAID order is cancelled (by customer or restaurant).
+    // status flow: 'none' (default — no refund) → 'processing' (refund requested
+    // at Razorpay) → 'completed' (confirmed via refund.processed webhook) or
+    // 'failed'. paymentStatus flips to 'refunded' when status becomes 'completed'.
+    // Existing/old orders and COD orders simply stay at 'none'.
+    refund: {
+      status: {
+        type: String,
+        enum: ['none', 'processing', 'completed', 'failed'],
+        default: 'none',
+      },
+      amount:           { type: Number, default: 0 },
+      razorpayRefundId: { type: String, default: '' },
+      reason:           { type: String, default: '' },
+      initiatedAt:      { type: Date, default: null },
+      completedAt:      { type: Date, default: null },
+    },
+
     rating: {
       score:   { type: Number, min: 1, max: 5 },
       comment: { type: String, maxlength: 400 },
