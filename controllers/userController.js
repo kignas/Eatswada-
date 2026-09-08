@@ -168,7 +168,17 @@ const updateProfile = asyncHandler(async (req, res) => {
     user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
   }
   await user.save();
-  res.json({ success: true, data: user.toJSON() });
+
+  // If the password changes, tokenVersion is intentionally incremented above
+  // to revoke the old JWT. The current onboarding session must receive a fresh
+  // JWT, otherwise the very next protected request is correctly rejected with
+  // 401 and the frontend may send the user back to login.
+  const responseData = { user: user.toJSON() };
+  if (password !== undefined) {
+    responseData.token = generateToken(user._id, user.role, user.tokenVersion);
+  }
+
+  res.json({ success: true, data: responseData });
 });
 
 const getAddresses = asyncHandler(async (req, res) => {
