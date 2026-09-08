@@ -18,6 +18,7 @@ const {
   normalizeRestaurantNotes,
 } = require('../services/checkoutMath');
 const { createRazorpayOrder, assertConfigured } = require('../services/paymentService');
+const { initiateOrderRefund } = require('../services/refundService');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -620,18 +621,29 @@ const cancelOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-  // A customer may cancel ONLY while the order is still 'placed' — i.e. before
-  // the restaurant has accepted it. Once accepted (confirmed) and preparing has
-  // begun, the customer can no longer cancel from here.
-  if (order.status !== 'placed') {
-    const message = order.status === 'cancelled'
-      ? 'This order is already cancelled.'
-      : 'This order has already been accepted by the restaurant and can no longer be cancelled. Please contact support if you need help.';
-    return res.status(409).json({ success: false, message });
+  // A customer may cancel any time BEFORE the kitchen starts preparing. The
+  // model's isCancellable flag is the single source of truth — advanceStatus
+  // flips it false at 'preparing' and beyond — so the allowed window is
+  // 'placed' and 'confirmed' (restaurant accepted but not yet cooking).
+  if (order.status === 'cancelled') {
+    return res.status(409).json({ success: false, message: 'This order is already cancelled.' });
+  }
+  if (!order.isCancellable) {
+    return res.status(409).json({
+      success: false,
+      message: 'This order is already being prepared and can no longer be cancelled. Please contact support if you need help.',
+    });
   }
 
-  order.advanceStatus('cancelled', req.body.reason || 'Cancelled by customer');
-  order.cancelReason = req.body.reason || 'Cancelled by customer';
+  const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'Cancelled by customer';
+  order.advanceStatus('cancelled', reason);
+  order.cancelReason = reason;
+
+  // Refund online payments that were actually captured. No-ops for COD/unpaid
+  // orders and never double-refunds; the cancellation still succeeds even if
+  // the refund call fails (it's recorded as 'failed' for follow-up).
+  await initiateOrderRefund(order, reason);
+
   await order.save();
   await order.populate(ORDER_POPULATE_PATHS);
 

@@ -121,6 +121,44 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
   try { event = JSON.parse(rawBody.toString('utf8')); }
   catch (_) { return res.status(400).json({ success: false, message: 'Invalid webhook payload.' }); }
 
+  // ── Refund lifecycle events ──────────────────────────────────────────
+  // refund.processed / refund.failed carry a refund entity (not a payment
+  // entity). Handle and return here so the payment.* amount checks below never
+  // run against a refund event. Orders are matched by the orderId we stamped
+  // into the refund notes at initiation (exact even for a partial refund of one
+  // order in a multi-restaurant checkout), falling back to the stored refund id.
+  if (typeof event.event === 'string' && event.event.startsWith('refund.')) {
+    const refundEntity = event?.payload?.refund?.entity;
+    if (!refundEntity) return res.json({ success: true, ignored: true });
+
+    const refundId = String(refundEntity.id || '');
+    const notesOrderId = refundEntity.notes && refundEntity.notes.orderId ? String(refundEntity.notes.orderId) : '';
+
+    let targets = [];
+    if (notesOrderId) targets = await Order.find({ _id: notesOrderId });
+    if (!targets.length && refundId) targets = await Order.find({ 'refund.razorpayRefundId': refundId });
+    if (!targets.length) return res.json({ success: true, ignored: true });
+
+    const ids = targets.map(o => o._id);
+    if (event.event === 'refund.processed' || refundEntity.status === 'processed') {
+      await Order.updateMany(
+        { _id: { $in: ids } },
+        { $set: {
+            paymentStatus: 'refunded',
+            'refund.status': 'completed',
+            'refund.razorpayRefundId': refundId,
+            'refund.completedAt': new Date(),
+        } }
+      );
+    } else if (event.event === 'refund.failed' || refundEntity.status === 'failed') {
+      await Order.updateMany(
+        { _id: { $in: ids } },
+        { $set: { 'refund.status': 'failed', 'refund.razorpayRefundId': refundId } }
+      );
+    }
+    return res.json({ success: true });
+  }
+
   const paymentEntity = event?.payload?.payment?.entity;
   if (!paymentEntity) return res.json({ success: true, ignored: true });
 

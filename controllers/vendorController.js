@@ -6,6 +6,7 @@ const Review          = require('../models/Review');
 
 // FIX: Import the auto-assignment service here
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService'); 
+const { initiateOrderRefund } = require('../services/refundService');
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -171,6 +172,12 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
 
   order.cancelReason = reason;
   order.advanceStatus('cancelled', `Rejected by restaurant: ${reason}`);
+
+  // Refund the customer if they already paid online. No-ops for COD/unpaid
+  // orders and never double-refunds; rejection still succeeds if the refund
+  // call fails (recorded as 'failed' for follow-up).
+  await initiateOrderRefund(order, `Rejected by restaurant: ${reason}`);
+
   await order.save();
 
   res.status(200).json({ success: true, data: order });
