@@ -42,7 +42,7 @@ check('XSS middleware enabled', /app\.use\(xssClean\(\)\)/.test(server));
 check('HPP protection enabled', /app\.use\(hpp\(/.test(server));
 check('JSON body size capped', /express\.json\(\{\s*limit:\s*['"]10kb['"]/.test(server));
 check('Rate limiter sees proxy client IP', /app\.set\(['"]trust proxy['"],\s*1\)/.test(server));
-check('CORS uses explicit allow-list', /allowedCorsOrigins\.includes\(origin\)/.test(server));
+check('CORS uses explicit allow-list', /corsOrigins\.includes\(origin\)/.test(server));
 check('CORS preflight uses explicit allow-list', /app\.options\(['"]\*['"],\s*cors\(\{/.test(server) && server.indexOf("app.options('*', cors());") === -1);
 check('Authorization ignores JWT role claim and loads user from DB', /jwt\.verify\([\s\S]*?\n[\s\S]*?User\.findById\(decoded\.id\)/.test(auth));
 check('Deactivated accounts rejected', /if \(!req\.user\.isActive\)/.test(auth));
