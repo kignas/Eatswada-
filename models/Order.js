@@ -260,6 +260,13 @@ const orderSchema = new mongoose.Schema(
 orderSchema.index({ rider: 1, riderStatus: 1 });
 orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ restaurant: 1, status: 1 });
+// Phase 2 (Performance at Scale): backs the paginated vendor orders query —
+// filter by restaurant + status AND sort by createdAt in a single index pass,
+// so history pages stay fast as order volume grows. This is a superset of
+// { restaurant: 1, status: 1 } above (same leading fields), so that shorter
+// index is now a redundant prefix and can optionally be dropped once this one
+// is built.
+orderSchema.index({ restaurant: 1, status: 1, createdAt: -1 });
 orderSchema.index({ user: 1, idempotencyKey: 1 });
 
 /* ── Pre-save: generate order number ── */
@@ -390,8 +397,4 @@ orderSchema.methods.clearOtpSecrets = function () {
 };
 
 module.exports = mongoose.model('Order', orderSchema);
-// --- DATABASE INDEXES FOR PERFORMANCE ---
-orderSchema.index({ user: 1, createdAt: -1 }); // Speeds up customer order history
-orderSchema.index({ restaurant: 1, status: 1 });
-orderSchema.index({ user: 1, idempotencyKey: 1 }); // Speeds up vendor active order dashboard
 
