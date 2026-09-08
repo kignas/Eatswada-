@@ -121,6 +121,10 @@ const optionalAuth = async (req, res, next) => {
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       req.user = await User.findById(decoded.id).select('-password');
+      if (!req.user || !req.user.isActive ||
+          (Number(decoded.tv) || 0) !== (Number(req.user.tokenVersion) || 0)) {
+        req.user = undefined;
+      }
     } catch (_) {
       // Silently ignore — this is intentional for optional auth.
     }
