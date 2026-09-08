@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const express        = require('express');
+const mongoose       = require('mongoose');
 const helmet         = require('helmet');
 const cors           = require('cors');
 const rateLimit      = require('express-rate-limit');
@@ -57,7 +58,6 @@ const corsOrigins = [
   'http://127.0.0.1:5500',
   'https://eatswada.com',
   'https://www.eatswada.com',
-  'https://nearbite-three.vercel.app',
   'https://kignas.github.io',
   ...configuredCorsOrigins
 ].filter((origin, index, list) => list.indexOf(origin) === index);
@@ -82,11 +82,20 @@ app.use(cors({
   ]
 }));
 
-app.options('*', cors());
+app.options('*', cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (corsOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('CORS origin not allowed'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'x-setup-key']
+}));
 
 const globalLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max:      Number(process.env.RATE_LIMIT_MAX)        || 100,
+  max:      Number(process.env.RATE_LIMIT_MAX)        || 600,
   standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: 'Too many requests, please slow down.' },
 });
@@ -129,15 +138,24 @@ if (process.env.NODE_ENV === 'development') {
 
 // ── Health & Welcome Routes ───────────────────────────────────
 app.get('/health', (req, res) => {
-  res.json({ success: true, service: 'Nearbite API', version: '1.0.0', uptime: process.uptime().toFixed(2) + 's' });
+  const ready = mongoose.connection.readyState === 1;
+  res.status(ready ? 200 : 503).json({
+    success: ready,
+    ready,
+    service: 'Eatswada API',
+    version: '1.0.0',
+    uptime: process.uptime().toFixed(2) + 's'
+  });
 });
 
 app.get('/', (req, res) => {
   res.status(200).send('<h2>🍔 Nearbite Backend API is Live and Running! 🚀</h2>');
 });
 
-app.use('/api/users',       authLimiter, userRoutes);
-app.use('/api/auth',        authLimiter, authRoutes);
+// Authentication endpoints have their own focused limiters in the route files.
+// Do not blanket-rate-limit every authenticated /api/users request.
+app.use('/api/users',       userRoutes);
+app.use('/api/auth',        authRoutes);
 app.use('/api/restaurants', restaurantRoutes);
 app.use('/api/cart',        cartRoutes);
 app.use('/api/orders',      orderRoutes);
@@ -177,7 +195,12 @@ connectDB().then(() => {
     console.error(`❌ Unhandled Rejection: ${err.message}`);
     server.close(() => process.exit(1));
   });
-  process.on('SIGTERM', () => { server.close(() => process.exit(0)); });
+  process.on('SIGTERM', () => {
+    server.close(async () => {
+      try { await mongoose.connection.close(false); } catch (_) {}
+      process.exit(0);
+    });
+  });
 });
 
 module.exports = app;
