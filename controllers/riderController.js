@@ -99,17 +99,19 @@ exports.toggleOnline = asyncHandler(async (req, res) => {
 /* GET /api/riders/orders — every order ever assigned to this rider.
  * Optional ?status=accepted|reached_restaurant|... filter. */
 exports.getAssignedOrders = asyncHandler(async (req, res) => {
-  const { status, page = 1, limit = 20 } = req.query;
+  const { status } = req.query;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
   const filter = { rider: req.user._id };
   if (status) filter.riderStatus = status;
 
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   const [orders, total] = await Promise.all([
-    Order.find(filter).sort({ riderAssignedAt: -1 }).skip(skip).limit(Number(limit)).populate('restaurant', 'name image address location'),
+    Order.find(filter).sort({ riderAssignedAt: -1 }).skip(skip).limit(limit).populate('restaurant', 'name image address location'),
     Order.countDocuments(filter),
   ]);
 
-  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
+  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / limit) } });
 });
 
 /* GET /api/riders/orders/active — the single in-progress order, if any. */
@@ -124,19 +126,20 @@ exports.getActiveOrder = asyncHandler(async (req, res) => {
 
 /* GET /api/riders/orders/history — delivered or cancelled orders for this rider. */
 exports.getOrderHistory = asyncHandler(async (req, res) => {
-  const { page = 1, limit = 20 } = req.query;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
   const filter = {
     rider: req.user._id,
     $or: [{ riderStatus: 'delivered' }, { status: 'cancelled' }],
   };
 
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   const [orders, total] = await Promise.all([
-    Order.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(Number(limit)).populate('restaurant', 'name image address location'),
+    Order.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(limit).populate('restaurant', 'name image address location'),
     Order.countDocuments(filter),
   ]);
 
-  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) } });
+  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / limit) } });
 });
 
 /* GET /api/riders/orders/:id — single assigned order detail. */

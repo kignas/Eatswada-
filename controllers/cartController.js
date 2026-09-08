@@ -304,9 +304,22 @@ const clearCart = asyncHandler(async (req, res) => {
 // PATCH /api/cart/address
 const setDeliveryAddress = asyncHandler(async (req, res) => {
   const { addressId } = req.body;
+  if (!mongoose.Types.ObjectId.isValid(addressId)) {
+    return res.status(400).json({ success: false, message: 'A valid addressId is required.' });
+  }
+
+  // Never allow a customer to attach or read another customer's saved address.
+  const ownedAddress = await require('../models/Address').findOne({
+    _id: addressId,
+    user: req.user._id,
+  }).lean();
+  if (!ownedAddress) {
+    return res.status(404).json({ success: false, message: 'Address not found on your account.' });
+  }
+
   const cart = await Cart.findOneAndUpdate(
     { user: req.user._id },
-    { deliveryAddress: addressId },
+    { deliveryAddress: ownedAddress._id },
     { new: true }
   ).populate('deliveryAddress');
   if (!cart) return res.status(404).json({ success: false, message: 'Cart not found' });

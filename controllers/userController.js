@@ -10,8 +10,26 @@ const normalizePhone = (phone) => String(phone || '').trim();
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
 const issueOTP = async (user, purpose) => {
+  if (user.otp?.lockedUntil && user.otp.lockedUntil > new Date()) {
+    const error = new Error('Too many incorrect attempts. Please wait before requesting a new OTP.');
+    error.statusCode = 429;
+    throw error;
+  }
+  if (user.otpRequestedTooRecently()) {
+    const retryAfter = Math.max(1, Math.ceil((60_000 - (Date.now() - user.otp.lastSentAt.getTime())) / 1000));
+    const error = new Error(`Please wait ${retryAfter} seconds before requesting another OTP.`);
+    error.statusCode = 429;
+    throw error;
+  }
+
   const otp = generateOTPCode();
-  user.otp = { code: otp, expiresAt: new Date(Date.now() + OTP_TTL_MS), purpose };
+  user.otp = {
+    code: otp,
+    expiresAt: new Date(Date.now() + OTP_TTL_MS),
+    purpose,
+    attempts: 0,
+    lastSentAt: new Date(),
+  };
   await user.save();
   await sendOTP(user.phone, otp);
 };
@@ -22,7 +40,7 @@ const sendOTPHandler = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Enter a valid mobile number.' });
   }
 
-  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
   if (!user) {
     user = new User({ phone, isPhoneVerified: false });
   }
@@ -35,19 +53,22 @@ const verifyOTPHandler = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const otp = String(req.body.otp || '').trim();
   console.log(`[OTP-VERIFY] handler phone=${phone.replace(/(\+91|\+?91)?(\d{2})\d{6}(\d{2})$/, '$1$2******$3')} otpLength=${otp.length}`);
-  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
   if (!user) {
     console.log('[OTP-VERIFY] user not found');
     return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
   }
-  const purposeOk = user.otp?.purpose === 'login';
-  const match = purposeOk && user.matchOTP(otp);
-  console.log(`[OTP-VERIFY] purposeOk=${purposeOk} match=${match} expired=${Boolean(user.otp?.expiresAt && user.otp.expiresAt < Date.now())}`);
-  if (!match) {
-    return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+  const result = user.checkOTP(otp, 'login');
+  if (!result.ok) {
+    await user.save();
+    return res.status(result.reason === 'locked' || result.reason === 'locked_now' ? 429 : 400).json({
+      success: false,
+      message: result.reason === 'locked' || result.reason === 'locked_now'
+        ? 'Too many incorrect attempts. Please request a new OTP later.'
+        : 'Invalid or expired OTP.'
+    });
   }
   user.isPhoneVerified = true;
-  user.otp = undefined;
   user.lastLogin = new Date();
   await user.save();
   res.json({
@@ -72,8 +93,10 @@ const register = asyncHandler(async (req, res) => {
   let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +password');
   if (!user) return res.status(400).json({ success:false, message:'Please verify your mobile number first.' });
   if (user.isPhoneVerified && user.password) return res.status(409).json({ success:false, message:'This account already exists. Please log in.' });
-  if (!user.otp?.code || user.otp.purpose !== 'login' || !user.matchOTP(otp)) {
-    return res.status(400).json({ success:false, message:'Invalid or expired OTP.' });
+  const otpResult = user.checkOTP(otp, 'login');
+  if (!otpResult.ok) {
+    await user.save();
+    return res.status(otpResult.reason === 'locked' || otpResult.reason === 'locked_now' ? 429 : 400).json({ success:false, message:'Invalid or expired OTP.' });
   }
   const duplicateEmail = email ? await User.findOne({ email, _id: { $ne: user._id } }) : null;
   if (duplicateEmail) return res.status(409).json({ success:false, message:'This email is already registered.' });
@@ -107,7 +130,7 @@ const requestPasswordReset = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const generic = 'If an account exists for this number, we sent a verification code.';
   if (!/^\+?[6-9]\d{9,14}$/.test(phone)) return res.json({ success:true, message:generic });
-  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
   if (!user || !user.isActive || !user.password) return res.json({ success:true, message:generic });
   await issueOTP(user, 'password_reset');
   res.json({ success:true, message:generic });
@@ -116,12 +139,16 @@ const requestPasswordReset = asyncHandler(async (req, res) => {
 const verifyPasswordResetOTP = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const otp = String(req.body.otp || '').trim();
-  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose');
-  if (!user || !user.isActive || user.otp?.purpose !== 'password_reset' || !user.matchOTP(otp)) {
+  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
+  if (!user || !user.isActive) {
     return res.status(400).json({ success:false, message:'Invalid or expired OTP.' });
   }
+  const otpResult = user.checkOTP(otp, 'password_reset');
+  if (!otpResult.ok) {
+    await user.save();
+    return res.status(otpResult.reason === 'locked' || otpResult.reason === 'locked_now' ? 429 : 400).json({ success:false, message:'Invalid or expired OTP.' });
+  }
   const resetToken = user.createPasswordResetToken();
-  user.otp = undefined;
   await user.save();
   res.json({ success:true, data:{ resetToken } });
 });

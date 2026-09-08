@@ -17,6 +17,9 @@ const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
 // phone number and home address. Six characters is not enough for that.
 const STAFF_MIN_PASSWORD = 10;
 
+const clampPage = (value) => Math.max(1, Number(value) || 1);
+const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
+
 function assertAdmin(req, res) {
   if (!req.user || !ADMIN_ROLES.includes(req.user.role)) {
     res.status(403).json({ success: false, message: 'Access denied. Admin credentials required.' });
@@ -90,13 +93,15 @@ exports.getMetrics = asyncHandler(async (req, res) => {
 
 exports.getOrders = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
-  const { status, search, page = 1, limit = 25 } = req.query;
+  const { status, search } = req.query;
+  const page = clampPage(req.query.page);
+  const limit = clampLimit(req.query.limit, 25, 100);
   const filter = {};
   if (status) filter.status = status.toLowerCase();
   if (search) filter.$or = [{ orderNumber: { $regex: search, $options: 'i' } }, { restaurantName: { $regex: search, $options: 'i' } }];
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   const [orders, total] = await Promise.all([
-    Order.find(filter).populate('user', 'name phone email').sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    Order.find(filter).populate('user', 'name phone email').sort({ createdAt: -1 }).skip(skip).limit(limit),
     Order.countDocuments(filter),
   ]);
   res.json({ success: true, data: { orders: orders.map(o => ({
@@ -104,7 +109,7 @@ exports.getOrders = asyncHandler(async (req, res) => {
     customerPhone: o.user?.phone ?? '', restaurantName: o.restaurantName,
     totalAmount: o.total, status: o.status.toUpperCase(),
     paymentMethod: o.paymentMethod, riderName: null, createdAt: o.createdAt,
-  })), total, page: Number(page), pages: Math.ceil(total / Number(limit)) }});
+  })), total, page: Number(page), pages: Math.ceil(total / limit) }});
 });
 
 exports.updateOrderStatus = asyncHandler(async (req, res) => {
@@ -188,12 +193,14 @@ exports.getPeakHours = asyncHandler(async (req, res) => {
 
 exports.getCustomers = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
-  const { search, page = 1, limit = 20 } = req.query;
+  const { search } = req.query;
+  const page = clampPage(req.query.page);
+  const limit = clampLimit(req.query.limit, 20, 100);
   const filter = { role: 'user', isActive: true };
   if (search) filter.$or = [{ name: { $regex: search, $options: 'i' } }, { phone: { $regex: search, $options: 'i' } }, { email: { $regex: search, $options: 'i' } }];
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   const [users, total] = await Promise.all([
-    User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
     User.countDocuments(filter),
   ]);
   const orderAgg = await Order.aggregate([
@@ -204,7 +211,7 @@ exports.getCustomers = asyncHandler(async (req, res) => {
   res.json({ success: true, data: { customers: users.map(u => {
     const s = orderMap.get(String(u._id)) ?? { totalOrders: 0, totalSpent: 0 };
     return { id: u._id, name: u.name, phone: u.phone, email: u.email ?? '', totalOrders: s.totalOrders, totalSpent: s.totalSpent, createdAt: u.createdAt };
-  }), total, page: Number(page), pages: Math.ceil(total / Number(limit)) }});
+  }), total, page: Number(page), pages: Math.ceil(total / limit) }});
 });
 
 exports.getRevenueAnalytics = asyncHandler(async (req, res) => {
@@ -239,7 +246,9 @@ exports.getTopRestaurants = asyncHandler(async (req, res) => {
 
 exports.getVendors = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
-  const { search, status, page = 1, limit = 20 } = req.query;
+  const { search, status } = req.query;
+  const page = clampPage(req.query.page);
+  const limit = clampLimit(req.query.limit, 20, 100);
   const filter = { role: 'vendor' };
   if (status === 'active') filter.isActive = true;
   if (status === 'inactive') filter.isActive = false;
@@ -250,13 +259,13 @@ exports.getVendors = asyncHandler(async (req, res) => {
       { phone: { $regex: search, $options: 'i' } },
     ];
   }
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   const [vendors, total] = await Promise.all([
     User.find(filter)
       .populate('restaurantId', 'name image isActive isOpen')
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Number(limit)),
+      .limit(limit),
     User.countDocuments(filter),
   ]);
   res.json({
@@ -282,7 +291,7 @@ exports.getVendors = asyncHandler(async (req, res) => {
       })),
       total,
       page: Number(page),
-      pages: Math.ceil(total / Number(limit)),
+      pages: Math.ceil(total / limit),
     },
   });
 });
@@ -463,7 +472,9 @@ exports.createRider = asyncHandler(async (req, res) => {
 
 exports.getRiders = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
-  const { search, status, online, zone, page = 1, limit = 20 } = req.query;
+  const { search, status, online, zone } = req.query;
+  const page = clampPage(req.query.page);
+  const limit = clampLimit(req.query.limit, 20, 100);
   const filter = { role: 'rider' };
   if (status === 'active') filter.isActive = true;
   if (status === 'inactive') filter.isActive = false;
@@ -478,14 +489,14 @@ exports.getRiders = asyncHandler(async (req, res) => {
       { 'riderDetails.vehicleNumber': { $regex: search, $options: 'i' } },
     ];
   }
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   const [riders, total] = await Promise.all([
-    User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    User.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
     User.countDocuments(filter),
   ]);
   res.json({
     success: true,
-    data: { riders, total, page: Number(page), pages: Math.ceil(total / Number(limit)) },
+    data: { riders, total, page: Number(page), pages: Math.ceil(total / limit) },
   });
 });
 

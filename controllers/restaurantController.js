@@ -3,6 +3,10 @@ const MenuItem   = require('../models/Menu');
 const asyncHandler = require('express-async-handler');
 const Review = require('../models/Review');
 
+const clampPage = (value, fallback = 1) => Math.max(1, Number(value) || fallback);
+const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 /**
  * Restaurant-level authorization for Availability + Permissions feature:
  *  - CEO (admin) can manage every restaurant.
@@ -16,7 +20,9 @@ const canManageRestaurant = (user, restaurant) => {
 };
 
 const getRestaurants = asyncHandler(async (req, res) => {
-  const { veg, category, search, sort = 'recommended', page = 1, limit = 20 } = req.query;
+  const { veg, category, search, sort = 'recommended' } = req.query;
+  const page = clampPage(req.query.page);
+  const limit = clampLimit(req.query.limit, 20, 100);
   
   // 🔧 FIX (Restaurant Availability): only exclude soft-deleted restaurants here.
   // Closed restaurants (isOpen: false) must still come back — the customer
@@ -37,7 +43,7 @@ const getRestaurants = asyncHandler(async (req, res) => {
     distance: { distanceMeters: 1, rating: -1 }
   };
   const sortOpt = sortMap[sort] || { rating: -1 };
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   
   let restaurants;
   let total;
@@ -52,19 +58,19 @@ const getRestaurants = asyncHandler(async (req, res) => {
         { $addFields: { __homeOrder: { $ifNull: ['$homeOrder', 999999] } } },
         { $sort: { __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 } },
         { $skip: skip },
-        { $limit: Number(limit) },
+        { $limit: limit },
         { $project: { __homeOrder: 0 } },
       ]),
       Restaurant.countDocuments(filter),
     ]);
   } else {
     [restaurants, total] = await Promise.all([
-      Restaurant.find(filter).sort(sortOpt).skip(skip).limit(Number(limit)),
+      Restaurant.find(filter).sort(sortOpt).skip(skip).limit(limit),
       Restaurant.countDocuments(filter),
     ]);
   }
 
-  res.json({ success: true, page: Number(page), pages: Math.ceil(total / Number(limit)), total, data: restaurants });
+  res.json({ success: true, page: Number(page), pages: Math.ceil(total / limit), total, data: restaurants });
 });
 
 const getRestaurantById = asyncHandler(async (req, res) => {
@@ -131,9 +137,10 @@ const getUnder99Items = asyncHandler(async (req, res) => {
 });
 
 const searchRestaurants = asyncHandler(async (req, res) => {
-  const { q } = req.query;
-  if (!q || q.trim().length < 2) return res.status(400).json({ success: false, message: 'Query must be at least 2 characters' });
-  const regex = new RegExp(q, 'i');
+  const rawQ = String(req.query.q || '').trim();
+  if (rawQ.length < 2) return res.status(400).json({ success: false, message: 'Query must be at least 2 characters' });
+  if (rawQ.length > 80) return res.status(400).json({ success: false, message: 'Query is too long.' });
+  const regex = new RegExp(escapeRegex(rawQ), 'i');
   try {
     const [restaurants, menuItems] = await Promise.all([
       Restaurant.find({ isOpen: true, $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
@@ -222,27 +229,25 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   // Vendors can edit their own operational restaurant data, but must never
   // be able to change admin-controlled ranking/badge fields.
   const isPrivilegedAdmin = req.user.role === 'admin' || req.user.role === 'ceo';
-  const update = { ...req.body };
 
-  // Platform-wide policy: COD cannot be enabled by Admin, CEO, vendor, or a
-  // forged request. Existing restaurants are also forced off when updated.
+  // Admin may use the full restaurant editor. Vendor updates are deliberately
+  // allow-listed so adding a new schema field later cannot accidentally turn
+  // into a vendor privilege escalation.
+  const VENDOR_EDITABLE = [
+    'name', 'address', 'phone', 'contactNumber', 'image', 'images',
+    'cuisine', 'cuisineDisplay', 'description', 'estimatedDeliveryMin',
+    'availability', 'isOpen'
+  ];
+  const update = isPrivilegedAdmin
+    ? { ...req.body }
+    : Object.fromEntries(VENDOR_EDITABLE
+        .filter((field) => Object.prototype.hasOwnProperty.call(req.body, field))
+        .map((field) => [field, req.body[field]]));
+
+  // Platform-wide policy: COD cannot be enabled by any caller.
   update.codEnabled = false;
 
-  if (!isPrivilegedAdmin) {
-    delete update.owner;
-    delete update.isFeatured;
-    delete update.isBestSeller;
-    delete update.isNearFast;
-    delete update.homeOrder;
-    delete update.displayPriority;
-    // Pricing policy is admin-controlled; vendors cannot change the customer
-    // minimum-order or free-delivery rules.
-    delete update.minOrder;
-    delete update.freeDeliveryAbove;
-    delete update.freeDeliveryEnabled;
-    // FSSAI reference is Admin-controlled; vendors cannot change it.
-    delete update.fssaiLicenseNumber;
-  } else {
+  if (isPrivilegedAdmin) {
     // Explicitly persist both boolean flags, including false. This avoids
     // truthy/string handling issues and guarantees an unchecked admin box
     // can turn the badge off again.
