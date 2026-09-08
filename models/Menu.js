@@ -89,3 +89,8 @@ module.exports = mongoose.model('Menu', menuItemSchema);
 
 // --- DATABASE INDEXES FOR PERFORMANCE ---
 menuItemSchema.index({ restaurantId: 1, inStock: 1 }); // Corrected schema and field names!
+// Phase 2 (Performance at Scale): backs getUnder99Items (the ₹99 store / deals
+// browse), which filters price + inStock ACROSS all restaurants and sorts by
+// price. inStock leads (equality) so Mongo seeks straight to in-stock items,
+// then walks price in order — replacing a full-collection scan + in-memory sort.
+menuItemSchema.index({ inStock: 1, price: 1 });
