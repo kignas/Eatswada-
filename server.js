@@ -29,6 +29,7 @@ const riderRoutes      = require('./routes/riderRoutes');
 const adminRiderRoutes = require('./routes/adminRiderRoutes');
 const platformRatingRoutes = require('./routes/platformRatingRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
+const firebaseAuthRoutes = require('./routes/firebaseAuthRoutes');
 const { handleWebhook } = require('./controllers/paymentController');
 
 // ── Connect to MongoDB ────────────────────────────────────────
@@ -168,6 +169,7 @@ app.use('/api/riders',      riderRoutes);
 app.use('/api/admin/riders', adminRiderRoutes);
 app.use('/api/ratings',      platformRatingRoutes);
 app.use('/api/payments',      paymentRoutes);
+app.use('/api/auth',          firebaseAuthRoutes);
 
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);

@@ -38,7 +38,8 @@
     "streamifier": "^0.1.1",
     "axios": "^1.18.0",
     "twilio": "^5.4.0",
-    "razorpay": "^2.9.6"
+    "razorpay": "^2.9.6",
+    "firebase-admin": "^13.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
