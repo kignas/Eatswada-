@@ -12,7 +12,7 @@ const userSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
-      required: [true, 'Phone number is required'],
+      required: false,
       unique: true,
       trim: true,
       match: [/^\+?[1-9]\d{9,14}$/, 'Please enter a valid phone number'],
@@ -24,6 +24,16 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
       match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email'],
+    },
+    // Firebase/Google subject identifier. Sparse + unique keeps legacy/non-Google
+    // staff accounts unaffected while preventing one Google account from being
+    // attached to multiple Eatswada users.
+    googleUid: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      select: false,
     },
     password: {
       type: String,
