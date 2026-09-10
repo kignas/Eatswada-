@@ -8,6 +8,7 @@ const asyncHandler  = require('express-async-handler');
 const OTP_TTL_MS = 5 * 60 * 1000;
 const normalizePhone = (phone) => String(phone || '').trim();
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+const isValidEmail = (email) => /^\S+@\S+\.\S+$/.test(email);
 
 const issueOTP = async (user, purpose) => {
   if (user.otp?.lockedUntil && user.otp.lockedUntil > new Date()) {
@@ -113,17 +114,78 @@ const register = asyncHandler(async (req, res) => {
 });
 
 const login = asyncHandler(async (req, res) => {
-  const phone = normalizePhone(req.body.phone);
+  const identifier = String(req.body.identifier ?? req.body.email ?? req.body.phone ?? '').trim();
   const password = String(req.body.password || '');
-  const user = await User.findOne({ phone }).select('+password');
+  if (!identifier || !password) {
+    return res.status(400).json({ success: false, message: 'Email or mobile number and password are required.' });
+  }
+
+  const normalized = identifier.toLowerCase();
+  const query = normalized.includes('@')
+    ? { email: normalizeEmail(identifier) }
+    : { phone: normalizePhone(identifier) };
+
+  const user = await User.findOne(query).select('+password +googleUid');
   if (!user || !user.password || !(await user.matchPassword(password))) {
-    return res.status(401).json({ success: false, message: 'Invalid phone or password.' });
+    return res.status(401).json({ success: false, message: 'Invalid email/mobile number or password.' });
   }
   if (!user.isActive) return res.status(403).json({ success:false, message:'Your account has been disabled.' });
-  if (!user.isPhoneVerified) return res.status(403).json({ success:false, message:'Please verify your mobile number with OTP first.' });
+
+  // Phone is a delivery/contact field in the new customer system. It is no
+  // longer an authentication factor, so SMS/OTP verification is not required.
   user.lastLogin = new Date();
   await user.save();
   res.json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role, user.tokenVersion) } });
+});
+
+const requestEmailPasswordReset = asyncHandler(async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const generic = 'If an account exists for this email, password reset instructions have been sent.';
+  if (!isValidEmail(email)) return res.json({ success: true, message: generic });
+
+  const user = await User.findOne({ email }).select('+passwordResetTokenHash +passwordResetExpiresAt');
+  if (!user || !user.isActive || !user.password) return res.json({ success: true, message: generic });
+
+  const resetToken = user.createPasswordResetToken();
+  await user.save();
+
+  try {
+    const { sendPasswordResetEmail } = require('../utils/sendPasswordResetEmail');
+    await sendPasswordResetEmail({ to: user.email, resetToken });
+  } catch (err) {
+    // Do not leave a valid reset token behind if delivery failed.
+    user.passwordResetTokenHash = undefined;
+    user.passwordResetExpiresAt = undefined;
+    await user.save();
+    throw err;
+  }
+
+  return res.json({ success: true, message: generic });
+});
+
+const resetPasswordByEmailToken = asyncHandler(async (req, res) => {
+  const resetToken = String(req.body.resetToken || '').trim();
+  const password = String(req.body.password || '');
+  if (!resetToken) return res.status(400).json({ success:false, message:'Password reset link is invalid or expired.' });
+  if (password.length < 8) return res.status(400).json({ success:false, message:'Password must be at least 8 characters.' });
+
+  const hash = crypto.createHash('sha256').update(resetToken).digest('hex');
+  const user = await User.findOne({
+    passwordResetTokenHash: hash,
+    passwordResetExpiresAt: { $gt: new Date() },
+  }).select('+password +passwordResetTokenHash +passwordResetExpiresAt');
+
+  if (!user || !user.isActive) {
+    return res.status(400).json({ success:false, message:'Password reset link is invalid or expired.' });
+  }
+
+  user.password = password;
+  user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
+  user.passwordResetTokenHash = undefined;
+  user.passwordResetExpiresAt = undefined;
+  await user.save();
+
+  return res.json({ success:true, message:'Password changed successfully. You can now log in.' });
 });
 
 const requestPasswordReset = asyncHandler(async (req, res) => {
@@ -290,6 +352,7 @@ const setDefaultAddress = asyncHandler(async (req, res) => {
 module.exports = {
   sendOTPHandler, verifyOTPHandler, register, login,
   requestPasswordReset, verifyPasswordResetOTP, resetPassword,
+  requestEmailPasswordReset, resetPasswordByEmailToken,
   logout, getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 };
