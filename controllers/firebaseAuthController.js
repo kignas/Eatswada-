@@ -1,7 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const User = require('../models/User');
 const generateToken = require('../utils/generateToken');
-const { verifyFirebaseIdToken } = require('../utils/firebaseAdmin');
+const { verifyFirebaseIdToken } = require('../models/firebaseAdmin');
 
 const normalizeEmail = v => typeof v === 'string' ? v.trim().toLowerCase() : '';
 const normalizePhone = v => typeof v === 'string' ? v.trim() : '';
