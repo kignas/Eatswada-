@@ -141,22 +141,34 @@ const login = asyncHandler(async (req, res) => {
 const requestEmailPasswordReset = asyncHandler(async (req, res) => {
   const email = normalizeEmail(req.body.email);
   const generic = 'If an account exists for this email, password reset instructions have been sent.';
-  if (!isValidEmail(email)) return res.json({ success: true, message: generic });
+  console.log(`[PASSWORD-RESET] Request received method=${req.method} path=${req.originalUrl} email=${email ? 'provided' : 'missing'}`);
+  if (!isValidEmail(email)) {
+    console.log('[PASSWORD-RESET] Invalid email format; returning generic response.');
+    return res.json({ success: true, message: generic });
+  }
 
   const user = await User.findOne({ email }).select('+passwordResetTokenHash +passwordResetExpiresAt');
-  if (!user || !user.isActive || !user.password) return res.json({ success: true, message: generic });
+  if (!user || !user.isActive || !user.password) {
+    console.log('[PASSWORD-RESET] Account eligible for reset: no');
+    return res.json({ success: true, message: generic });
+  }
 
+  console.log('[PASSWORD-RESET] Account eligible for reset: yes');
   const resetToken = user.createPasswordResetToken();
   await user.save();
+  console.log('[PASSWORD-RESET] Reset token created and stored.');
 
   try {
     const { sendPasswordResetEmail } = require('../utils/sendPasswordResetEmail');
+    console.log('[PASSWORD-RESET] Calling SMTP email service...');
     await sendPasswordResetEmail({ to: user.email, resetToken });
+    console.log('[PASSWORD-RESET] SMTP email service completed successfully.');
   } catch (err) {
     // Do not leave a valid reset token behind if delivery failed.
     user.passwordResetTokenHash = undefined;
     user.passwordResetExpiresAt = undefined;
     await user.save();
+    console.error(`[PASSWORD-RESET] Email delivery failed: ${err?.message || err}`);
     throw err;
   }
 
