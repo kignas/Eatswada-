@@ -137,6 +137,15 @@ if (process.env.NODE_ENV === 'development') {
   });
 }
 
+// Endpoint-specific password-reset diagnostics. Never logs passwords, tokens, or SMTP secrets.
+app.use('/api/users/forgot-password/email', (req, res, next) => {
+  console.log(`[PASSWORD-RESET-HTTP] request ${req.method} ${req.originalUrl} origin=${req.get('origin') || 'none'} email=${req.body?.email ? 'provided' : 'missing'}`);
+  res.on('finish', () => {
+    console.log(`[PASSWORD-RESET-HTTP] response status=${res.statusCode} success=${res.statusCode >= 200 && res.statusCode < 300}`);
+  });
+  next();
+});
+
 // ── Health & Welcome Routes ───────────────────────────────────
 app.get('/health', (req, res) => {
   const ready = mongoose.connection.readyState === 1;
