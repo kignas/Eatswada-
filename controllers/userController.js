@@ -147,7 +147,7 @@ const requestEmailPasswordReset = asyncHandler(async (req, res) => {
     return res.json({ success: true, message: generic });
   }
 
-  const user = await User.findOne({ email }).select('+passwordResetTokenHash +passwordResetExpiresAt');
+  const user = await User.findOne({ email }).select('+password +passwordResetTokenHash +passwordResetExpiresAt');
   if (!user || !user.isActive || !user.password) {
     console.log('[PASSWORD-RESET] Account eligible for reset: no');
     return res.json({ success: true, message: generic });
