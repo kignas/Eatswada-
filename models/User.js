@@ -245,6 +245,7 @@ userSchema.methods.toJSON = function () {
   delete obj.otp;
   delete obj.passwordResetTokenHash;
   delete obj.passwordResetExpiresAt;
+  delete obj.googleUid;
   return obj;
 };
 
