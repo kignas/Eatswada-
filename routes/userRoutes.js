@@ -6,7 +6,7 @@ const router   = express.Router();
 const {
   sendOTPHandler, verifyOTPHandler, register, login, logout,
   requestPasswordReset, verifyPasswordResetOTP, resetPassword,
-  getProfile, updateProfile,
+  getProfile, updateProfile, requestEmailPasswordReset, resetPasswordByEmailToken,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 } = require('../controllers/userController');
 
@@ -55,6 +55,24 @@ router.post('/verify-otp',
   validate, verifyOTPHandler
 );
 
+// New customer password recovery: email reset link. Legacy phone/OTP reset
+// remains below during the authentication migration so existing functionality
+// is not broken until the frontend is switched over.
+router.post('/forgot-password/email',
+  loginLimiter,
+  [body('email').isEmail().withMessage('Valid email is required')],
+  validate, requestEmailPasswordReset
+);
+
+router.post('/reset-password',
+  loginLimiter,
+  [
+    body('resetToken').isString().isLength({ min: 40, max: 128 }).withMessage('Valid reset token is required'),
+    body('password').isString().isLength({ min: 8, max: 128 }).withMessage('Password must be 8-128 characters'),
+  ],
+  validate, resetPasswordByEmailToken
+);
+
 router.post('/forgot-password',
   otpLimiter,
   [body('phone').notEmpty().withMessage('Phone is required')],
@@ -85,8 +103,10 @@ router.post('/register',
 router.post('/login',
   loginLimiter,
   [
-    body('phone').notEmpty().withMessage('Phone is required'),
-    body('password').notEmpty().withMessage('Password is required'),
+    body('identifier').optional().isString().isLength({ min: 3, max: 254 }).withMessage('Invalid email or mobile number'),
+    body('email').optional().isString().isLength({ min: 3, max: 254 }).withMessage('Invalid email'),
+    body('phone').optional().isString().isLength({ min: 10, max: 16 }).withMessage('Invalid phone number'),
+    body('password').isString().isLength({ min: 1, max: 128 }).withMessage('Password is required'),
   ],
   validate, login
 );
