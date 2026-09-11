@@ -6,7 +6,8 @@ const router   = express.Router();
 const {
   sendOTPHandler, verifyOTPHandler, register, login, logout,
   requestPasswordReset, verifyPasswordResetOTP, resetPassword,
-  getProfile, updateProfile, requestEmailPasswordReset, resetPasswordByEmailToken,
+  getProfile, updateProfile, requestEmailPasswordReset, verifyEmailPasswordResetOTP,
+  resetPasswordByEmailOTP,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 } = require('../controllers/userController');
 
@@ -55,22 +56,30 @@ router.post('/verify-otp',
   validate, verifyOTPHandler
 );
 
-// New customer password recovery: email reset link. Legacy phone/OTP reset
-// remains below during the authentication migration so existing functionality
-// is not broken until the frontend is switched over.
+// Customer password recovery: email OTP. No reset link is emailed.
 router.post('/forgot-password/email',
-  loginLimiter,
+  otpLimiter,
   [body('email').isEmail().withMessage('Valid email is required')],
   validate, requestEmailPasswordReset
 );
 
-router.post('/reset-password',
+router.post('/forgot-password/email/verify',
   loginLimiter,
   [
-    body('resetToken').isString().isLength({ min: 40, max: 128 }).withMessage('Valid reset token is required'),
+    body('email').isEmail().withMessage('Valid email is required'),
+    body('otp').customSanitizer((value) => String(value || '').replace(/\D/g, '').slice(0, 6)),
+    body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits'),
+  ],
+  validate, verifyEmailPasswordResetOTP
+);
+
+router.post('/forgot-password/email/reset',
+  loginLimiter,
+  [
+    body('resetToken').isString().isLength({ min: 40, max: 128 }).withMessage('Valid reset session is required'),
     body('password').isString().isLength({ min: 8, max: 128 }).withMessage('Password must be 8-128 characters'),
   ],
-  validate, resetPasswordByEmailToken
+  validate, resetPasswordByEmailOTP
 );
 
 router.post('/forgot-password',
