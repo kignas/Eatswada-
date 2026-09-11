@@ -140,55 +140,153 @@ const login = asyncHandler(async (req, res) => {
 
 const requestEmailPasswordReset = asyncHandler(async (req, res) => {
   const email = normalizeEmail(req.body.email);
-  const generic = 'If an account exists for this email, password reset instructions have been sent.';
-  console.log(`[PASSWORD-RESET] Request received method=${req.method} path=${req.originalUrl} email=${email ? 'provided' : 'missing'}`);
+  const generic = 'If an account exists for this email, a verification code has been sent.';
+
+  console.log(
+    `[PASSWORD-RESET-OTP] Request received method=${req.method} ` +
+    `path=${req.originalUrl} email=${email ? 'provided' : 'missing'}`
+  );
+
   if (!isValidEmail(email)) {
-    console.log('[PASSWORD-RESET] Invalid email format; returning generic response.');
     return res.json({ success: true, message: generic });
   }
 
-  const user = await User.findOne({ email }).select('+password +passwordResetTokenHash +passwordResetExpiresAt');
+  const user = await User.findOne({ email }).select(
+    '+password +passwordResetOtpHash +passwordResetOtpExpiresAt ' +
+    '+passwordResetOtpAttempts +passwordResetOtpLockedUntil +passwordResetOtpLastSentAt'
+  );
+
   if (!user || !user.isActive || !user.password) {
-    console.log('[PASSWORD-RESET] Account eligible for reset: no');
     return res.json({ success: true, message: generic });
   }
 
-  console.log('[PASSWORD-RESET] Account eligible for reset: yes');
-  const resetToken = user.createPasswordResetToken();
+  if (
+    user.passwordResetOtpLockedUntil &&
+    user.passwordResetOtpLockedUntil > new Date()
+  ) {
+    return res.status(429).json({
+      success: false,
+      message: 'Too many incorrect attempts. Please wait before requesting another OTP.',
+    });
+  }
+
+  if (user.passwordResetOtpRequestedTooRecently()) {
+    const retryAfter = Math.max(
+      1,
+      Math.ceil(
+        (60_000 - (Date.now() - user.passwordResetOtpLastSentAt.getTime())) / 1000
+      )
+    );
+    return res.status(429).json({
+      success: false,
+      message: `Please wait ${retryAfter} seconds before requesting another OTP.`,
+    });
+  }
+
+  const otp = user.createPasswordResetOtp();
   await user.save();
-  console.log('[PASSWORD-RESET] Reset token created and stored.');
 
   try {
-    const { sendPasswordResetEmail } = require('../utils/sendPasswordResetEmail');
-    console.log('[PASSWORD-RESET] Calling SMTP email service...');
-    await sendPasswordResetEmail({ to: user.email, resetToken });
-    console.log('[PASSWORD-RESET] SMTP email service completed successfully.');
+    const { sendPasswordResetOTP } = require('../utils/sendPasswordResetEmail');
+    console.log('[PASSWORD-RESET-OTP] Calling Brevo email service...');
+    await sendPasswordResetOTP({ to: user.email, otp });
+    console.log('[PASSWORD-RESET-OTP] Brevo email service completed successfully.');
   } catch (err) {
-    // Do not leave a valid reset token behind if delivery failed.
-    user.passwordResetTokenHash = undefined;
-    user.passwordResetExpiresAt = undefined;
+    // Do not leave a usable OTP behind when email delivery fails.
+    user.passwordResetOtpHash = undefined;
+    user.passwordResetOtpExpiresAt = undefined;
+    user.passwordResetOtpAttempts = 0;
+    user.passwordResetOtpLastSentAt = undefined;
     await user.save();
-    console.error(`[PASSWORD-RESET] Email delivery failed: ${err?.message || err}`);
+
+    console.error(`[PASSWORD-RESET-OTP] Email delivery failed: ${err?.message || err}`);
     throw err;
   }
 
   return res.json({ success: true, message: generic });
 });
 
-const resetPasswordByEmailToken = asyncHandler(async (req, res) => {
+const verifyEmailPasswordResetOTP = asyncHandler(async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  const otp = String(req.body.otp || '').replace(/\D/g, '').slice(0, 6);
+
+  if (!isValidEmail(email) || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid or expired OTP.',
+    });
+  }
+
+  const user = await User.findOne({ email }).select(
+    '+passwordResetOtpHash +passwordResetOtpExpiresAt ' +
+    '+passwordResetOtpAttempts +passwordResetOtpLockedUntil +passwordResetOtpLastSentAt'
+  );
+
+  if (!user || !user.isActive) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid or expired OTP.',
+    });
+  }
+
+  const result = user.checkPasswordResetOtp(otp);
+
+  if (!result.ok) {
+    await user.save();
+
+    return res.status(
+      result.reason === 'locked' || result.reason === 'locked_now' ? 429 : 400
+    ).json({
+      success: false,
+      message:
+        result.reason === 'locked' || result.reason === 'locked_now'
+          ? 'Too many incorrect attempts. Please request a new OTP later.'
+          : 'Invalid or expired OTP.',
+    });
+  }
+
+  // After OTP verification, issue a short-lived reset session token.
+  // It is used only in the next API call; no URL containing this token is emailed.
+  const resetToken = user.createPasswordResetToken();
+  await user.save();
+
+  return res.json({
+    success: true,
+    message: 'OTP verified successfully.',
+    data: { resetToken },
+  });
+});
+
+const resetPasswordByEmailOTP = asyncHandler(async (req, res) => {
   const resetToken = String(req.body.resetToken || '').trim();
   const password = String(req.body.password || '');
-  if (!resetToken) return res.status(400).json({ success:false, message:'Password reset link is invalid or expired.' });
-  if (password.length < 8) return res.status(400).json({ success:false, message:'Password must be at least 8 characters.' });
+
+  if (!resetToken) {
+    return res.status(400).json({
+      success: false,
+      message: 'Password reset session is invalid or expired.',
+    });
+  }
+
+  if (password.length < 8 || password.length > 128) {
+    return res.status(400).json({
+      success: false,
+      message: 'Password must be 8-128 characters.',
+    });
+  }
 
   const hash = crypto.createHash('sha256').update(resetToken).digest('hex');
+
   const user = await User.findOne({
     passwordResetTokenHash: hash,
     passwordResetExpiresAt: { $gt: new Date() },
   }).select('+password +passwordResetTokenHash +passwordResetExpiresAt');
 
   if (!user || !user.isActive) {
-    return res.status(400).json({ success:false, message:'Password reset link is invalid or expired.' });
+    return res.status(400).json({
+      success: false,
+      message: 'Password reset session is invalid or expired.',
+    });
   }
 
   user.password = password;
@@ -197,53 +295,10 @@ const resetPasswordByEmailToken = asyncHandler(async (req, res) => {
   user.passwordResetExpiresAt = undefined;
   await user.save();
 
-  return res.json({ success:true, message:'Password changed successfully. You can now log in.' });
-});
-
-const requestPasswordReset = asyncHandler(async (req, res) => {
-  const phone = normalizePhone(req.body.phone);
-  const generic = 'If an account exists for this number, we sent a verification code.';
-  if (!/^\+?[6-9]\d{9,14}$/.test(phone)) return res.json({ success:true, message:generic });
-  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
-  if (!user || !user.isActive || !user.password) return res.json({ success:true, message:generic });
-  await issueOTP(user, 'password_reset');
-  res.json({ success:true, message:generic });
-});
-
-const verifyPasswordResetOTP = asyncHandler(async (req, res) => {
-  const phone = normalizePhone(req.body.phone);
-  const otp = String(req.body.otp || '').trim();
-  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
-  if (!user || !user.isActive) {
-    return res.status(400).json({ success:false, message:'Invalid or expired OTP.' });
-  }
-  const otpResult = user.checkOTP(otp, 'password_reset');
-  if (!otpResult.ok) {
-    await user.save();
-    return res.status(otpResult.reason === 'locked' || otpResult.reason === 'locked_now' ? 429 : 400).json({ success:false, message:'Invalid or expired OTP.' });
-  }
-  const resetToken = user.createPasswordResetToken();
-  await user.save();
-  res.json({ success:true, data:{ resetToken } });
-});
-
-const resetPassword = asyncHandler(async (req, res) => {
-  const phone = normalizePhone(req.body.phone);
-  const resetToken = String(req.body.resetToken || '');
-  const password = String(req.body.password || '');
-  if (password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
-  if (!resetToken) return res.status(400).json({ success:false, message:'Password reset session expired. Please request a new OTP.' });
-  const hash = crypto.createHash('sha256').update(resetToken).digest('hex');
-  const user = await User.findOne({ phone }).select('+passwordResetTokenHash +passwordResetExpiresAt');
-  if (!user || !user.passwordResetTokenHash || user.passwordResetTokenHash !== hash || !user.passwordResetExpiresAt || user.passwordResetExpiresAt < new Date()) {
-    return res.status(400).json({ success:false, message:'Password reset session expired. Please request a new OTP.' });
-  }
-  user.password = password;
-  user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
-  user.passwordResetTokenHash = undefined;
-  user.passwordResetExpiresAt = undefined;
-  await user.save();
-  res.json({ success:true, message:'Password changed successfully. You can now log in.' });
+  return res.json({
+    success: true,
+    message: 'Password changed successfully. You can now log in.',
+  });
 });
 
 const logout = asyncHandler(async (req, res) => {
@@ -364,7 +419,7 @@ const setDefaultAddress = asyncHandler(async (req, res) => {
 module.exports = {
   sendOTPHandler, verifyOTPHandler, register, login,
   requestPasswordReset, verifyPasswordResetOTP, resetPassword,
-  requestEmailPasswordReset, resetPasswordByEmailToken,
+  requestEmailPasswordReset, verifyEmailPasswordResetOTP, resetPasswordByEmailOTP,
   logout, getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
 };
