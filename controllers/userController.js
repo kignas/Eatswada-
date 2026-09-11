@@ -418,7 +418,6 @@ const setDefaultAddress = asyncHandler(async (req, res) => {
 
 module.exports = {
   sendOTPHandler, verifyOTPHandler, register, login,
-  requestPasswordReset, verifyPasswordResetOTP, resetPassword,
   requestEmailPasswordReset, verifyEmailPasswordResetOTP, resetPasswordByEmailOTP,
   logout, getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
