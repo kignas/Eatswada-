@@ -109,6 +109,15 @@ const userSchema = new mongoose.Schema(
     },
     passwordResetTokenHash: { type: String, select: false },
     passwordResetExpiresAt: { type: Date, select: false },
+
+    // Dedicated email password-reset OTP state. The OTP itself is never stored
+    // in plaintext; only a SHA-256 hash is persisted.
+    passwordResetOtpHash: { type: String, select: false },
+    passwordResetOtpExpiresAt: { type: Date, select: false },
+    passwordResetOtpAttempts: { type: Number, select: false, default: 0 },
+    passwordResetOtpLockedUntil: { type: Date, select: false },
+    passwordResetOtpLastSentAt: { type: Date, select: false },
+
     lastLogin: Date,
 
     // ── RIDER-SPECIFIC FIELDS ──────────────────────────────────
@@ -173,6 +182,81 @@ userSchema.methods.createPasswordResetToken = function () {
   this.passwordResetTokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
   this.passwordResetExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
   return rawToken;
+};
+
+/* ── Email password-reset OTP helpers ── */
+const PASSWORD_RESET_OTP_TTL_MS = 10 * 60 * 1000;
+const PASSWORD_RESET_OTP_MAX_ATTEMPTS = 5;
+const PASSWORD_RESET_OTP_LOCKOUT_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_OTP_RESEND_MS = 60 * 1000;
+
+userSchema.methods.createPasswordResetOtp = function () {
+  const otp = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  this.passwordResetOtpHash = crypto.createHash('sha256').update(otp).digest('hex');
+  this.passwordResetOtpExpiresAt = new Date(Date.now() + PASSWORD_RESET_OTP_TTL_MS);
+  this.passwordResetOtpAttempts = 0;
+  this.passwordResetOtpLockedUntil = undefined;
+  this.passwordResetOtpLastSentAt = new Date();
+  return otp;
+};
+
+userSchema.methods.passwordResetOtpRequestedTooRecently = function () {
+  return !!(
+    this.passwordResetOtpLastSentAt &&
+    Date.now() - this.passwordResetOtpLastSentAt.getTime() < PASSWORD_RESET_OTP_RESEND_MS
+  );
+};
+
+userSchema.methods.checkPasswordResetOtp = function (enteredOTP) {
+  const now = new Date();
+
+  if (this.passwordResetOtpLockedUntil && this.passwordResetOtpLockedUntil > now) {
+    return { ok: false, reason: 'locked' };
+  }
+
+  if (!this.passwordResetOtpHash || !this.passwordResetOtpExpiresAt) {
+    return { ok: false, reason: 'not_set' };
+  }
+
+  if (this.passwordResetOtpExpiresAt < now) {
+    return { ok: false, reason: 'expired' };
+  }
+
+  const enteredHash = crypto.createHash('sha256').update(String(enteredOTP)).digest('hex');
+  const a = Buffer.from(this.passwordResetOtpHash, 'hex');
+  const b = Buffer.from(enteredHash, 'hex');
+
+  if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+    this.passwordResetOtpHash = undefined;
+    this.passwordResetOtpExpiresAt = undefined;
+    this.passwordResetOtpAttempts = 0;
+    this.passwordResetOtpLockedUntil = undefined;
+    this.passwordResetOtpLastSentAt = undefined;
+    return { ok: true };
+  }
+
+  this.passwordResetOtpAttempts = (this.passwordResetOtpAttempts || 0) + 1;
+
+  if (this.passwordResetOtpAttempts >= PASSWORD_RESET_OTP_MAX_ATTEMPTS) {
+    this.passwordResetOtpHash = undefined;
+    this.passwordResetOtpExpiresAt = undefined;
+    this.passwordResetOtpLockedUntil =
+      new Date(Date.now() + PASSWORD_RESET_OTP_LOCKOUT_MS);
+    return { ok: false, reason: 'locked_now' };
+  }
+
+  return {
+    ok: false,
+    reason: 'incorrect',
+    attemptsRemaining: PASSWORD_RESET_OTP_MAX_ATTEMPTS - this.passwordResetOtpAttempts,
+  };
+};
+
+userSchema.statics.PASSWORD_RESET_OTP_LIMITS = {
+  TTL_MS: PASSWORD_RESET_OTP_TTL_MS,
+  MAX_ATTEMPTS: PASSWORD_RESET_OTP_MAX_ATTEMPTS,
+  LOCKOUT_MS: PASSWORD_RESET_OTP_LOCKOUT_MS,
+  RESEND_MS: PASSWORD_RESET_OTP_RESEND_MS,
 };
 
 /* ── OTP constants ── */
@@ -245,6 +329,11 @@ userSchema.methods.toJSON = function () {
   delete obj.otp;
   delete obj.passwordResetTokenHash;
   delete obj.passwordResetExpiresAt;
+  delete obj.passwordResetOtpHash;
+  delete obj.passwordResetOtpExpiresAt;
+  delete obj.passwordResetOtpAttempts;
+  delete obj.passwordResetOtpLockedUntil;
+  delete obj.passwordResetOtpLastSentAt;
   delete obj.googleUid;
   return obj;
 };
