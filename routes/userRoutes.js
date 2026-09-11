@@ -5,7 +5,6 @@ const router   = express.Router();
 
 const {
   sendOTPHandler, verifyOTPHandler, register, login, logout,
-  requestPasswordReset, verifyPasswordResetOTP, resetPassword,
   getProfile, updateProfile, requestEmailPasswordReset, verifyEmailPasswordResetOTP,
   resetPasswordByEmailOTP,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,
@@ -80,24 +79,6 @@ router.post('/forgot-password/email/reset',
     body('password').isString().isLength({ min: 8, max: 128 }).withMessage('Password must be 8-128 characters'),
   ],
   validate, resetPasswordByEmailOTP
-);
-
-router.post('/forgot-password',
-  otpLimiter,
-  [body('phone').notEmpty().withMessage('Phone is required')],
-  validate, requestPasswordReset
-);
-
-router.post('/forgot-password/verify',
-  loginLimiter,
-  [body('phone').notEmpty().withMessage('Phone is required'), body('otp').isLength({ min: 4, max: 4 }).withMessage('OTP must be 4 digits')],
-  validate, verifyPasswordResetOTP
-);
-
-router.post('/forgot-password/reset',
-  loginLimiter,
-  [body('phone').notEmpty().withMessage('Phone is required'), body('resetToken').notEmpty().withMessage('Reset session is required'), body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')],
-  validate, resetPassword
 );
 
 router.post('/register',
