@@ -15,7 +15,8 @@
     "test:deployment": "node tests/deployment-gate.js",
     "audit:deps": "npm audit --audit-level=high",
     "outdated:deps": "npm outdated",
-    "test:payment-security": "node tests/payment-security.js"
+    "test:payment-security": "node tests/payment-security.js",
+    "test:vendor-application": "node tests/vendor-application-phase-p01.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
