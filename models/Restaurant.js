@@ -252,6 +252,13 @@ const restaurantSchema = new mongoose.Schema(
         type: Boolean,
         default: true,
       },
+      // Live operational mode. 'busy' keeps the restaurant orderable while
+      // allowing the UI/ETA layer to communicate kitchen congestion.
+      status: {
+        type: String,
+        enum: ['open', 'closed_today', 'temporarily_closed', 'busy'],
+        default: 'open',
+      },
       // Future feature flag: when true, isOpen will eventually be computed
       // from opensAt/closesAt instead of being toggled manually. Not evaluated yet.
       autoHours: {

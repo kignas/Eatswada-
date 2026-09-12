@@ -68,6 +68,10 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // Optional granular admin permissions. Empty means legacy full-admin access,
+    // preserving all existing admin accounts. Once populated, middleware can
+    // enforce least-privilege actions without changing vendor/customer roles.
+    permissions: { type: [String], default: [] },
     isPhoneVerified: {
       type: Boolean,
       default: false,

@@ -132,6 +132,11 @@ const orderSchema = new mongoose.Schema(
     subtotal:    { type: Number, required: true },
     deliveryFee: { type: Number, default: 30, min: 0 },
     discount:    { type: Number, default: 0 },
+    coupon: {
+      code: { type: String, default: '' },
+      discount: { type: Number, default: 0, min: 0 },
+      couponId: { type: mongoose.Schema.Types.ObjectId, ref: 'Coupon', default: null },
+    },
 
     // ── PLATFORM COMMISSION SNAPSHOT ───────────────────────────────────
     // These values are frozen at order creation. They are deliberately kept
