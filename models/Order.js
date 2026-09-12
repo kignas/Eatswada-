@@ -133,6 +133,19 @@ const orderSchema = new mongoose.Schema(
     deliveryFee: { type: Number, default: 30, min: 0 },
     discount:    { type: Number, default: 0 },
 
+    // ── PLATFORM COMMISSION SNAPSHOT ───────────────────────────────────
+    // These values are frozen at order creation. They are deliberately kept
+    // on the order instead of being recomputed from Restaurant.commissionRate
+    // later, because an admin may change a restaurant's rate at any time.
+    // Delivery fee and rider tip are excluded from the commission base.
+    commission: {
+      rate: { type: Number, min: 0, max: 100, immutable: true, default: 15 },
+      baseAmount: { type: Number, min: 0, immutable: true, default: 0 },
+      amount: { type: Number, min: 0, immutable: true, default: 0 },
+      restaurantNetAmount: { type: Number, min: 0, immutable: true, default: 0 },
+      calculatedAt: { type: Date, immutable: true, default: Date.now },
+    },
+
     // Customer-provided order instructions and rider tip. These are persisted
     // on the real order so the vendor/rider apps can consume them directly.
     restaurantNote: {

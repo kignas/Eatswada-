@@ -84,6 +84,17 @@ const restaurantSchema = new mongoose.Schema(
       default: '',
     },
     approvedAt: { type: Date, default: null },
+
+    // Platform commission charged on the restaurant's commissionable food
+    // subtotal. This is a CURRENT configuration value; every new order takes
+    // its own immutable commission snapshot, so later rate changes never
+    // rewrite historical orders.
+    commissionRate: {
+      type: Number,
+      default: 15,
+      min: [0, 'Commission rate cannot be negative'],
+      max: [100, 'Commission rate cannot exceed 100%'],
+    },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 
     image: {
