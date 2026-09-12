@@ -30,6 +30,10 @@ const riderRoutes      = require('./routes/riderRoutes');
 const adminRiderRoutes = require('./routes/adminRiderRoutes');
 const platformRatingRoutes = require('./routes/platformRatingRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
+const settlementRoutes = require('./routes/settlementRoutes');
+const couponRoutes = require('./routes/couponRoutes');
+const platformRoutes = require('./routes/platformRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 const firebaseAuthRoutes = require('./routes/firebaseAuthRoutes');
 const { handleWebhook } = require('./controllers/paymentController');
 
@@ -180,6 +184,10 @@ app.use('/api/riders',      riderRoutes);
 app.use('/api/admin/riders', adminRiderRoutes);
 app.use('/api/ratings',      platformRatingRoutes);
 app.use('/api/payments',      paymentRoutes);
+app.use('/api/settlements',   settlementRoutes);
+app.use('/api/coupons',       couponRoutes);
+app.use('/api/platform',      platformRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use('/api/auth',          firebaseAuthRoutes);
 
 // ── Global Error Handlers ─────────────────────────────────────
