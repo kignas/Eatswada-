@@ -199,8 +199,13 @@ const requestEmailPasswordReset = asyncHandler(async (req, res) => {
     user.passwordResetOtpLastSentAt = undefined;
     await user.save();
 
+    // Keep provider/internal details server-side only. Never expose Brevo,
+    // API, IP-address, request, or stack details to the customer.
     console.error(`[PASSWORD-RESET-OTP] Email delivery failed: ${err?.message || err}`);
-    throw err;
+    return res.status(503).json({
+      success: false,
+      message: 'Unable to send the verification code right now. Please try again later.',
+    });
   }
 
   return res.json({ success: true, message: generic });
