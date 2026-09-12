@@ -30,7 +30,7 @@ const getRestaurants = asyncHandler(async (req, res) => {
   // closedReason, instead of hiding them. Filtering by isOpen at the query
   // level made that impossible since closed restaurants never reached the
   // frontend at all.
-  const filter = { isActive: true }; 
+  const filter = { isActive: true, approvalStatus: 'approved' }; 
   
   if (veg === 'true') filter.isVeg = true;
   if (category) filter.categories = { $in: [category] };
@@ -79,7 +79,7 @@ const getRestaurantById = asyncHandler(async (req, res) => {
   // able to render the "Closed / Opens Today 6:00 PM" state, so a closed
   // restaurant must still be fetchable. Only soft-deleted (isActive: false)
   // restaurants are excluded now.
-  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true });
+  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true, approvalStatus: 'approved' });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });
 });
@@ -116,7 +116,7 @@ const getUnder99Items = asyncHandler(async (req, res) => {
     // and `restaurantId` (not `restaurant`), so this endpoint always returned 0
     // items regardless of what was in the database.
     const items = await MenuItem.find({ price: { $lte: 149 }, inStock: true })
-      .populate({ path: 'restaurantId', match: { isOpen: true }, select: 'name image rating' })
+      .populate({ path: 'restaurantId', match: { isOpen: true, approvalStatus: 'approved' }, select: 'name image rating' })
       .sort({ price: 1 })
       .limit(50);
 
@@ -143,7 +143,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
   const regex = new RegExp(escapeRegex(rawQ), 'i');
   try {
     const [restaurants, menuItems] = await Promise.all([
-      Restaurant.find({ isOpen: true, $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
+      Restaurant.find({ isOpen: true, approvalStatus: 'approved', $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
       // 🔧 FIX: schema field is `inStock`, not `isAvailable` — same bug as above,
       // meant menu-item search results were always empty.
       MenuItem.find({ inStock: true, name: regex }).limit(20),
@@ -155,7 +155,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
 });
 
 const getCategories = asyncHandler(async (req, res) => {
-  const cats = await Restaurant.distinct('categories', { isOpen: true });
+  const cats = await Restaurant.distinct('categories', { isOpen: true, approvalStatus: 'approved' });
   res.json({ success: true, data: cats });
 });
 
@@ -174,7 +174,7 @@ const normalizeRestaurantImages = (body) => {
 
 
 const getRestaurantReviews = asyncHandler(async (req, res) => {
-  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true }).select('_id name rating ratingCount reviewCount');
+  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true, approvalStatus: 'approved' }).select('_id name rating ratingCount reviewCount');
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
 
   const page = Math.max(1, Number(req.query.page) || 1);

@@ -52,6 +52,13 @@ exports.vendorLogin = asyncHandler(async (req, res) => {
     });
   }
 
+  if (restaurant.approvalStatus !== 'approved') {
+    return res.status(403).json({
+      success: false,
+      message: 'Vendor account is not approved for restaurant operations yet.'
+    });
+  }
+
   res.json({
     success: true,
     token: generateToken(user._id, user.role, user.tokenVersion),

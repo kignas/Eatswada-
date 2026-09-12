@@ -151,7 +151,7 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
     phone: r.owner?.phone ?? '', address: r.address ?? '',
     cuisine: r.cuisineDisplay || (r.cuisine || []).join(', '),
     rating: r.rating, ratingCount: r.ratingCount, reviewCount: r.reviewCount || 0, displayPriority: r.displayPriority || 0, homeOrder: r.homeOrder ?? 999999, isFeatured: !!r.isFeatured, isBestSeller: !!r.isBestSeller, isNearFast: !!r.isNearFast, avgPrepTime: r.estimatedDeliveryMin ?? 20,
-    isOpen: r.isOpen, isActive: r.isActive, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
+    isOpen: r.isOpen, isActive: r.isActive, approvalStatus: r.approvalStatus, rejectionReason: r.rejectionReason, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
   }))});
 });
 
@@ -371,7 +371,7 @@ exports.toggleVendorStatus = asyncHandler(async (req, res) => {
   // Deactivating the vendor's login should also take their restaurant off
   // the live menu — it can no longer be managed if nobody can log in to it.
   if (!vendor.isActive && vendor.restaurantId) {
-    await Restaurant.findByIdAndUpdate(vendor.restaurantId, { isOpen: false });
+    await Restaurant.findByIdAndUpdate(vendor.restaurantId, { $set: { isOpen: false, 'availability.isOpen': false, 'availability.closedReason': 'temporarily_closed' } });
   }
 
   res.json({
