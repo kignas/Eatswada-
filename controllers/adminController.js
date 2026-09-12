@@ -108,7 +108,9 @@ exports.getOrders = asyncHandler(async (req, res) => {
     id: o._id, orderNumber: o.orderNumber, customerName: o.user?.name ?? 'Unknown',
     customerPhone: o.user?.phone ?? '', restaurantName: o.restaurantName,
     totalAmount: o.total, status: o.status.toUpperCase(),
-    paymentMethod: o.paymentMethod, riderName: null, createdAt: o.createdAt,
+    paymentMethod: o.paymentMethod,
+    commission: o.commission || { rate: 15, baseAmount: o.subtotal || 0, amount: 0, restaurantNetAmount: o.subtotal || 0 },
+    riderName: null, createdAt: o.createdAt,
   })), total, page: Number(page), pages: Math.ceil(total / limit) }});
 });
 
@@ -136,6 +138,53 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order });
 });
 
+exports.getRestaurantCommission = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const restaurant = await Restaurant.findById(req.params.id).select('_id name commissionRate isActive approvalStatus');
+  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
+
+  res.json({
+    success: true,
+    data: {
+      restaurantId: restaurant._id,
+      restaurantName: restaurant.name,
+      commissionRate: Number.isFinite(Number(restaurant.commissionRate)) ? Number(restaurant.commissionRate) : 15,
+      isActive: restaurant.isActive,
+      approvalStatus: restaurant.approvalStatus,
+    },
+  });
+});
+
+exports.updateRestaurantCommission = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+
+  const rawRate = req.body?.commissionRate;
+  const rate = Number(rawRate);
+  if (rawRate === '' || rawRate === null || rawRate === undefined || !Number.isFinite(rate) || rate < 0 || rate > 100) {
+    return res.status(400).json({
+      success: false,
+      message: 'commissionRate must be a number between 0 and 100.',
+    });
+  }
+
+  const normalizedRate = Math.round(rate * 100) / 100;
+  const restaurant = await Restaurant.findById(req.params.id);
+  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
+
+  restaurant.commissionRate = normalizedRate;
+  await restaurant.save();
+
+  res.json({
+    success: true,
+    message: 'Restaurant commission rate updated. Existing orders keep their original commission snapshots.',
+    data: {
+      restaurantId: restaurant._id,
+      restaurantName: restaurant.name,
+      commissionRate: restaurant.commissionRate,
+    },
+  });
+});
+
 exports.getRestaurants = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const { search, status = 'active' } = req.query;
@@ -151,7 +200,7 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
     phone: r.owner?.phone ?? '', address: r.address ?? '',
     cuisine: r.cuisineDisplay || (r.cuisine || []).join(', '),
     rating: r.rating, ratingCount: r.ratingCount, reviewCount: r.reviewCount || 0, displayPriority: r.displayPriority || 0, homeOrder: r.homeOrder ?? 999999, isFeatured: !!r.isFeatured, isBestSeller: !!r.isBestSeller, isNearFast: !!r.isNearFast, avgPrepTime: r.estimatedDeliveryMin ?? 20,
-    isOpen: r.isOpen, isActive: r.isActive, approvalStatus: r.approvalStatus, rejectionReason: r.rejectionReason, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
+    isOpen: r.isOpen, isActive: r.isActive, approvalStatus: r.approvalStatus, rejectionReason: r.rejectionReason, commissionRate: Number.isFinite(Number(r.commissionRate)) ? Number(r.commissionRate) : 15, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
   }))});
 });
 

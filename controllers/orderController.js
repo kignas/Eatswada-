@@ -19,6 +19,7 @@ const {
 } = require('../services/checkoutMath');
 const { createRazorpayOrder, assertConfigured } = require('../services/paymentService');
 const { initiateOrderRefund } = require('../services/refundService');
+const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE } = require('../services/commissionService');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -232,8 +233,12 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     const error = new Error('Invalid restaurant'); error.statusCode = 400; throw error;
   }
 
-  const restaurant = await Restaurant.findOne({ _id: restaurantId, isActive: true })
-    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove');
+  const restaurant = await Restaurant.findOne({
+    _id: restaurantId,
+    isActive: true,
+    approvalStatus: 'approved',
+  })
+    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate');
   if (!restaurant) { const e = new Error('Restaurant not found or unavailable'); e.statusCode = 404; throw e; }
 
   if (restaurant.availability?.isOpen === false || restaurant.isOpen === false) {
@@ -301,7 +306,22 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     ? 0
     : baseDeliveryFee;
 
-  return { restaurant, serverItems, subtotal, deliveryFee, distanceKm: Number(distanceKm.toFixed(2)) };
+  const commission = calculateRestaurantCommission({
+    subtotal,
+    discount: 0,
+    rate: Number.isFinite(Number(restaurant.commissionRate))
+      ? restaurant.commissionRate
+      : DEFAULT_COMMISSION_RATE,
+  });
+
+  return {
+    restaurant,
+    serverItems,
+    subtotal,
+    deliveryFee,
+    distanceKm: Number(distanceKm.toFixed(2)),
+    commission,
+  };
 }
 
 // Shapes the checkout response. A SINGLE-restaurant checkout keeps the EXACT
@@ -500,6 +520,14 @@ const createOrder = asyncHandler(async (req, res) => {
         deliveryDistanceKm: p.distanceKm,
         subtotal: p.subtotal,
         deliveryFee: p.deliveryFee,
+        discount: 0,
+        commission: {
+          rate: p.commission.rate,
+          baseAmount: p.commission.baseAmount,
+          amount: p.commission.amount,
+          restaurantNetAmount: p.commission.restaurantNetAmount,
+          calculatedAt: new Date(),
+        },
         restaurantNote: note,
         deliveryInstructions: sharedDeliveryInstructions,
         tipAmount: tip,
