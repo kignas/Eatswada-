@@ -23,19 +23,17 @@ const getRestaurants = asyncHandler(async (req, res) => {
   const { veg, category, search, sort = 'recommended' } = req.query;
   const page = clampPage(req.query.page);
   const limit = clampLimit(req.query.limit, 20, 100);
-  
-  // 🔧 FIX (Restaurant Availability): only exclude soft-deleted restaurants here.
-  // Closed restaurants (isOpen: false) must still come back — the customer
-  // homepage keeps them visible in the list, grayed out via availability /
-  // closedReason, instead of hiding them. Filtering by isOpen at the query
-  // level made that impossible since closed restaurants never reached the
-  // frontend at all.
-  const filter = { isActive: true, approvalStatus: 'approved' }; 
-  
+
+  // Closed restaurants remain customer-visible, but marketplace ordering must
+  // always put restaurants that can currently accept orders before closed ones.
+  // This is done BEFORE pagination, otherwise page 1 could contain only closed
+  // restaurants even when open restaurants exist on later pages.
+  const filter = { isActive: true, approvalStatus: 'approved' };
+
   if (veg === 'true') filter.isVeg = true;
   if (category) filter.categories = { $in: [category] };
   if (search) filter.$text = { $search: search };
-  
+
   const sortMap = {
     recommended: { homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 },
     rating: { rating: -1, ratingCount: -1 },
@@ -44,33 +42,65 @@ const getRestaurants = asyncHandler(async (req, res) => {
   };
   const sortOpt = sortMap[sort] || { rating: -1 };
   const skip = (page - 1) * limit;
-  
-  let restaurants;
-  let total;
 
-  if (sort === 'recommended') {
-    // `$ifNull` keeps older documents (created before homeOrder existed) in
-    // the automatic bucket instead of letting a missing value outrank
-    // explicit positions such as #1, #2, #3.
-    [restaurants, total] = await Promise.all([
-      Restaurant.aggregate([
-        { $match: filter },
+  // Fetch one availability group at a time. `availability.isOpen` is the
+  // canonical field; the top-level `isOpen` is only a legacy mirror.
+  const openFilter = { ...filter, 'availability.isOpen': true };
+  const closedFilter = { ...filter, 'availability.isOpen': { $ne: true } };
+
+  const findGroup = async (groupFilter, groupSkip, groupLimit) => {
+    if (groupLimit <= 0) return [];
+
+    if (sort === 'recommended') {
+      // Keep the existing recommended-order semantics, including the explicit
+      // fallback for old documents that do not have homeOrder.
+      return Restaurant.aggregate([
+        { $match: groupFilter },
         { $addFields: { __homeOrder: { $ifNull: ['$homeOrder', 999999] } } },
         { $sort: { __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 } },
-        { $skip: skip },
-        { $limit: limit },
-        { $project: { __homeOrder: 0 } },
-      ]),
-      Restaurant.countDocuments(filter),
-    ]);
+        { $skip: groupSkip },
+        { $limit: groupLimit },
+        { $project: { __homeOrder: 0 } }
+      ]);
+    }
+
+    return Restaurant.find(groupFilter)
+      .sort(sortOpt)
+      .skip(groupSkip)
+      .limit(groupLimit);
+  };
+
+  const [openCount, closedCount] = await Promise.all([
+    Restaurant.countDocuments(openFilter),
+    Restaurant.countDocuments(closedFilter)
+  ]);
+
+  const total = openCount + closedCount;
+  let restaurants = [];
+
+  // Pagination is applied to the combined [open..., closed...] sequence.
+  if (skip < openCount) {
+    const openTake = Math.min(limit, openCount - skip);
+    const openRows = await findGroup(openFilter, skip, openTake);
+    restaurants = openRows;
+
+    const remaining = limit - openRows.length;
+    if (remaining > 0) {
+      const closedRows = await findGroup(closedFilter, 0, remaining);
+      restaurants = restaurants.concat(closedRows);
+    }
   } else {
-    [restaurants, total] = await Promise.all([
-      Restaurant.find(filter).sort(sortOpt).skip(skip).limit(limit),
-      Restaurant.countDocuments(filter),
-    ]);
+    const closedSkip = skip - openCount;
+    restaurants = await findGroup(closedFilter, closedSkip, limit);
   }
 
-  res.json({ success: true, page: Number(page), pages: Math.ceil(total / limit), total, data: restaurants });
+  res.json({
+    success: true,
+    page: Number(page),
+    pages: Math.ceil(total / limit),
+    total,
+    data: restaurants
+  });
 });
 
 const getRestaurantById = asyncHandler(async (req, res) => {
