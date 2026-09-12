@@ -68,6 +68,24 @@ const restaurantSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Marketplace onboarding lifecycle. This is deliberately separate from
+    // isActive (soft-delete/operational flag) and availability.isOpen (live
+    // ordering state). Only approved restaurants should be customer-visible.
+    approvalStatus: {
+      type: String,
+      enum: ['pending', 'approved', 'rejected', 'suspended'],
+      default: 'approved',
+      index: true,
+    },
+    rejectionReason: {
+      type: String,
+      trim: true,
+      maxlength: [1000, 'Rejection reason cannot exceed 1000 characters'],
+      default: '',
+    },
+    approvedAt: { type: Date, default: null },
+    approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
     image: {
       type: String,
       default: '',
@@ -341,6 +359,7 @@ const restaurantSchema = new mongoose.Schema(
 
 // ── Geospatial index for $near queries ──
 restaurantSchema.index({ location: '2dsphere' });
+restaurantSchema.index({ approvalStatus: 1, isActive: 1, 'availability.isOpen': 1 });
 
 // ── Full-text search index for /search endpoint ──
 restaurantSchema.index({ name: 'text', cuisineDisplay: 'text' });
