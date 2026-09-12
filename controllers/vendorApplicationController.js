@@ -30,6 +30,25 @@ function validLocation(location) {
     c[0] >= -180 && c[0] <= 180 && c[1] >= -90 && c[1] <= 90;
 }
 
+const HOURS_DAYS = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+function normalizeHours(value) {
+  const input = value && typeof value === 'object' ? value : {};
+  const out = {};
+  for (const day of HOURS_DAYS) {
+    const d = input[day] && typeof input[day] === 'object' ? input[day] : {};
+    const closed = d.closed === true;
+    const opensAt = typeof d.opensAt === 'string' && TIME_RE.test(d.opensAt) ? d.opensAt : '10:00';
+    const closesAt = typeof d.closesAt === 'string' && TIME_RE.test(d.closesAt) ? d.closesAt : '22:00';
+    if (!closed && opensAt === closesAt) throw new Error(`Opening and closing time cannot be the same on ${day}.`);
+    out[day] = { closed, opensAt, closesAt };
+  }
+  return out;
+}
+function validMoney(v, max = 100000) {
+  return Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= max;
+}
+
 function publicApplication(application, includeToken = false, token = null) {
   const out = {
     id: application._id,
@@ -60,6 +79,12 @@ async function createRestaurantForApplication(application, vendorUser) {
     description: application.description || '',
     phone: application.phone || '',
     address: application.address || '',
+    fssaiLicenseNumber: application.fssaiLicenseNumber || '',
+    openingHours: application.openingHours,
+    minOrder: application.minOrder ?? 0,
+    deliveryFee: application.deliveryFee ?? 40,
+    freeDeliveryEnabled: application.freeDeliveryEnabled !== false,
+    freeDeliveryAbove: application.freeDeliveryAbove ?? 200,
     deliveryRadiusKm: 15,
     codEnabled: false,
     isActive: true,
@@ -89,7 +114,8 @@ async function createRestaurantForApplication(application, vendorUser) {
 exports.submitVendorApplication = asyncHandler(async (req, res) => {
   const {
     ownerName, email, phone, password, restaurantName, cuisine,
-    description, address, location,
+    description, address, location, fssaiLicenseNumber, openingHours,
+    minOrder, deliveryFee, freeDeliveryEnabled, freeDeliveryAbove,
   } = req.body || {};
 
   const normalizedEmail = String(email || '').toLowerCase().trim();
@@ -110,9 +136,27 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
   if (password.length < STAFF_MIN_PASSWORD) {
     return res.status(400).json({ success: false, message: 'Password must be at least 10 characters.' });
   }
-  if (!validLocation(location)) {
-    return res.status(400).json({ success: false, message: 'Invalid restaurant location.' });
+  if (!validLocation(location) || !location?.coordinates) {
+    return res.status(400).json({ success: false, message: 'Restaurant GPS location is required.' });
   }
+  if (!String(address || '').trim()) {
+    return res.status(400).json({ success: false, message: 'Restaurant address is required.' });
+  }
+  if (!String(fssaiLicenseNumber || '').trim()) {
+    return res.status(400).json({ success: false, message: 'FSSAI license / registration number is required.' });
+  }
+  const normalizedMinOrder = minOrder === undefined || minOrder === '' ? 0 : Number(minOrder);
+  const normalizedDeliveryFee = deliveryFee === undefined || deliveryFee === '' ? 40 : Number(deliveryFee);
+  const normalizedFreeAbove = freeDeliveryAbove === undefined || freeDeliveryAbove === '' ? 200 : Number(freeDeliveryAbove);
+  if (!validMoney(normalizedMinOrder) || !validMoney(normalizedDeliveryFee) || !validMoney(normalizedFreeAbove)) {
+    return res.status(400).json({ success: false, message: 'Order and delivery amounts must be valid non-negative values.' });
+  }
+  if (String(fssaiLicenseNumber || '').trim().length > 100) {
+    return res.status(400).json({ success: false, message: 'FSSAI license / registration number is too long.' });
+  }
+  let normalizedOpeningHours;
+  try { normalizedOpeningHours = normalizeHours(openingHours); }
+  catch (err) { return res.status(400).json({ success: false, message: err.message || 'Invalid opening hours.' }); }
 
   const existingUser = await User.findOne({ $or: [{ email: normalizedEmail }, { phone: normalizedPhone }] });
 
@@ -154,6 +198,12 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
       cuisine: cuisineArray,
       description: description || '',
       address: address || '',
+      fssaiLicenseNumber: String(fssaiLicenseNumber || '').trim(),
+      openingHours: normalizedOpeningHours,
+      minOrder: normalizedMinOrder,
+      deliveryFee: normalizedDeliveryFee,
+      freeDeliveryEnabled: freeDeliveryEnabled !== false,
+      freeDeliveryAbove: normalizedFreeAbove,
       ...(location ? { location } : {}),
       status: 'pending',
       rejectionReason: '',
@@ -171,6 +221,12 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
     application.cuisine = cuisineArray;
     application.description = description || '';
     application.address = address || '';
+    application.fssaiLicenseNumber = String(fssaiLicenseNumber || '').trim();
+    application.openingHours = normalizedOpeningHours;
+    application.minOrder = normalizedMinOrder;
+    application.deliveryFee = normalizedDeliveryFee;
+    application.freeDeliveryEnabled = freeDeliveryEnabled !== false;
+    application.freeDeliveryAbove = normalizedFreeAbove;
     application.location = location || undefined;
     application.status = 'pending';
     application.rejectionReason = '';
@@ -241,7 +297,7 @@ exports.getVendorApplicationById = asyncHandler(async (req, res) => {
   const application = await VendorApplication.findById(req.params.id)
     .populate('applicant', 'name email phone isActive restaurantId createdAt')
     .populate('reviewedBy', 'name email')
-    .populate('restaurantId', 'name slug isActive isOpen availability');
+    .populate('restaurantId', 'name slug isActive isOpen availability createdAt');
   if (!application) return res.status(404).json({ success: false, message: 'Application not found.' });
   res.json({ success: true, data: adminApplication(application) });
 });
@@ -280,6 +336,13 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
         description: current.description || '',
         phone: current.phone || '',
         address: current.address || '',
+        fssaiLicenseNumber: current.fssaiLicenseNumber || '',
+        openingHours: current.openingHours,
+        minOrder: current.minOrder ?? 0,
+        deliveryFee: current.deliveryFee ?? 40,
+        freeDeliveryEnabled: current.freeDeliveryEnabled !== false,
+        freeDeliveryAbove: current.freeDeliveryAbove ?? 200,
+        ...(typeof req.body?.image === 'string' && /^https?:\/\//i.test(req.body.image.trim()) ? { image: req.body.image.trim(), images: [req.body.image.trim()] } : {}),
         deliveryRadiusKm: 15,
         codEnabled: false,
         isActive: true,
