@@ -1,3 +1,4 @@
+const { requirePermission } = require('../middleware/permissionMiddleware');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router  = express.Router();
@@ -9,6 +10,7 @@ const {
   getVendors, getVendorById, updateVendor, toggleVendorStatus,
   getReviews, moderateReview, getPlatformRatings,
   getRestaurantCommission, updateRestaurantCommission,
+  getAdminPermissions, updateAdminPermissions,
 } = require('../controllers/adminController');
 const {
   getVendorApplications, getVendorApplicationById,
@@ -43,6 +45,8 @@ router.get('/analytics/revenue', protect, authorize('admin'), getRevenueAnalytic
 router.get('/analytics/top-restaurants', protect, authorize('admin'), getTopRestaurants);
 router.get('/reviews', protect, authorize('admin'), getReviews);
 router.patch('/reviews/:id', protect, authorize('admin'), moderateReview);
+router.get('/admins/:id/permissions', protect, authorize('admin'), requirePermission('settings.manage'), getAdminPermissions);
+router.patch('/admins/:id/permissions', protect, authorize('admin'), requirePermission('settings.manage'), updateAdminPermissions);
 router.get('/platform-ratings', protect, authorize('admin'), getPlatformRatings);
 
 // Vendor account management (vendor *creation* is POST /api/auth/admin/create-vendor)

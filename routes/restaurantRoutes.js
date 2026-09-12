@@ -22,6 +22,7 @@ const {
 
 // 2. Import Auth Middleware
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/permissionMiddleware');
 
 // ==========================================
 // 🌐 PUBLIC ROUTES (Visible to Customers)
@@ -50,7 +51,7 @@ router.post('/', protect, authorize('admin'), createRestaurant);
 // 'vendor' — the controller enforces that a vendor can only touch their own
 // restaurant (canManageRestaurant), so admin-or-owner is the real gate.
 router.put('/:id', protect, authorize('admin'), updateRestaurant);
-router.delete('/:id', protect, authorize('admin'), deleteRestaurant);
+router.delete('/:id', protect, authorize('admin'), requirePermission('restaurants.delete'), deleteRestaurant);
 router.patch('/:id/availability', protect, authorize('admin'), updateRestaurantAvailability);
 
 // Menu Item Management
