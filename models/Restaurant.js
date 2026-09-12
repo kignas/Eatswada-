@@ -277,8 +277,9 @@ const restaurantSchema = new mongoose.Schema(
       },
     },
 
-    // isActive: soft-delete flag. NEVER hard-delete a restaurant.
-    // Set to false to deactivate without destroying order history.
+    // isActive: operational visibility flag. Permanent restaurant deletion is
+    // an explicit admin-only operation; historical orders are preserved in the
+    // Order collection and a durable deletion audit is written first.
     isActive: {
       type: Boolean,
       default: true,
