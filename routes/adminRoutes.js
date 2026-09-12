@@ -8,6 +8,7 @@ const {
   getCustomers, getRevenueAnalytics, getTopRestaurants,
   getVendors, getVendorById, updateVendor, toggleVendorStatus,
   getReviews, moderateReview, getPlatformRatings,
+  getRestaurantCommission, updateRestaurantCommission,
 } = require('../controllers/adminController');
 const {
   getVendorApplications, getVendorApplicationById,
@@ -34,6 +35,8 @@ router.get('/orders', protect, authorize('admin'), getOrders);
 router.patch('/orders/:id/status', protect, authorize('admin'), updateOrderStatus);
 router.patch('/orders/:id/cancel', protect, authorize('admin'), cancelOrder);
 router.get('/restaurants', protect, authorize('admin'), getRestaurants);
+router.get('/restaurants/:id/commission', protect, authorize('admin'), getRestaurantCommission);
+router.patch('/restaurants/:id/commission', protect, authorize('admin'), updateRestaurantCommission);
 router.patch('/restaurants/:id/toggle', protect, authorize('admin'), toggleRestaurant);
 router.get('/customers', protect, authorize('admin'), getCustomers);
 router.get('/analytics/revenue', protect, authorize('admin'), getRevenueAnalytics);
