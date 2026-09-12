@@ -320,6 +320,20 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
   if (!vendorUser) return res.status(409).json({ success: false, message: 'Applicant vendor account is missing.' });
   if (vendorUser.restaurantId) return res.status(409).json({ success: false, message: 'Applicant is already linked to a restaurant.' });
 
+  // Resolve the slug BEFORE opening the transaction. A duplicate-key error
+  // inside a MongoDB transaction aborts that transaction permanently; retrying
+  // restaurant.save({ session }) in the same transaction then produces the
+  // misleading `Transaction ... has been aborted` error that previously made
+  // approval look like a generic server failure. The owner-id suffix gives us
+  // a deterministic collision-safe fallback without ever retrying a failed
+  // insert inside the aborted transaction.
+  const baseSlug = slugify(application.restaurantName) || `restaurant-${vendorUser._id.toString().slice(-8)}`;
+  let restaurantSlug = baseSlug;
+  const baseSlugExists = await Restaurant.exists({ slug: baseSlug });
+  if (baseSlugExists) {
+    restaurantSlug = `${baseSlug}-${vendorUser._id.toString().slice(-8)}`;
+  }
+
   const session = await mongoose.startSession();
   let restaurant;
   try {
@@ -347,18 +361,16 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
         codEnabled: false,
         isActive: true,
         availability: { isOpen: true, autoHours: false, closedReason: '' },
+        slug: restaurantSlug,
+        approvedBy: req.user._id,
+        approvedAt: new Date(),
         ...(current.location?.coordinates ? { location: current.location } : {}),
       };
 
       restaurant = new Restaurant(restaurantPayload);
-      try {
-        await restaurant.save({ session });
-      } catch (err) {
-        if (err.code === 11000 && err.keyPattern?.slug) {
-          restaurant.slug = `${slugify(current.restaurantName)}-${vendorUser._id.toString().slice(-5)}`;
-          await restaurant.save({ session });
-        } else throw err;
-      }
+      // Do not catch a duplicate-key error and retry here. MongoDB marks the
+      // transaction as aborted as soon as the duplicate insert occurs.
+      await restaurant.save({ session });
 
       vendorUser.restaurantId = restaurant._id;
       vendorUser.isActive = true;
