@@ -42,6 +42,21 @@ const vendorApplicationSchema = new mongoose.Schema({
   },
   description: { type: String, trim: true, maxlength: 1000, default: '' },
   address: { type: String, trim: true, maxlength: 500, default: '' },
+  fssaiLicenseNumber: { type: String, trim: true, maxlength: 100, default: '' },
+  deliveryFee: { type: Number, min: 0, max: 100000, default: 40 },
+  minOrder: { type: Number, min: 0, max: 100000, default: 0 },
+  freeDeliveryEnabled: { type: Boolean, default: true },
+  freeDeliveryAbove: { type: Number, min: 0, max: 100000, default: 200 },
+  openingHours: {
+    monday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00' }, closesAt: { type: String, default: '22:00' } },
+    tuesday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00' }, closesAt: { type: String, default: '22:00' } },
+    wednesday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00' }, closesAt: { type: String, default: '22:00' } },
+    thursday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00' }, closesAt: { type: String, default: '22:00' } },
+    friday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00' }, closesAt: { type: String, default: '22:00' } },
+    saturday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00' }, closesAt: { type: String, default: '22:00' } },
+    sunday: { closed: { type: Boolean, default: false }, opensAt: { type: String, default: '10:00' }, closesAt: { type: String, default: '22:00' } },
+  },
+  image: { type: String, trim: true, maxlength: 2000, default: '' },
   location: {
     type: {
       type: String,
