@@ -727,3 +727,8 @@ exports.getPlatformRatings = asyncHandler(async (req, res) => {
 });
 
 
+
+
+const ADMIN_PERMISSION_SET = ['restaurants.manage','restaurants.delete','vendors.manage','orders.manage','finance.manage','coupons.manage','settings.manage','analytics.view'];
+exports.getAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; const u=await User.findById(req.params.id).select('name email role permissions isActive'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); res.json({success:true,data:u}); });
+exports.updateAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(String(req.user._id)===String(req.params.id)) return res.status(400).json({success:false,message:'You cannot change your own admin permissions.'}); const u=await User.findById(req.params.id).select('role permissions'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); const permissions=Array.isArray(req.body?.permissions)?[...new Set(req.body.permissions.filter(p=>ADMIN_PERMISSION_SET.includes(p)))]:[]; u.permissions=permissions; await u.save(); res.json({success:true,data:{adminId:u._id,permissions:u.permissions}}); });

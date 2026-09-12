@@ -6,6 +6,7 @@ const Address    = require('../models/Address');
 const Restaurant = require('../models/Restaurant');
 const Menu       = require('../models/Menu');
 const User       = require('../models/User');
+const Coupon     = require('../models/Coupon');
 const Review     = require('../models/Review');
 const IdempotencyKey = require('../models/IdempotencyKey');
 const asyncHandler = require('express-async-handler');
@@ -18,8 +19,11 @@ const {
   normalizeRestaurantNotes,
 } = require('../services/checkoutMath');
 const { createRazorpayOrder, assertConfigured } = require('../services/paymentService');
+const { operationalStatus } = require('../services/restaurantHours');
+const { notifyOrderStatus } = require('../services/notificationService');
 const { initiateOrderRefund } = require('../services/refundService');
 const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE } = require('../services/commissionService');
+const { ensureOrderLedger } = require('../services/settlementService');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -241,7 +245,8 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate');
   if (!restaurant) { const e = new Error('Restaurant not found or unavailable'); e.statusCode = 404; throw e; }
 
-  if (restaurant.availability?.isOpen === false || restaurant.isOpen === false) {
+  const operational = operationalStatus(restaurant);
+  if (!operational.open) {
     const e = new Error(`${restaurant.name} is currently closed and is not accepting orders.`); e.statusCode = 409; throw e;
   }
 
@@ -368,6 +373,22 @@ function buildCheckoutResponse(orders, replay) {
   };
 }
 
+async function resolveCheckoutCoupon(code, userId, subtotal, restaurantIds) {
+  const normalized=String(code||'').trim().toUpperCase(); if(!normalized) return null;
+  const now=new Date();
+  const coupon=await Coupon.findOne({code:normalized,isActive:true,startsAt:{$lte:now},$or:[{expiresAt:null},{expiresAt:{$gt:now}}]});
+  if(!coupon){const e=new Error('Coupon is invalid or expired.');e.statusCode=400;throw e;}
+  if(coupon.usageLimit!=null && coupon.usedCount>=coupon.usageLimit){const e=new Error('Coupon usage limit has been reached.');e.statusCode=409;throw e;}
+  const prior=await require('../models/CouponRedemption').countDocuments({coupon:coupon._id,user:userId});
+  if(prior>=Number(coupon.perUserLimit||1)){const e=new Error('You have already used this coupon.');e.statusCode=409;throw e;}
+  if(coupon.firstOrderOnly && await Order.exists({user:userId,status:'delivered'})){const e=new Error('This coupon is for first orders only.');e.statusCode=400;throw e;}
+  if(Number(subtotal)<Number(coupon.minSubtotal||0)){const e=new Error(`Minimum subtotal for this coupon is ₹${coupon.minSubtotal}.`);e.statusCode=400;throw e;}
+  if(coupon.restaurant && (restaurantIds.length!==1 || String(coupon.restaurant)!==String(restaurantIds[0]))){const e=new Error('Coupon is not valid for this checkout.');e.statusCode=400;throw e;}
+  let discount=coupon.type==='percent'?Number(subtotal)*Number(coupon.value)/100:Number(coupon.value);
+  if(coupon.maxDiscount!=null) discount=Math.min(discount,Number(coupon.maxDiscount));
+  return {coupon,discount:Math.round(Math.max(0,Math.min(discount,subtotal))*100)/100};
+}
+
 const createOrder = asyncHandler(async (req, res) => {
   const {
     items,
@@ -379,6 +400,7 @@ const createOrder = asyncHandler(async (req, res) => {
     globalNote,
     deliveryInstructions,
     tipAmount = 0,
+    couponCode = '',
   } = req.body;
 
   const validPaymentMethods = ['upi'];
@@ -441,6 +463,22 @@ const createOrder = asyncHandler(async (req, res) => {
       items: group.items,
       customerCoords,
     }));
+  }
+
+  // Apply one server-authoritative coupon to the checkout. Restaurant-specific
+  // coupons are restricted to a single matching restaurant; platform coupons
+  // may span a multi-restaurant checkout. The discount is allocated by food
+  // subtotal so it is never duplicated across child orders.
+  const checkoutSubtotal = priced.reduce((sum,p)=>sum+Number(p.subtotal||0),0);
+  const couponInfo = await resolveCheckoutCoupon(couponCode, req.user._id, checkoutSubtotal, priced.map(p=>p.restaurant._id));
+  if (couponInfo) {
+    for (const p of priced) {
+      const share = checkoutSubtotal > 0 ? Number(p.subtotal) / checkoutSubtotal : 0;
+      p.discount = Math.round(couponInfo.discount * share * 100) / 100;
+      p.commission = calculateRestaurantCommission({ subtotal:p.subtotal, discount:p.discount, rate:Number.isFinite(Number(p.restaurant.commissionRate))?p.restaurant.commissionRate:DEFAULT_COMMISSION_RATE });
+    }
+    const allocated=priced.reduce((a,p)=>a+Number(p.discount||0),0);
+    if (priced.length && Math.abs(allocated-couponInfo.discount)>0.01) priced[priced.length-1].discount=Math.round((Number(priced.at(-1).discount||0)+(couponInfo.discount-allocated))*100)/100;
   }
 
   // Platform payment policy: COD is permanently disabled for all new orders.
@@ -520,7 +558,8 @@ const createOrder = asyncHandler(async (req, res) => {
         deliveryDistanceKm: p.distanceKm,
         subtotal: p.subtotal,
         deliveryFee: p.deliveryFee,
-        discount: 0,
+        discount: Number(p.discount || 0),
+        coupon: couponInfo ? { code: couponInfo.coupon.code, discount: Number(p.discount || 0), couponId: couponInfo.coupon._id } : undefined,
         commission: {
           rate: p.commission.rate,
           baseAmount: p.commission.baseAmount,
@@ -531,7 +570,7 @@ const createOrder = asyncHandler(async (req, res) => {
         restaurantNote: note,
         deliveryInstructions: sharedDeliveryInstructions,
         tipAmount: tip,
-        total: p.subtotal + p.deliveryFee + tip,
+        total: Math.max(0, p.subtotal - Number(p.discount || 0)) + p.deliveryFee + tip,
         paymentMethod,
         paymentStatus: 'pending',
         ...(idempotencyKey ? { idempotencyKey } : {}),
@@ -802,6 +841,7 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   }
 
   await order.save();
+  if (status === 'delivered') await ensureOrderLedger(order);
   await order.populate(ORDER_POPULATE_PATHS);
 
   // If auto-assigned successfully, schedule the 60-second acceptance timeout check

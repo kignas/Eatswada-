@@ -1,3 +1,4 @@
+const { notifyOrderStatus } = require('../services/notificationService');
 const asyncHandler   = require('express-async-handler');
 const Order           = require('../models/Order');
 const Menu            = require('../models/Menu');
@@ -148,6 +149,7 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
 
   order.advanceStatus('confirmed', 'Accepted by restaurant');
   await order.save();
+  await notifyOrderStatus(order.user, order);
 
   res.status(200).json({ success: true, data: order });
 });
@@ -179,6 +181,7 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
   await initiateOrderRefund(order, `Rejected by restaurant: ${reason}`);
 
   await order.save();
+  await notifyOrderStatus(order.user, order);
 
   res.status(200).json({ success: true, data: order });
 });
@@ -211,6 +214,7 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   }
 
   await order.save();
+  await notifyOrderStatus(order.user, order);
 
   // Auto-assigned riders must have the same 60-second acceptance timeout
   // as manually assigned riders. Without this, a rider who ignores the
@@ -359,6 +363,20 @@ exports.getRestaurantProfile = asyncHandler(async (req, res) => {
 });
 
 
+
+exports.updateVendorAvailability = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const restaurant = await Restaurant.findOne({ _id: req.user.restaurantId, owner: req.user._id });
+  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant profile not found.' });
+  const status = String(req.body?.status || '').trim();
+  const allowed = ['open','closed_today','temporarily_closed','busy'];
+  if (!allowed.includes(status)) return res.status(400).json({ success:false, message:`status must be one of: ${allowed.join(', ')}` });
+  const open = status === 'open' || status === 'busy';
+  const update = { isOpen: open, 'availability.isOpen': open, 'availability.status': status, 'availability.closedReason': open ? '' : status };
+  if (typeof req.body?.autoHours === 'boolean') update['availability.autoHours'] = req.body.autoHours;
+  const updated = await Restaurant.findByIdAndUpdate(restaurant._id, { $set:update }, {new:true,runValidators:true});
+  res.json({success:true,data:updated});
+});
 exports.getVendorReviews = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
   const restaurantId = req.user.restaurantId;

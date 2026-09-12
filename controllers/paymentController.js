@@ -1,6 +1,9 @@
 const asyncHandler = require('express-async-handler');
 const Order = require('../models/Order');
+const { applyRefundAdjustment } = require('../services/settlementService');
 const Cart = require('../models/Cart');
+const Coupon = require('../models/Coupon');
+const CouponRedemption = require('../models/CouponRedemption');
 const {
   createRazorpayOrder,
   fetchPayment,
@@ -35,6 +38,19 @@ async function markCheckoutPaid(orders, paymentId) {
     { _id: { $in: ids } },
     { $set: { paymentStatus: 'paid', razorpayPaymentId: String(paymentId) } }
   );
+  const couponIds = [...new Set(orders.map(o => o.coupon?.couponId).filter(Boolean).map(String))];
+  if (couponIds.length) {
+    const codeOrder = orders.find(o => o.coupon?.couponId);
+    const groupId = String(orders[0].checkoutGroupId || orders[0]._id);
+    for (const couponId of couponIds) {
+      const discount = orders.filter(o => String(o.coupon?.couponId) === couponId).reduce((a,o)=>a+Number(o.coupon?.discount||0),0);
+      const existing = await CouponRedemption.findOne({ coupon: couponId, user: orders[0].user });
+      if (!existing) {
+        await CouponRedemption.create({ coupon: couponId, user: orders[0].user, orderGroupId: groupId, discount });
+        await Coupon.updateOne({ _id: couponId }, { $inc: { usedCount: 1 } });
+      }
+    }
+  }
   await Cart.findOneAndUpdate(
     { user: orders[0].user },
     { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
@@ -150,6 +166,10 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
             'refund.completedAt': new Date(),
         } }
       );
+      for (const id of ids) {
+        const updated = await Order.findById(id);
+        if (updated) await applyRefundAdjustment(updated);
+      }
     } else if (event.event === 'refund.failed' || refundEntity.status === 'failed') {
       await Order.updateMany(
         { _id: { $in: ids } },
