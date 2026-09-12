@@ -1,20 +1,5 @@
-/**
- * notificationService.js
- * Stub for push notifications / SMS order alerts.
- * Replace with Firebase FCM or any push provider.
- */
-
-const notifyOrderStatus = async (userId, order) => {
-  const messages = {
-    confirmed:          `✅ Your order #${order.orderNumber} has been confirmed!`,
-    preparing:          `👨‍🍳 ${order.restaurantName} is preparing your order.`,
-    out_for_delivery:   `🛵 Your order is on the way!`,
-    delivered:          `🎉 Order delivered! Enjoy your meal.`,
-    cancelled:          `❌ Order #${order.orderNumber} was cancelled.`,
-  };
-  const msg = messages[order.status];
-  if (msg) console.log(`[NOTIFY] User ${userId}: ${msg}`);
-  // TODO: integrate FCM / OneSignal / SMS here
-};
-
-module.exports = { notifyOrderStatus };
+'use strict';
+const Notification=require('../models/Notification');
+const notifyOrderStatus=async(userId,order)=>{const messages={confirmed:['Order confirmed',`Your order #${order.orderNumber} has been confirmed.`],preparing:['Order preparing',`${order.restaurantName} is preparing your order.`],out_for_delivery:['Order on the way','Your order is on the way.'],delivered:['Order delivered','Your order was delivered. Enjoy your meal!'],cancelled:['Order cancelled',`Order #${order.orderNumber} was cancelled.`]};const m=messages[order.status];if(!m)return null;try{return await Notification.create({user:userId,type:'order',title:m[0],message:m[1],data:{orderId:String(order._id),orderNumber:order.orderNumber,status:order.status}})}catch(err){console.error('[NOTIFY] persistence failed:',err.message);return null}};
+const createNotification=async({user,type='system',title,message,data={}})=>Notification.create({user,type,title,message,data});
+module.exports={notifyOrderStatus,createNotification};
