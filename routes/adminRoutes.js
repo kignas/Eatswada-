@@ -9,6 +9,10 @@ const {
   getVendors, getVendorById, updateVendor, toggleVendorStatus,
   getReviews, moderateReview, getPlatformRatings,
 } = require('../controllers/adminController');
+const {
+  getVendorApplications, getVendorApplicationById,
+  approveVendorApplication, rejectVendorApplication,
+} = require('../controllers/vendorApplicationController');
 
 // server.js applies authLimiter to /api/users and /api/auth but not to
 // /api/admin, so this endpoint previously sat behind nothing but the global
@@ -40,6 +44,13 @@ router.get('/platform-ratings', protect, authorize('admin'), getPlatformRatings)
 
 // Vendor account management (vendor *creation* is POST /api/auth/admin/create-vendor)
 router.get('/vendors', protect, authorize('admin'), getVendors);
+// Vendor onboarding review. Applications are separate from existing admin
+// vendor provisioning so the legacy create-vendor workflow remains intact.
+router.get('/vendor-applications', protect, authorize('admin'), getVendorApplications);
+router.get('/vendor-applications/:id', protect, authorize('admin'), getVendorApplicationById);
+router.patch('/vendor-applications/:id/approve', protect, authorize('admin'), approveVendorApplication);
+router.patch('/vendor-applications/:id/reject', protect, authorize('admin'), rejectVendorApplication);
+
 router.get('/vendors/:id', protect, authorize('admin'), getVendorById);
 router.put('/vendors/:id', protect, authorize('admin'), updateVendor);
 router.patch('/vendors/:id/toggle', protect, authorize('admin'), toggleVendorStatus);
