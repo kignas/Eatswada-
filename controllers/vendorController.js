@@ -226,6 +226,102 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   });
 });
 
+
+/* ─────────────────────────────────────────────────────────────
+ *  EARNINGS — P0.3
+ *  Financial read-only view. No payout/settlement is created here.
+ *  Restaurant earnings use the commission snapshot stored on each order.
+ *  Delivery fees and rider tips are excluded from restaurant earnings.
+ * ───────────────────────────────────────────────────────────── */
+const EARNINGS_ACTIVE_STATUSES = ['placed', 'confirmed', 'preparing', 'waiting_for_rider', 'assigned', 'out_for_delivery'];
+
+function earningsSnapshot(order) {
+  const c = order.commission && typeof order.commission === 'object' ? order.commission : null;
+  const base = Number(c?.baseAmount);
+  const amount = Number(c?.amount);
+  const net = Number(c?.restaurantNetAmount);
+  if (Number.isFinite(base) && Number.isFinite(amount) && Number.isFinite(net)) {
+    return { rate: Number(c.rate) || 0, foodSales: base, commission: amount, restaurantNet: net, source: 'snapshot' };
+  }
+  // Legacy orders created before P0.2: provide a clearly deterministic read-only
+  // fallback for the vendor screen. New orders always carry the snapshot.
+  const subtotal = Math.max(0, Number(order.subtotal) || 0);
+  const rate = 15;
+  const commission = Math.round(subtotal * rate) / 100;
+  return { rate, foodSales: subtotal, commission, restaurantNet: Math.max(0, Math.round((subtotal - commission) * 100) / 100), source: 'legacy-default' };
+}
+
+function earningsRange(period) {
+  const now = new Date();
+  if (period === 'today') {
+    const start = new Date(now); start.setHours(0, 0, 0, 0); return { $gte: start, $lte: now };
+  }
+  if (period === '7d') return { $gte: new Date(now.getTime() - 7 * 86400000), $lte: now };
+  if (period === '30d') return { $gte: new Date(now.getTime() - 30 * 86400000), $lte: now };
+  return undefined;
+}
+
+exports.getVendorEarningsSummary = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const period = ['today', '7d', '30d', 'all'].includes(req.query.period) ? req.query.period : '30d';
+  const range = earningsRange(period);
+  const baseFilter = { ...orderOwnershipFilter(req), status: { $nin: ['cancelled'] } };
+  if (range) baseFilter.createdAt = range;
+
+  const [orders, lifetimeOrders] = await Promise.all([
+    Order.find(baseFilter).select('subtotal discount total status commission paymentMethod createdAt orderNumber').sort({ createdAt: -1 }).limit(500).lean(),
+    Order.find({ ...orderOwnershipFilter(req), status: { $nin: ['cancelled'] } }).select('subtotal status commission').sort({ createdAt: -1 }).limit(2000).lean(),
+  ]);
+
+  const summarize = (list) => list.reduce((acc, order) => {
+    const e = earningsSnapshot(order);
+    if (EARNINGS_ACTIVE_STATUSES.includes(order.status)) acc.inProgress += e.restaurantNet;
+    if (order.status === 'delivered') {
+      acc.deliveredFoodSales += e.foodSales;
+      acc.deliveredCommission += e.commission;
+      acc.deliveredEarnings += e.restaurantNet;
+      acc.deliveredOrders += 1;
+    }
+    acc.totalFoodSales += e.foodSales;
+    acc.totalCommission += e.commission;
+    acc.totalRestaurantEarnings += e.restaurantNet;
+    acc.totalOrders += 1;
+    return acc;
+  }, { totalFoodSales:0,totalCommission:0,totalRestaurantEarnings:0,deliveredFoodSales:0,deliveredCommission:0,deliveredEarnings:0,deliveredOrders:0,inProgress:0,totalOrders:0 });
+
+  const current = summarize(orders);
+  const lifetime = summarize(lifetimeOrders);
+  const round = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+  for (const obj of [current, lifetime]) for (const k of Object.keys(obj)) obj[k] = round(obj[k]);
+
+  res.json({
+    success: true,
+    data: {
+      period,
+      currency: 'INR',
+      current,
+      lifetime,
+      settlement: { status: 'not_started', available: false, message: 'Payout and settlement tracking will be added in a later phase.' },
+    },
+  });
+});
+
+exports.getVendorEarningsOrders = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+  const view = ['completed', 'in_progress', 'all'].includes(req.query.view) ? req.query.view : 'completed';
+  const filter = { ...orderOwnershipFilter(req), status: { $ne: 'cancelled' } };
+  if (view === 'completed') filter.status = 'delivered';
+  if (view === 'in_progress') filter.status = { $in: EARNINGS_ACTIVE_STATUSES };
+  const [orders, total] = await Promise.all([
+    Order.find(filter).select('orderNumber subtotal discount total status commission paymentMethod createdAt').sort({ createdAt: -1 }).skip((page-1)*limit).limit(limit).lean(),
+    Order.countDocuments(filter),
+  ]);
+  const data = orders.map(o => { const e=earningsSnapshot(o); return { id:o._id, orderNumber:o.orderNumber, status:o.status, paymentMethod:o.paymentMethod, createdAt:o.createdAt, foodSales:e.foodSales, commissionRate:e.rate, commission:e.commission, restaurantNetAmount:e.restaurantNet, commissionSource:e.source }; });
+  res.json({ success:true, data, pagination:{ page, limit, total, pages:Math.ceil(total/limit) } });
+});
+
 /* ─────────────────────────────────────────────────────────────
  *  MENU 
  * ───────────────────────────────────────────────────────────── */
