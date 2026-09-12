@@ -48,6 +48,18 @@ function normalizeHours(value) {
 function validMoney(v, max = 100000) {
   return Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= max;
 }
+function normalizeRestaurantImages(body) {
+  const raw = Array.isArray(body?.images)
+    ? body.images
+    : (typeof body?.image === 'string' ? [body.image] : []);
+
+  return [...new Set(
+    raw
+      .filter(v => typeof v === 'string')
+      .map(v => v.trim())
+      .filter(v => /^https?:\/\//i.test(v))
+  )].slice(0, 4);
+}
 
 function publicApplication(application, includeToken = false, token = null) {
   const out = {
@@ -343,6 +355,8 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
       const current = await VendorApplication.findOne({ _id: application._id, status: 'pending' }).session(session);
       if (!current) throw Object.assign(new Error('APPLICATION_NOT_PENDING'), { code: 'APPLICATION_NOT_PENDING' });
 
+      const restaurantImages = normalizeRestaurantImages(req.body);
+
       const restaurantPayload = {
         name: current.restaurantName,
         owner: vendorUser._id,
@@ -356,7 +370,7 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
         deliveryFee: current.deliveryFee ?? 40,
         freeDeliveryEnabled: current.freeDeliveryEnabled !== false,
         freeDeliveryAbove: current.freeDeliveryAbove ?? 200,
-        ...(typeof req.body?.image === 'string' && /^https?:\/\//i.test(req.body.image.trim()) ? { image: req.body.image.trim(), images: [req.body.image.trim()] } : {}),
+        ...(restaurantImages.length ? { image: restaurantImages[0], images: restaurantImages } : {}),
         deliveryRadiusKm: 15,
         codEnabled: false,
         isActive: true,
