@@ -2,6 +2,10 @@ const Restaurant = require('../models/Restaurant');
 const MenuItem   = require('../models/Menu');
 const asyncHandler = require('express-async-handler');
 const Review = require('../models/Review');
+const Order = require('../models/Order');
+const Cart = require('../models/Cart');
+const User = require('../models/User');
+const RestaurantDeletionAudit = require('../models/RestaurantDeletionAudit');
 
 const clampPage = (value, fallback = 1) => Math.max(1, Number(value) || fallback);
 const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
@@ -296,33 +300,128 @@ const updateRestaurant = asyncHandler(async (req, res) => {
 });
 
 const deleteRestaurant = asyncHandler(async (req, res) => {
-  const existing = await Restaurant.findById(req.params.id);
-  if (!existing) return res.status(404).json({ success: false, message: 'Restaurant not found' });
-
-  // PERMISSIONS: CEO can deactivate any restaurant; vendor only their own.
-  if (!canManageRestaurant(req.user, existing)) {
-    return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant' });
+  // Permanent deletion is intentionally admin-only at the route level. Keep
+  // this guard here too so the controller cannot accidentally be reused by a
+  // future route without the same destructive-operation restriction.
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, message: 'Only an admin can permanently delete a restaurant' });
   }
 
-  // 🔧 CHANGE (Restaurant Availability): also set availability.isOpen/closedReason
-  // alongside the existing isOpen:false, so the two stay consistent instead of
-  // a deactivated restaurant showing as "Open" via the new availability field.
-  const restaurant = await Restaurant.findByIdAndUpdate(
-    req.params.id,
-    {
-      isActive: false,
-      isOpen: false,
-      'availability.isOpen': false,
-      'availability.closedReason': 'temporarily_closed',
-    },
-    { new: true }
-  );
-  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
-  // 🔧 FIX: Menu schema uses `restaurantId` (not `restaurant`) and `inStock`
-  // (not `isAvailable`). With the old names this matched 0 documents, so menu
-  // items never actually got deactivated when a restaurant was removed.
-  await MenuItem.updateMany({ restaurantId: req.params.id }, { inStock: false });
-  res.json({ success: true, message: 'Restaurant and menu successfully deactivated' });
+  const restaurantId = req.params.id;
+  if (!restaurantId || !require('mongoose').isValidObjectId(restaurantId)) {
+    return res.status(400).json({ success: false, message: 'Invalid restaurant ID' });
+  }
+
+  const session = await require('mongoose').startSession();
+  try {
+    let deletionSummary;
+
+    await session.withTransaction(async () => {
+      const restaurant = await Restaurant.findById(restaurantId).session(session);
+      if (!restaurant) {
+        const err = new Error('Restaurant not found');
+        err.statusCode = 404;
+        throw err;
+      }
+
+      // Never destroy a restaurant while an order is still operational. Orders
+      // are the financial/source-of-truth records and must complete or be
+      // cancelled before the restaurant can be permanently removed.
+      const activeOrderCount = await Order.countDocuments({
+        restaurant: restaurantId,
+        status: { $nin: ['delivered', 'cancelled'] },
+      }).session(session);
+
+      if (activeOrderCount > 0) {
+        const err = new Error(`Restaurant cannot be permanently deleted while ${activeOrderCount} order(s) are still active. Complete or cancel them first.`);
+        err.statusCode = 409;
+        throw err;
+      }
+
+      const [menuResult, reviewResult] = await Promise.all([
+        MenuItem.deleteMany({ restaurantId }).session(session),
+        Review.deleteMany({ restaurant: restaurantId }).session(session),
+      ]);
+
+      // Remove deleted menu items/restaurant references from customer carts so
+      // a stale cart can never resurrect an item belonging to the deleted shop.
+      await Cart.updateMany(
+        { $or: [
+          { 'items.restaurant': restaurantId },
+          { restaurant: restaurantId },
+        ] },
+        {
+          $pull: { items: { restaurant: restaurantId } },
+          $set: { restaurant: null, restaurantName: '' },
+        },
+        { session }
+      );
+
+      // Detach the vendor account instead of deleting the User document. This
+      // preserves the account/history and allows a future re-onboarding flow.
+      // It is deactivated because a vendor without a restaurant cannot operate
+      // the vendor portal for this deleted business.
+      const vendorResult = await User.updateMany(
+        { role: 'vendor', restaurantId },
+        { $set: { restaurantId: null, isActive: false }, $inc: { tokenVersion: 1 } },
+        { session }
+      );
+
+      // Remove the restaurant from every customer's favorites. This avoids
+      // dangling savedRestaurants ObjectIds after hard deletion.
+      const favoritesResult = await User.updateMany(
+        { savedRestaurants: restaurantId },
+        { $pull: { savedRestaurants: restaurantId } },
+        { session }
+      );
+
+      // Keep a durable deletion audit record because the Restaurant document
+      // itself is about to disappear. This preserves who deleted it, when,
+      // which vendor owned it, and what dependent data was removed.
+      await RestaurantDeletionAudit.create([{
+        restaurantId: restaurant._id,
+        restaurantName: restaurant.name,
+        restaurantSlug: restaurant.slug,
+        owner: restaurant.owner || null,
+        deletedBy: req.user._id,
+        deletedAt: new Date(),
+        menuItemsDeleted: menuResult.deletedCount || 0,
+        reviewsDeleted: reviewResult.deletedCount || 0,
+        vendorAccountsDetached: vendorResult.modifiedCount || 0,
+        cartsCleaned: 0, // MongoDB updateMany does not expose matched item counts per nested item.
+        favoritesCleaned: favoritesResult.modifiedCount || 0,
+      }], { session });
+
+      const deleted = await Restaurant.deleteOne({ _id: restaurantId }).session(session);
+      if (deleted.deletedCount !== 1) {
+        const err = new Error('Restaurant deletion could not be completed');
+        err.statusCode = 500;
+        throw err;
+      }
+
+      deletionSummary = {
+        restaurantId: String(restaurant._id),
+        restaurantName: restaurant.name,
+        menuItemsDeleted: menuResult.deletedCount || 0,
+        reviewsDeleted: reviewResult.deletedCount || 0,
+        vendorAccountsDetached: vendorResult.modifiedCount || 0,
+        favoritesCleaned: favoritesResult.modifiedCount || 0,
+      };
+    });
+
+    return res.json({
+      success: true,
+      message: 'Restaurant permanently deleted. Historical orders and financial records were preserved.',
+      data: deletionSummary,
+    });
+  } catch (error) {
+    if (error && error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
+    throw error;
+  } finally {
+    await session.endSession();
+  }
 });
 
 /**
