@@ -1,0 +1,14 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('fs'); const path = require('path');
+const root = path.join(__dirname, '..');
+const read = p => fs.readFileSync(path.join(root,p),'utf8');
+assert.match(read('models/Order.js'), /optimisticConcurrency:\s*true/);
+assert.match(read('middleware/errorMiddleware.js'), /VersionError/);
+assert.match(read('controllers/paymentController.js'), /claimCouponUsage/);
+assert.match(read('services/couponUsageService.js'), /usedCount/);
+assert.match(read('controllers/settlementController.js'), /withTransaction/);
+assert.match(read('controllers/settlementController.js'), /modifiedCount/);
+assert.match(read('services/settlementService.js'), /refund_adjustment/);
+assert.match(read('controllers/adminController.js'), /Cannot move order from/);
+console.log('Foundation 1 financial/concurrency checks: PASS');

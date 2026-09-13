@@ -52,7 +52,7 @@ check('Role middleware enforces exact DB role', /roles\.includes\(req\.user\.rol
 check('Customer OTP has IP rate limit', /otpLimiter/.test(read('routes/userRoutes.js')));
 check('Customer OTP has per-account resend throttle', /otpRequestedTooRecently/.test(users));
 check('Customer OTP has per-account failed-attempt lockout', /checkOTP\(otp, ['"]login['"]\)/.test(users));
-check('Password reset OTP has purpose separation', /checkOTP\(otp, ['"]password_reset['"]\)/.test(users));
+check('Password reset OTP has dedicated state and verifier', /checkPasswordResetOtp\(otp\)/.test(users) && /passwordResetOtpHash/.test(users));
 check('Password reset token is hashed server-side', /createHash\(['"]sha256['"]\)/.test(users));
 check('Password reset token expires', /passwordResetExpiresAt.*new Date\(Date\.now\(\) \+ 10 \* 60 \* 1000\)/s.test(read('models/User.js')));
 check('No public vendor creation route', /router\.post\(['"]\/admin\/create-vendor['"],\s*protect,\s*authorize\(['"]admin['"]\)/.test(authRoutes));
