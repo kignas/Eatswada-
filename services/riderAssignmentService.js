@@ -96,7 +96,12 @@ async function autoAssignRider(order, excludeRiderIds = []) {
     order.rider = rider._id;
     order.riderAssignedAt = new Date();
     order.riderStatus = 'assigned';
-    order.riderEarning = order.riderEarning || order.deliveryFee || 0;
+    // Rider earning is the customer delivery fee plus the rider tip. Keep this
+    // identical to the admin/manual assignment path so auto-assignment cannot
+    // silently create a lower earning (especially when deliveryFee is 0).
+    const baseRiderFee = Number(order.deliveryFee) || 0;
+    const riderTip = Number(order.tipAmount) || 0;
+    order.riderEarning = order.riderEarning || (baseRiderFee + riderTip);
     order.riderStatusHistory = order.riderStatusHistory || [];
     order.riderStatusHistory.push({
       status: 'assigned',
