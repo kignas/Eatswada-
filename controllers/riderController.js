@@ -4,6 +4,7 @@ const asyncHandler = require('express-async-handler');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { uploadToCloudinary } = require('../utils/riderUpload');
+const { ensureOrderLedger } = require('../services/settlementService');
 
 /* ── Rider-owned delivery status flow ──
  * unassigned -> assigned -> accepted -> reached_restaurant -> picked_up -> out_for_delivery -> delivered
@@ -162,7 +163,29 @@ exports.getEarningsSummary = asyncHandler(async (req, res) => {
   const summarize = async (extraMatch) => {
     const result = await Order.aggregate([
       { $match: { ...baseMatch, ...extraMatch } },
-      { $group: { _id: null, earnings: { $sum: '$riderEarning' }, deliveries: { $sum: 1 } } },
+      {
+        $group: {
+          _id: null,
+          // Current assignments store deliveryFee + tipAmount in riderEarning.
+          // The fallback repairs legacy delivered orders created before the
+          // auto-assignment earning fix, where riderEarning was incorrectly 0.
+          earnings: {
+            $sum: {
+              $cond: [
+                { $gt: [{ $ifNull: ['$riderEarning', 0] }, 0] },
+                { $ifNull: ['$riderEarning', 0] },
+                {
+                  $add: [
+                    { $ifNull: ['$deliveryFee', 0] },
+                    { $ifNull: ['$tipAmount', 0] },
+                  ],
+                },
+              ],
+            },
+          },
+          deliveries: { $sum: 1 },
+        },
+      },
     ]);
     return { earnings: result[0]?.earnings ?? 0, deliveries: result[0]?.deliveries ?? 0 };
   };
@@ -266,6 +289,12 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   }
 
   await order.save();
+
+  // Keep rider delivery consistent with the admin/vendor delivery path:
+  // once a paid order is delivered, create its settlement ledger entry.
+  if (status === 'delivered') {
+    await ensureOrderLedger(order);
+  }
 
   res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: order });
 });
