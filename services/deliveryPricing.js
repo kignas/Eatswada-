@@ -15,17 +15,14 @@
 // Restaurant document and combine them with calculateDeliveryFee() below.
 //
 // Maynaguri launch rule:
-//   < 10 km   => ₹30
-//   10–15 km  => ₹40
-//   > 15 km   => ₹50
+//   0–10 km   => ₹30
+//   > 10 km   => outside the platform delivery limit and must be rejected
 // This module has NO external dependencies (no mongoose) so it can be
 // unit-tested directly.
 // ─────────────────────────────────────────────────────────────────────
 
 const DELIVERY_RULES = Object.freeze({
-  UNDER_10_KM: 30,
-  FROM_10_TO_15_KM: 40,
-  ABOVE_15_KM: 50,
+  WITHIN_10_KM: 30,
 });
 
 const MAX_DELIVERY_RADIUS_KM = 10;
@@ -61,9 +58,15 @@ function haversineKm(from, to) {
 }
 
 function calculateDeliveryFee(distanceKm) {
-  if (distanceKm < 10) return DELIVERY_RULES.UNDER_10_KM;
-  if (distanceKm <= 15) return DELIVERY_RULES.FROM_10_TO_15_KM;
-  return DELIVERY_RULES.ABOVE_15_KM;
+  const d = Number(distanceKm);
+  if (!Number.isFinite(d) || d < 0) throw new Error('Invalid delivery distance');
+  if (d > MAX_DELIVERY_RADIUS_KM) {
+    const error = new Error('Delivery distance exceeds the Eatswada 10 km maximum.');
+    error.code = 'DELIVERY_RADIUS_EXCEEDED';
+    error.statusCode = 400;
+    throw error;
+  }
+  return DELIVERY_RULES.WITHIN_10_KM;
 }
 
 /**
