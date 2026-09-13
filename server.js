@@ -13,6 +13,7 @@ const morgan         = require('morgan');
 
 const connectDB      = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
+const { requestLogger } = require('./middleware/requestLogger');
 
 // ── Route & Model imports ─────────────────────────────────────
 const userRoutes       = require('./routes/userRoutes');
@@ -123,6 +124,13 @@ app.use(hpp({ whitelist: ['sort', 'category', 'cuisine'] }));
 
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
 
+// Foundation-1.1 — structured request logging in every environment.
+// morgan('dev') above stays dev-only; this runs in production too and never
+// logs bodies, tokens, or query strings. Placed after body parsing so req.user
+// is not yet set here — actor is resolved at res 'finish', by which point auth
+// middleware on the matched route has populated req.user.
+app.use(requestLogger);
+
 // ── OTP diagnostic logging ────────────────────────────────────
 // Keep this lightweight and production-safe: log request flow and a masked phone,
 // while the OTP utility itself logs the mock OTP when OTP_PROVIDER=mock.
@@ -169,26 +177,38 @@ app.get('/', (req, res) => {
 
 // Authentication endpoints have their own focused limiters in the route files.
 // Do not blanket-rate-limit every authenticated /api/users request.
-app.use('/api/users',       userRoutes);
-app.use('/api/auth',        authRoutes);
-app.use('/api/restaurants', restaurantRoutes);
-app.use('/api/cart',        cartRoutes);
-app.use('/api/orders',      orderRoutes);
-app.use('/api/vendor',      vendorRoutes);
-app.use('/api/vendor-applications', vendorApplicationRoutes); 
-app.use('/api/admin',       adminRoutes); 
-app.use('/api/upload',      uploadRoutes);
-app.use('/api/categories',  categoryRoutes);
-app.use('/api/menu',        menuRoutes);
-app.use('/api/riders',      riderRoutes);
-app.use('/api/admin/riders', adminRiderRoutes);
-app.use('/api/ratings',      platformRatingRoutes);
-app.use('/api/payments',      paymentRoutes);
-app.use('/api/settlements',   settlementRoutes);
-app.use('/api/coupons',       couponRoutes);
-app.use('/api/platform',      platformRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/auth',          firebaseAuthRoutes);
+// Foundation-1.1 — API versioning, added non-destructively.
+// Every router below is mounted under BOTH the original '/api/...' prefix
+// (which all four existing frontends still use) AND a new '/api/v1/...'
+// prefix. Same handlers, so behaviour is identical; new frontend code can
+// migrate to /api/v1 gradually. No existing path is removed.
+const apiMounts = [
+  ['/users',                userRoutes],
+  ['/auth',                 authRoutes],
+  ['/restaurants',          restaurantRoutes],
+  ['/cart',                 cartRoutes],
+  ['/orders',               orderRoutes],
+  ['/vendor',               vendorRoutes],
+  ['/vendor-applications',  vendorApplicationRoutes],
+  ['/admin',                adminRoutes],
+  ['/upload',               uploadRoutes],
+  ['/categories',           categoryRoutes],
+  ['/menu',                 menuRoutes],
+  ['/riders',               riderRoutes],
+  ['/admin/riders',         adminRiderRoutes],
+  ['/ratings',              platformRatingRoutes],
+  ['/payments',             paymentRoutes],
+  ['/settlements',          settlementRoutes],
+  ['/coupons',              couponRoutes],
+  ['/platform',             platformRoutes],
+  ['/notifications',        notificationRoutes],
+  ['/auth',                 firebaseAuthRoutes],
+];
+
+for (const [path, router] of apiMounts) {
+  app.use(`/api${path}`, router);      // legacy — unchanged
+  app.use(`/api/v1${path}`, router);   // versioned — same handler
+}
 
 // ── Global Error Handlers ─────────────────────────────────────
 app.use(notFound);
