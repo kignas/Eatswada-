@@ -15,5 +15,4 @@ const schema = new mongoose.Schema({
   expiresAt: { type: Date, default: null },
   isActive: { type: Boolean, default: true, index: true },
 }, { timestamps: true });
-schema.index({ code: 1 }, { unique: true });
 module.exports = mongoose.models.Coupon || mongoose.model('Coupon', schema);

@@ -196,13 +196,15 @@ const restaurantSchema = new mongoose.Schema(
       default: true,
     },
 
-    // Maximum customer-to-restaurant delivery radius controlled by Admin.
-    // Actual order distance is calculated from customer + restaurant GPS.
+    // Maximum customer-to-restaurant delivery radius. Eatswada's Maynaguri
+    // launch has a hard platform cap of 10 km; individual restaurants may
+    // configure a smaller radius, never a larger one. Actual order distance
+    // is calculated from customer + restaurant GPS.
     deliveryRadiusKm: {
       type: Number,
-      default: 15,
+      default: 10,
       min: 0,
-      max: 100,
+      max: 10,
     },
 
     // Cash on Delivery is a restaurant-level permission.
@@ -244,8 +246,8 @@ const restaurantSchema = new mongoose.Schema(
 
     // ── Restaurant Availability ──
     // Scalable structure: supports Open / Closed Today / Temporarily Closed now,
-    // and leaves room for automatic business-hours support later (autoHours/
-    // opensAt/closesAt are stored today but not yet evaluated anywhere).
+    // Auto-hours uses the weekly schedule in the platform business timezone
+    // (Asia/Kolkata). Manual status still takes precedence when autoHours is off.
     availability: {
       // Manual real-time toggle. This is the source of truth for open/closed.
       isOpen: {
@@ -259,8 +261,7 @@ const restaurantSchema = new mongoose.Schema(
         enum: ['open', 'closed_today', 'temporarily_closed', 'busy'],
         default: 'open',
       },
-      // Future feature flag: when true, isOpen will eventually be computed
-      // from opensAt/closesAt instead of being toggled manually. Not evaluated yet.
+      // When true, customer-facing operational status is computed from openingHours.
       autoHours: {
         type: Boolean,
         default: false,

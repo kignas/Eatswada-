@@ -291,7 +291,7 @@ const orderSchema = new mongoose.Schema(
     // off normally-fetched documents (no '+' select) to gate "delivered".
     deliveryOtpVerified:   { type: Boolean, default: false },
   },
-  { timestamps: true }
+  { timestamps: true, optimisticConcurrency: true }
 );
 
 // Rider integration compound index
