@@ -14,6 +14,7 @@ const {
   getRestaurantProfile,
   getVendorReviews,
   updateVendorAvailability,
+  updateBusinessHours,
   getVendorEarningsSummary,
   getVendorEarningsOrders,
 } = require('../controllers/vendorController');
@@ -25,6 +26,7 @@ const {
 // GET  /api/vendor/restaurant  — header profile + isActive flag
 router.get('/restaurant', protect, role('vendor'), getRestaurantProfile);
 router.put('/restaurant/availability', protect, role('vendor'), updateVendorAvailability);
+router.put('/restaurant/hours', protect, role('vendor'), updateBusinessHours);
 router.get('/reviews', protect, role('vendor'), getVendorReviews);
 router.get('/earnings/summary', protect, role('vendor'), getVendorEarningsSummary);
 router.get('/earnings/orders', protect, role('vendor'), getVendorEarningsOrders);
