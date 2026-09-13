@@ -93,13 +93,11 @@ function withLiveDisplayData(orderDoc) {
 
 
 // ─────────────────────────────────────────────────────────────────────
-// Server-authoritative delivery + order pricing
-// Maynaguri launch rule:
-//   < 10 km   => ₹30
-//   10–15 km  => ₹40
-//   > 15 km   => ₹50
-// The browser may display an estimate, but these values are calculated
-// again here from database data and customer coordinates.
+// Server-authoritative delivery + order pricing.
+// Maynaguri launch rule: delivery is permitted only within the platform
+// maximum of 10 km; the shared pricing service charges ₹30 within that cap.
+// The browser may display an estimate, but values are recalculated here from
+// database data and customer coordinates.
 // ─────────────────────────────────────────────────────────────────────
 // Delivery geo + fee helpers now come from the SINGLE source of truth in
 // services/deliveryPricing.js (see #5). Changing the radius cap or fee there

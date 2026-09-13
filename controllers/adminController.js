@@ -1,3 +1,4 @@
+const { initiateOrderRefund } = require('../services/refundService');
 'use strict';
 
 const PlatformRating = require('../models/PlatformRating');
@@ -9,6 +10,7 @@ const Restaurant   = require('../models/Restaurant');
 const Review       = require('../models/Review');
 const generateToken = require('../utils/generateToken');
 const { uploadToCloudinary } = require('../utils/riderUpload');
+const { logAdminAction } = require('../services/auditService');
 
 const ADMIN_ROLES = ['admin'];
 const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
@@ -116,13 +118,40 @@ exports.getOrders = asyncHandler(async (req, res) => {
 
 exports.updateOrderStatus = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
-  const { status } = req.body;
-  if (!status) return res.status(400).json({ success: false, message: 'Status is required.' });
+  const { status } = req.body || {};
+  const target = String(status || '').toLowerCase();
+  const transitions = {
+    placed: ['confirmed', 'cancelled'],
+    confirmed: ['preparing', 'cancelled'],
+    preparing: ['waiting_for_rider', 'cancelled'],
+    waiting_for_rider: ['assigned', 'cancelled'],
+    assigned: ['out_for_delivery', 'cancelled'],
+    out_for_delivery: ['otp_verified', 'cancelled'],
+    otp_verified: ['delivered'],
+  };
+  if (!Object.keys(transitions).some(k => transitions[k].includes(target))) {
+    return res.status(400).json({ success: false, message: 'Invalid or terminal order status.' });
+  }
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
-  order.status = status.toLowerCase();
-  order.statusHistory.push({ status: order.status, note: 'Updated by admin' });
+  if (!(transitions[order.status] || []).includes(target)) {
+    return res.status(409).json({ success: false, message: `Cannot move order from "${order.status}" to "${target}".` });
+  }
+  if (target === 'delivered' && !order.deliveryOtpVerified) {
+    return res.status(409).json({ success: false, message: 'Delivery OTP must be verified before an order can be marked delivered.' });
+  }
+  const previousStatus = order.status;
+  order.advanceStatus(target, 'Updated by admin');
   await order.save();
+  if (target === 'delivered') await require('../services/settlementService').ensureOrderLedger(order);
+  await logAdminAction(req, {
+    action: 'order.status.update',
+    targetType: 'order',
+    targetId: order._id,
+    targetLabel: order.orderNumber || String(order._id),
+    oldValue: { status: previousStatus },
+    newValue: { status: order.status },
+  });
   res.json({ success: true, data: order });
 });
 
@@ -130,11 +159,23 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
-  order.status = 'cancelled';
-  order.cancelReason = req.body.reason || 'Cancelled by admin';
-  order.isCancellable = false;
-  order.statusHistory.push({ status: 'cancelled', note: order.cancelReason });
+  if (['delivered', 'cancelled'].includes(order.status)) {
+    return res.status(409).json({ success: false, message: `Cannot cancel an order that is already ${order.status}.` });
+  }
+  const reason = String(req.body?.reason || 'Cancelled by admin').trim().slice(0, 200);
+  const previousStatus = order.status;
+  order.advanceStatus('cancelled', reason);
+  order.cancelReason = reason;
+  await initiateOrderRefund(order, reason);
   await order.save();
+  await logAdminAction(req, {
+    action: 'order.cancel',
+    targetType: 'order',
+    targetId: order._id,
+    targetLabel: order.orderNumber || String(order._id),
+    oldValue: { status: previousStatus },
+    newValue: { status: order.status, reason },
+  });
   res.json({ success: true, data: order });
 });
 
@@ -171,8 +212,18 @@ exports.updateRestaurantCommission = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findById(req.params.id);
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
 
+  const previousRate = restaurant.commissionRate;
   restaurant.commissionRate = normalizedRate;
   await restaurant.save();
+
+  await logAdminAction(req, {
+    action: 'restaurant.commission.update',
+    targetType: 'restaurant',
+    targetId: restaurant._id,
+    targetLabel: restaurant.name,
+    oldValue: { commissionRate: previousRate },
+    newValue: { commissionRate: restaurant.commissionRate },
+  });
 
   res.json({
     success: true,
@@ -414,8 +465,18 @@ exports.toggleVendorStatus = asyncHandler(async (req, res) => {
   const vendor = await User.findOne({ _id: req.params.id, role: 'vendor' });
   if (!vendor) return res.status(404).json({ success: false, message: 'Vendor not found.' });
 
+  const vendorWasActive = vendor.isActive;
   vendor.isActive = !vendor.isActive;
   await vendor.save();
+
+  await logAdminAction(req, {
+    action: 'vendor.status.toggle',
+    targetType: 'vendor',
+    targetId: vendor._id,
+    targetLabel: vendor.name || vendor.email || '',
+    oldValue: { isActive: vendorWasActive },
+    newValue: { isActive: vendor.isActive },
+  });
 
   // Deactivating the vendor's login should also take their restaurant off
   // the live menu — it can no longer be managed if nobody can log in to it.
@@ -672,6 +733,16 @@ exports.deleteRider = asyncHandler(async (req, res) => {
   }
 
   await User.findByIdAndDelete(rider._id);
+
+  await logAdminAction(req, {
+    action: 'rider.delete',
+    targetType: 'rider',
+    targetId: rider._id,
+    targetLabel: rider.name || rider.phone || '',
+    oldValue: { existed: true },
+    newValue: { deleted: true },
+  });
+
   res.json({ success: true, message: 'Rider deleted permanently.' });
 });
 
@@ -731,4 +802,4 @@ exports.getPlatformRatings = asyncHandler(async (req, res) => {
 
 const ADMIN_PERMISSION_SET = ['restaurants.manage','restaurants.delete','vendors.manage','orders.manage','finance.manage','coupons.manage','settings.manage','analytics.view'];
 exports.getAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; const u=await User.findById(req.params.id).select('name email role permissions isActive'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); res.json({success:true,data:u}); });
-exports.updateAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(String(req.user._id)===String(req.params.id)) return res.status(400).json({success:false,message:'You cannot change your own admin permissions.'}); const u=await User.findById(req.params.id).select('role permissions'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); const permissions=Array.isArray(req.body?.permissions)?[...new Set(req.body.permissions.filter(p=>ADMIN_PERMISSION_SET.includes(p)))]:[]; u.permissions=permissions; await u.save(); res.json({success:true,data:{adminId:u._id,permissions:u.permissions}}); });
+exports.updateAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(String(req.user._id)===String(req.params.id)) return res.status(400).json({success:false,message:'You cannot change your own admin permissions.'}); const u=await User.findById(req.params.id).select('role permissions'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); const previousPermissions=Array.isArray(u.permissions)?[...u.permissions]:[]; const permissions=Array.isArray(req.body?.permissions)?[...new Set(req.body.permissions.filter(p=>ADMIN_PERMISSION_SET.includes(p)))]:[]; u.permissions=permissions; await u.save(); await logAdminAction(req,{action:'admin.permissions.update',targetType:'admin',targetId:u._id,targetLabel:u.email||String(u._id),oldValue:{permissions:previousPermissions},newValue:{permissions:u.permissions}}); res.json({success:true,data:{adminId:u._id,permissions:u.permissions}}); });

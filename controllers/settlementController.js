@@ -5,6 +5,37 @@ function admin(req,res){if(req.user?.role!=='admin'){res.status(403).json({succe
 function snap(o){const c=o.commission||{};const food=Number(c.baseAmount)||Math.max(0,Number(o.subtotal)||0);const com=Number(c.amount)||Math.round(food*(Number(c.rate)||15))/100;const net=Number(c.restaurantNetAmount);return {food,rate:Number(c.rate)||15,com,net:Number.isFinite(net)?net:Math.max(0,food-com)};}
 exports.rebuildLedger=async(req,res)=>{if(!admin(req,res))return;const session=await mongoose.startSession();try{const result=await session.withTransaction(async()=>{const orders=await Order.find({status:{$in:activePaidStatuses},paymentStatus:'paid',restaurant:{$ne:null}}).select('restaurant user orderNumber subtotal commission refund').lean();let created=0;for(const o of orders){const exists=await Ledger.exists({order:o._id}).session(session);if(exists)continue;const r=await Restaurant.findById(o.restaurant).select('owner').session(session).lean();if(!r?.owner)continue;const s=snap(o);await Ledger.create([{restaurant:o.restaurant,vendor:r.owner,order:o._id,orderNumber:o.orderNumber,foodSales:s.food,commissionRate:s.rate,commissionAmount:s.com,restaurantNetAmount:s.net,netSettlementAmount:s.net}],{session});created++;}return created;});res.json({success:true,data:{created}})}finally{await session.endSession()}}
 exports.listLedger=async(req,res)=>{if(!admin(req,res))return;const page=Math.max(1,Number(req.query.page)||1),limit=Math.min(100,Math.max(1,Number(req.query.limit)||25));const filter={};if(req.query.restaurantId&&mongoose.Types.ObjectId.isValid(req.query.restaurantId))filter.restaurant=req.query.restaurantId;if(req.query.status)filter.status=req.query.status;const [rows,total]=await Promise.all([Ledger.find(filter).populate('restaurant','name').populate('vendor','name email').sort({createdAt:-1}).skip((page-1)*limit).limit(limit).lean(),Ledger.countDocuments(filter)]);res.json({success:true,data:rows,pagination:{page,limit,total,pages:Math.ceil(total/limit)}})};
-exports.settle=async(req,res)=>{if(!admin(req,res))return;const ids=Array.isArray(req.body?.ledgerIds)?req.body.ledgerIds.filter(mongoose.Types.ObjectId.isValid):[];if(!ids.length)return res.status(400).json({success:false,message:'ledgerIds are required.'});const rows=await Ledger.find({_id:{$in:ids},status:'eligible'});if(!rows.length)return res.status(409).json({success:false,message:'No eligible ledger entries found.'});const byVendor=new Map();for(const r of rows){const k=String(r.vendor)+'|'+String(r.restaurant);if(!byVendor.has(k))byVendor.set(k,[]);byVendor.get(k).push(r)}const batches=[];for(const group of byVendor.values()){const amount=Math.round(group.reduce((a,r)=>a+Number(r.netSettlementAmount||0),0)*100)/100;if(amount < 0) return res.status(409).json({success:false,message:'This vendor has a negative settlement balance. Add eligible positive earnings before settling the refund adjustment.'});const b=await Batch.create({restaurant:group[0].restaurant,vendor:group[0].vendor,ledgerEntries:group.map(r=>r._id),amount,status:'settled',reference:String(req.body.reference||'').slice(0,120),settledAt:new Date()});await Ledger.updateMany({_id:{$in:group.map(r=>r._id)},status:'eligible'},{$set:{status:'settled',settlementBatch:b._id,settledAt:b.settledAt}});batches.push(b)}res.json({success:true,data:{batches,count:batches.length}})};
+exports.settle=async(req,res)=>{
+  if(!admin(req,res))return;
+  const ids=Array.isArray(req.body?.ledgerIds)?req.body.ledgerIds.filter(mongoose.Types.ObjectId.isValid):[];
+  if(!ids.length)return res.status(400).json({success:false,message:'ledgerIds are required.'});
+  const session=await mongoose.startSession();
+  try{
+    let result;
+    await session.withTransaction(async()=>{
+      // Re-read inside the transaction and lock the exact eligible rows by
+      // changing their state only after the batch is created. Concurrent admin
+      // settlement requests therefore cannot both successfully settle the same
+      // ledger entries.
+      const rows=await Ledger.find({_id:{$in:ids},status:'eligible'}).session(session);
+      if(!rows.length){const e=new Error('No eligible ledger entries found.');e.statusCode=409;throw e;}
+      const byVendor=new Map();
+      for(const r of rows){const k=String(r.vendor)+'|'+String(r.restaurant);if(!byVendor.has(k))byVendor.set(k,[]);byVendor.get(k).push(r)}
+      const batches=[];
+      for(const group of byVendor.values()){
+        const amount=Math.round(group.reduce((a,r)=>a+Number(r.netSettlementAmount||0),0)*100)/100;
+        if(amount < 0){const e=new Error('This vendor has a negative settlement balance. Add eligible positive earnings before settling the refund adjustment.');e.statusCode=409;throw e;}
+        const b=await Batch.create([{restaurant:group[0].restaurant,vendor:group[0].vendor,ledgerEntries:group.map(r=>r._id),amount,status:'settled',reference:String(req.body.reference||'').slice(0,120),settledAt:new Date()}],{session});
+        const batch=b[0];
+        const update=await Ledger.updateMany({_id:{$in:group.map(r=>r._id)},status:'eligible'},{$set:{status:'settled',settlementBatch:batch._id,settledAt:batch.settledAt}}).session(session);
+        if(update.modifiedCount!==group.length){const e=new Error('Settlement changed concurrently. Please refresh and try again.');e.statusCode=409;throw e;}
+        batches.push(batch.toObject());
+      }
+      result={batches,count:batches.length};
+    });
+    res.json({success:true,data:result});
+  }finally{await session.endSession()}
+};
+
 exports.integrity=async(req,res)=>{if(!admin(req,res))return;const delivered=await Order.find({status:'delivered',paymentStatus:'paid'}).select('restaurant subtotal commission').lean();const led=await Ledger.find({status:{$ne:'void'}}).select('order netSettlementAmount commissionAmount').lean();const lm=new Map(led.map(x=>[String(x.order),x]));let missing=0,mismatch=0;for(const o of delivered){const l=lm.get(String(o._id));if(!l){missing++;continue}const s=snap(o);if(Math.abs(Number(l.netSettlementAmount)-s.net)>0.01||Math.abs(Number(l.commissionAmount)-s.com)>0.01)mismatch++}res.json({success:true,data:{deliveredOrders:delivered.length,ledgerEntries:led.length,missing,mismatch,healthy:missing===0&&mismatch===0}})};
 exports.vendorLedger=async(req,res)=>{if(req.user?.role!=='vendor'||!req.user.restaurantId)return res.status(403).json({success:false,message:'Vendor restaurant access required.'});const rows=await Ledger.find({restaurant:req.user.restaurantId}).sort({createdAt:-1}).limit(200).lean();res.json({success:true,data:rows})};

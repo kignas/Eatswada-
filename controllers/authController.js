@@ -338,7 +338,7 @@ exports.createVendor = asyncHandler(async (req, res) => {
         deliveryFee: deliveryFee ?? 40,
         freeDeliveryEnabled: freeDeliveryEnabled ?? true,
         freeDeliveryAbove: freeDeliveryAbove ?? 200,
-        deliveryRadiusKm: deliveryRadiusKm ?? 15,
+        deliveryRadiusKm: deliveryRadiusKm ?? 10,
         codEnabled: false,
         isFeatured: isFeatured === true,
         isBestSeller: isBestSeller === true,
