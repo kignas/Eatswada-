@@ -53,6 +53,13 @@ const errorHandler = (err, req, res, next) => {
     statusCode = 422;
   }
 
+  // Mongoose optimistic concurrency — another request updated this same
+  // order after it was read. Treat this as a safe retry/conflict, not a 500.
+  else if (err.name === 'VersionError') {
+    message = 'This order was updated by another request. Please refresh and try again.';
+    statusCode = 409;
+  }
+
   // JWT errors — safe, non-sensitive messages.
   else if (err.name === 'JsonWebTokenError') { message = 'Invalid token'; statusCode = 401; }
   else if (err.name === 'TokenExpiredError') { message = 'Token expired'; statusCode = 401; }
