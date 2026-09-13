@@ -8,6 +8,7 @@ const Review          = require('../models/Review');
 // FIX: Import the auto-assignment service here
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService'); 
 const { initiateOrderRefund } = require('../services/refundService');
+const { stopRing } = require('../services/pushService');
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -27,6 +28,7 @@ function vendorMenuFilter(req) {
 
 const VENDOR_ORDER_POPULATE = [
   { path: 'user', select: 'name phone' },
+  { path: 'rider', select: 'name phone' },
   {
     path: 'restaurant',
     select: 'name address owner',
@@ -46,6 +48,9 @@ function serializeVendorOrder(orderDoc) {
   order.restaurantAddress = restaurant?.address || '';
   order.restaurantPhone = owner?.phone || restaurant?.phone || restaurant?.contactNumber || '';
   order.restaurantOwnerName = owner?.name || '';
+
+  const rider = order.rider && typeof order.rider === 'object' ? order.rider : null;
+  order.riderInfo = rider ? { name: rider.name || 'Rider', phone: rider.phone || '' } : null;
 
   return order;
 }
@@ -147,8 +152,12 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
     });
   }
 
+  const prep = Number(req.body && req.body.prepMinutes);
+  if (Number.isFinite(prep) && prep > 0 && prep <= 240) order.prepMinutes = Math.round(prep);
+
   order.advanceStatus('confirmed', 'Accepted by restaurant');
   await order.save();
+  stopRing(order._id);
   await notifyOrderStatus(order.user, order);
 
   res.status(200).json({ success: true, data: order });
@@ -181,6 +190,7 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
   await initiateOrderRefund(order, `Rejected by restaurant: ${reason}`);
 
   await order.save();
+  stopRing(order._id);
   await notifyOrderStatus(order.user, order);
 
   res.status(200).json({ success: true, data: order });
@@ -376,6 +386,39 @@ exports.updateVendorAvailability = asyncHandler(async (req, res) => {
   if (typeof req.body?.autoHours === 'boolean') update['availability.autoHours'] = req.body.autoHours;
   const updated = await Restaurant.findByIdAndUpdate(restaurant._id, { $set:update }, {new:true,runValidators:true});
   res.json({success:true,data:updated});
+});
+exports.updateBusinessHours = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const restaurant = await Restaurant.findOne({ _id: req.user.restaurantId, owner: req.user._id });
+  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant profile not found.' });
+
+  const days = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
+  const hours = (req.body && req.body.openingHours) || {};
+  const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const set = {};
+
+  for (const d of days) {
+    const day = hours[d];
+    if (!day) continue;
+    const closed = !!day.closed;
+    set[`openingHours.${d}.closed`] = closed;
+    if (!closed) {
+      if (!timeRe.test(String(day.opensAt || '')) || !timeRe.test(String(day.closesAt || ''))) {
+        return res.status(400).json({ success: false, message: `Invalid time for ${d} — use 24h HH:MM.` });
+      }
+      set[`openingHours.${d}.opensAt`] = day.opensAt;
+      set[`openingHours.${d}.closesAt`] = day.closesAt;
+    }
+  }
+
+  if (!Object.keys(set).length) {
+    return res.status(400).json({ success: false, message: 'No opening hours provided.' });
+  }
+
+  const updated = await Restaurant.findByIdAndUpdate(
+    restaurant._id, { $set: set }, { new: true, runValidators: true }
+  );
+  res.json({ success: true, data: updated });
 });
 exports.getVendorReviews = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;

@@ -4,6 +4,7 @@ const { applyRefundAdjustment } = require('../services/settlementService');
 const Cart = require('../models/Cart');
 const Coupon = require('../models/Coupon');
 const { claimCouponUsage } = require('../services/couponUsageService');
+const pushService = require('../services/pushService');
 const {
   createRazorpayOrder,
   fetchPayment,
@@ -57,6 +58,11 @@ async function markCheckoutPaid(orders, paymentId) {
     { user: orders[0].user },
     { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
   );
+
+  // Order is now paid → visible to the vendor. Ring their device(s) until they act.
+  for (const o of orders) {
+    pushService.notifyRestaurantNewOrder(o).catch(() => {});
+  }
 }
 
 exports.verifyPayment = asyncHandler(async (req, res) => {
