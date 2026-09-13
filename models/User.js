@@ -124,6 +124,10 @@ const userSchema = new mongoose.Schema(
 
     lastLogin: Date,
 
+    // Device push tokens (FCM) for order notifications. A user may be signed in
+    // on several devices, so this is an array; invalid tokens are pruned on send.
+    fcmTokens: { type: [String], default: [] },
+
     // ── RIDER-SPECIFIC FIELDS ──────────────────────────────────
     // Nested under one path so non-rider documents (user/vendor/admin)
     // are completely unaffected — this whole object is simply absent

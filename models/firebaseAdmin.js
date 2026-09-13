@@ -28,4 +28,41 @@ async function verifyFirebaseIdToken(idToken) {
   return getFirebaseAdmin().auth().verifyIdToken(idToken, true);
 }
 
-module.exports = { verifyFirebaseIdToken };
+/**
+ * Send a DATA-ONLY push to a set of FCM device tokens, reusing the same
+ * initialized admin app used for phone-auth verification. Data-only (no
+ * `notification` block) means the receiving service worker renders the
+ * alert itself — this avoids duplicate notifications on web and gives the
+ * vendor page full control over sound/vibration.
+ *
+ * Returns the list of tokens FCM reported as permanently invalid, so the
+ * caller can prune them from the user document.
+ */
+async function sendPushToTokens(tokens, data) {
+  if (!Array.isArray(tokens) || tokens.length === 0) return [];
+  const stringData = {};
+  Object.entries(data || {}).forEach(([k, v]) => { stringData[k] = String(v == null ? '' : v); });
+
+  const messaging = getFirebaseAdmin().messaging();
+  const resp = await messaging.sendEachForMulticast({
+    tokens,
+    data: stringData,
+    android: { priority: 'high' },
+    webpush: { headers: { Urgency: 'high', TTL: '120' } },
+  });
+
+  const invalid = [];
+  resp.responses.forEach((r, i) => {
+    if (!r.success) {
+      const code = r.error && r.error.code;
+      if (code === 'messaging/registration-token-not-registered' ||
+          code === 'messaging/invalid-registration-token' ||
+          code === 'messaging/invalid-argument') {
+        invalid.push(tokens[i]);
+      }
+    }
+  });
+  return invalid;
+}
+
+module.exports = { verifyFirebaseIdToken, sendPushToTokens };
