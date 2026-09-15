@@ -28,7 +28,7 @@ const upload = multer({
   },
 });
 
-const uploadToCloudinary = async (buffer, mimetype, folder = 'nearbite/riders') => {
+const uploadToCloudinary = async (buffer, mimetype, folder = 'eatswada/riders') => {
   const validation = validateImageBuffer(buffer, mimetype);
   if (!validation.valid) {
     const error = new Error(validation.message);
