@@ -16,6 +16,7 @@ const {
   updateAssignedOrderStatus,
   verifyDeliveryOtp,
   updateLocation,
+  reportDeliveryIssue,
 } = require('../controllers/riderController');
 
 const { protect, authorize } = require('../middleware/authMiddleware');
@@ -38,6 +39,7 @@ router.get('/orders/:id', getAssignedOrderById);
 router.put('/orders/:id/status', updateAssignedOrderStatus);
 
 // IMPORTANT: the existing route is POST, so the production page uses POST.
+router.post('/orders/:id/delivery-issue', reportDeliveryIssue);
 router.post('/orders/:id/verify-otp', verifyDeliveryOtp);
 
 module.exports = router;
