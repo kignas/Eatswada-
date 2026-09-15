@@ -11,6 +11,7 @@
 const User = require('../models/User');
 const Order = require('../models/Order');
 const Restaurant = require('../models/Restaurant');
+const { notifyRiderAssignment } = require('./notificationService');
 
 const ACTIVE_RIDER_STATUSES = ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery'];
 
@@ -108,6 +109,12 @@ async function autoAssignRider(order, excludeRiderIds = []) {
       note: `Auto-assigned to ${rider.name}${zoneMatched ? ' (same zone)' : ' (nearest available, outside zone)'}`,
       at: new Date(),
     });
+
+    // Notification is emitted by the same assignment service used by every
+    // automatic assignment path, so a rider never depends on the vendor UI
+    // being open to discover a delivery. Persistence is best-effort and must
+    // never block assignment.
+    notifyRiderAssignment(order, rider).catch(() => {});
 
     return {
       assigned: true,
