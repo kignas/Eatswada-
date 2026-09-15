@@ -273,6 +273,40 @@ const orderSchema = new mongoose.Schema(
       default: 0,
     },
 
+    // --- DELIVERY ISSUE / FAILED ATTEMPT AUDIT ---------------------------
+    // A rider can report a real delivery problem without cancelling the
+    // order. The latest issue is customer-visible; the history keeps an
+    // audit trail when more than one attempt is needed.
+    deliveryIssue: {
+      status: { type: String, enum: ['none', 'reported', 'resolved'], default: 'none' },
+      reasonCode: { type: String, default: '' },
+      reason: { type: String, default: '' },
+      note: { type: String, default: '', maxlength: 500 },
+      reportedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      reportedAt: { type: Date, default: null },
+      riderStatus: { type: String, default: '' },
+      attempt: { type: Number, default: 0, min: 0 },
+      location: {
+        coordinates: { type: [Number], default: undefined },
+        capturedAt: { type: Date, default: null },
+      },
+    },
+    deliveryIssueHistory: [
+      {
+        reasonCode: { type: String, required: true },
+        reason: { type: String, required: true },
+        note: { type: String, default: '', maxlength: 500 },
+        reportedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+        reportedAt: { type: Date, default: Date.now },
+        riderStatus: { type: String, default: '' },
+        attempt: { type: Number, default: 1, min: 1 },
+        location: {
+          coordinates: { type: [Number], default: undefined },
+          capturedAt: { type: Date, default: null },
+        },
+      },
+    ],
+
     // --- DELIVERY OTP (customer hands this to the rider at the door) ---
     // deliveryOtp is the plaintext copy the customer's own order endpoints
     // return (see getOrders/getOrderById in orderController.js) so the
