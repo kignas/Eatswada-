@@ -4,7 +4,7 @@ const asyncHandler = require('express-async-handler');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { uploadToCloudinary } = require('../utils/riderUpload');
-const { notifyOrderStatus } = require('../services/notificationService');
+const { notifyOrderStatus, notifyDeliveryIssue } = require('../services/notificationService');
 
 /* ── Rider-owned delivery status flow ──
  * unassigned -> assigned -> accepted -> reached_restaurant -> picked_up -> out_for_delivery -> delivered
@@ -283,6 +283,69 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
  * above). Only allowed while the order is 'out_for_delivery'. Enforces a
  * per-order failed-attempt limit and temporary lockout — see
  * Order.OTP_CONFIG (currently 5 attempts / 15-minute lockout). */
+
+/* POST /api/riders/orders/:id/delivery-issue
+ * Report a real-world delivery problem without pretending the order was
+ * delivered or cancelling it. The latest issue is customer-visible and every
+ * report is retained in deliveryIssueHistory for support/audit. */
+exports.reportDeliveryIssue = asyncHandler(async (req, res) => {
+  const REASONS = {
+    customer_unreachable: 'Customer not answering',
+    customer_unavailable: 'Customer unavailable at delivery location',
+    wrong_address: 'Wrong or incomplete address',
+    cannot_reach_location: 'Unable to reach the delivery location',
+    customer_requested_cancel: 'Customer asked to cancel at the door',
+    vehicle_problem: 'Vehicle problem',
+    safety_issue: 'Safety issue',
+    restaurant_delay: 'Restaurant handover delay',
+    other: 'Other delivery issue',
+  };
+  const reasonCode = String(req.body?.reasonCode || '').trim();
+  const note = typeof req.body?.note === 'string' ? req.body.note.trim().slice(0, 500) : '';
+  if (!Object.prototype.hasOwnProperty.call(REASONS, reasonCode)) {
+    return res.status(400).json({ success: false, message: 'Select a valid delivery issue reason.' });
+  }
+
+  const order = await Order.findOne({ _id: req.params.id, rider: req.user._id });
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
+  if (['delivered', 'cancelled'].includes(order.status) || order.riderStatus === 'delivered') {
+    return res.status(409).json({ success: false, message: 'A delivery issue cannot be reported for a completed order.' });
+  }
+  if (!['picked_up', 'out_for_delivery'].includes(order.riderStatus)) {
+    return res.status(409).json({ success: false, message: 'Delivery issues can be reported after the order has been picked up.' });
+  }
+
+  const now = new Date();
+  const previousAttempts = Array.isArray(order.deliveryIssueHistory) ? order.deliveryIssueHistory.length : 0;
+  const attempt = previousAttempts + 1;
+  const live = req.user?.riderDetails?.currentLocation;
+  const coords = Array.isArray(live?.coordinates) && live.coordinates.length >= 2
+    ? [Number(live.coordinates[0]), Number(live.coordinates[1])] : undefined;
+
+  const issue = {
+    status: 'reported', reasonCode, reason: REASONS[reasonCode], note,
+    reportedBy: req.user._id, reportedAt: now, riderStatus: order.riderStatus, attempt,
+    ...(coords ? { location: { coordinates: coords, capturedAt: live.updatedAt || now } } : {}),
+  };
+  order.deliveryIssue = issue;
+  order.deliveryIssueHistory = order.deliveryIssueHistory || [];
+  order.deliveryIssueHistory.push(issue);
+  order.riderStatusHistory = order.riderStatusHistory || [];
+  order.riderStatusHistory.push({
+    status: order.riderStatus,
+    note: `Delivery issue reported: ${REASONS[reasonCode]}${note ? ` — ${note}` : ''}`,
+    at: now,
+    riderId: req.user._id,
+  });
+  await order.save();
+
+  try { await notifyDeliveryIssue(order); } catch (_) {}
+  res.status(200).json({
+    success: true,
+    message: 'Delivery issue recorded. The customer has been updated.',
+    data: { deliveryIssue: order.deliveryIssue, deliveryIssueHistory: order.deliveryIssueHistory },
+  });
+});
 
 /* PUT /api/riders/location — the rider app sends its live GPS here while
  * delivering. Stored as [lng, lat]; surfaced to the customer's tracking
