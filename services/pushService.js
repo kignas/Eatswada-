@@ -16,6 +16,7 @@
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
 const Order = require('../models/Order');
+const Notification = require('../models/Notification');
 const { sendPushToTokens } = require('../models/firebaseAdmin');
 
 const RING_INTERVAL_MS = 30 * 1000;   // re-alert cadence
@@ -65,6 +66,24 @@ async function notifyRestaurantNewOrder(order) {
     const restaurant = await Restaurant.findById(order.restaurant).select('owner name').lean();
     if (!restaurant || !restaurant.owner) return;
     const ownerId = restaurant.owner;
+
+    // Persist one in-app notification as well as the FCM push. This gives
+    // the vendor a durable notification even if the device was offline.
+    try {
+      await Notification.create({
+        user: ownerId,
+        type: 'order',
+        title: 'New order!',
+        message: `New order · ₹${Number(order.total || 0)} · tap to accept`,
+        data: {
+          orderId: id,
+          orderNumber: order.orderNumber || '',
+          kind: 'new_order'
+        }
+      });
+    } catch (err) {
+      console.error('[NOTIFY] vendor notification persistence failed:', err.message);
+    }
 
     const payload = () => pushToUser(ownerId, {
       type: 'new_order',
