@@ -7,6 +7,7 @@ const { logAdminAction } = require('../services/auditService');
 
 const ANIMATIONS = new Set(['fade', 'slide', 'scale', 'none']);
 const TEXT_COLORS = new Set(['light', 'dark']);
+const HEADER_THEMES = new Set(['anime', 'pink', 'lavender', 'magenta']);
 
 function validBackground(value) {
   if (!value) return true;
@@ -20,11 +21,12 @@ function clean(value, max = 500) {
 
 function cleanPayload(body = {}) {
   const payload = {};
-  const stringFields = ['title', 'subtitle', 'offerText', 'badgeText', 'ctaText', 'ctaUrl', 'image', 'mobileImage', 'background'];
+  const stringFields = ['title', 'subtitle', 'offerText', 'badgeText', 'ctaText', 'ctaUrl', 'image', 'mobileImage', 'background', 'headerTheme'];
   stringFields.forEach((key) => {
     if (body[key] !== undefined) payload[key] = clean(body[key], key === 'image' || key === 'mobileImage' ? 1000 : key === 'ctaUrl' ? 300 : 140);
   });
   if (body.textColor !== undefined) payload.textColor = clean(body.textColor, 10).toLowerCase();
+  if (body.headerTheme !== undefined) payload.headerTheme = clean(body.headerTheme, 20).toLowerCase();
   if (body.animation !== undefined) payload.animation = clean(body.animation, 20).toLowerCase();
   if (body.active !== undefined) payload.active = Boolean(body.active);
   if (body.priority !== undefined) payload.priority = Number(body.priority);
@@ -38,6 +40,7 @@ function validatePayload(payload, { partial = false } = {}) {
   if (!partial && !payload.image) return 'Desktop image is required.';
   if (payload.animation !== undefined && !ANIMATIONS.has(payload.animation)) return 'Invalid animation type.';
   if (payload.textColor !== undefined && !TEXT_COLORS.has(payload.textColor)) return 'Invalid text color.';
+  if (payload.headerTheme !== undefined && !HEADER_THEMES.has(payload.headerTheme)) return 'Invalid header theme.';
   if (payload.background !== undefined && !validBackground(payload.background)) return 'Background must be a valid color or simple CSS gradient.';
   if (payload.priority !== undefined && (!Number.isFinite(payload.priority) || payload.priority < 0 || payload.priority > 9999)) return 'Priority must be between 0 and 9999.';
   if (payload.ctaUrl) {
@@ -59,7 +62,7 @@ exports.getActiveBanners = asyncHandler(async (req, res) => {
       { $or: [{ endAt: null }, { endAt: { $gte: now } }] },
     ],
   })
-    .select('title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation priority')
+    .select('title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation headerTheme priority')
     .sort({ priority: -1, createdAt: -1 })
     .lean();
 
