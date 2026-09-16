@@ -9,6 +9,7 @@ const FOLDER_MAP = {
   restaurants: 'Nearbite/restaurants',
   menu: 'Nearbite/menu',
   categories: 'Nearbite/categories',
+  banners: 'Eatswada/banners',
 };
 
 const streamUpload = (buffer, folder) => new Promise((resolve, reject) => {
