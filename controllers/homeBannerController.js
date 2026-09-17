@@ -21,7 +21,7 @@ function clean(value, max = 500) {
 
 function cleanPayload(body = {}) {
   const payload = {};
-  const stringFields = ['title', 'subtitle', 'offerText', 'badgeText', 'ctaText', 'ctaUrl', 'image', 'mobileImage', 'background', 'headerTheme'];
+  const stringFields = ['title', 'subtitle', 'offerText', 'badgeText', 'ctaText', 'ctaUrl', 'image', 'mobileImage', 'background', 'headerTheme', 'searchPlaceholder'];
   stringFields.forEach((key) => {
     if (body[key] !== undefined) payload[key] = clean(body[key], key === 'image' || key === 'mobileImage' ? 1000 : key === 'ctaUrl' ? 300 : 140);
   });
@@ -62,7 +62,7 @@ exports.getActiveBanners = asyncHandler(async (req, res) => {
       { $or: [{ endAt: null }, { endAt: { $gte: now } }] },
     ],
   })
-    .select('title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation headerTheme priority')
+    .select('title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation headerTheme searchPlaceholder priority')
     .sort({ priority: -1, createdAt: -1 })
     .lean();
 
