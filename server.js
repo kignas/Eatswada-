@@ -203,7 +203,6 @@ const apiMounts = [
   ['/coupons',              couponRoutes],
   ['/platform',             platformRoutes],
   ['/notifications',        notificationRoutes],
-  ['/home-banners',          homeBannerRoutes],
   ['/auth',                 firebaseAuthRoutes],
 ];
 
