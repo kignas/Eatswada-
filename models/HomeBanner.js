@@ -24,6 +24,7 @@ const homeBannerSchema = new mongoose.Schema({
   textColor: { type: String, enum: ['light', 'dark'], default: 'light' },
   animation: { type: String, enum: ['fade', 'slide', 'scale', 'none'], default: 'fade' },
   headerTheme: { type: String, enum: ['anime', 'pink', 'lavender', 'magenta'], default: 'anime', index: true },
+  searchPlaceholder: { type: String, trim: true, maxlength: 40, default: '' },
   active: { type: Boolean, default: true, index: true },
   priority: { type: Number, min: 0, max: 9999, default: 0, index: true },
   startAt: { type: Date, default: null, index: true },
