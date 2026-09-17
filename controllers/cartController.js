@@ -39,6 +39,58 @@ function round2(value) {
 }
 
 /**
+ * Resolve, validate, and PRICE a customer's customization choices against the
+ * item's own customization groups. Prices come from the Menu document, never
+ * the client, so a tampered request can't lower the price. Enforces each
+ * group's required / minSelect / maxSelect rules.
+ *
+ * Client sends: customizations = [ { title, selected: ["label", ...] } ]
+ *   (also tolerates { title, options: [{label}] }).
+ * Returns { resolved:[{title,options:[{label,extraPrice,isVeg}]}], extra, error }.
+ */
+function resolveCustomizations(menuItem, raw) {
+  const groups = Array.isArray(menuItem.customizations) ? menuItem.customizations : [];
+  if (!groups.length) return { resolved: [], extra: 0, error: null };
+
+  const picked = {};
+  const arr = Array.isArray(raw) ? raw : [];
+  for (const entry of arr) {
+    if (!entry || typeof entry !== 'object') continue;
+    const title = String(entry.title || '');
+    let labels = [];
+    if (Array.isArray(entry.selected)) labels = entry.selected.map(String);
+    else if (Array.isArray(entry.options)) labels = entry.options.map(o => String(o && o.label != null ? o.label : o));
+    picked[title] = labels;
+  }
+
+  let extra = 0;
+  const resolved = [];
+  for (const g of groups) {
+    const title = String(g.title || '');
+    const opts = Array.isArray(g.options) ? g.options : [];
+    const min = g.required ? Math.max(1, Number(g.minSelect || 1)) : Number(g.minSelect || 0);
+    const max = Number(g.maxSelect || 1) || 1;
+    const chosenLabels = picked[title] || [];
+
+    if (chosenLabels.length < min)
+      return { error: `Please choose ${min > 1 ? min + ' options' : 'an option'} for "${title}".` };
+    if (chosenLabels.length > max)
+      return { error: `You can select up to ${max} for "${title}".` };
+
+    const chosen = [];
+    for (const lbl of chosenLabels) {
+      const opt = opts.find(o => String(o.label) === String(lbl));
+      if (!opt) return { error: `"${lbl}" isn't a valid choice for "${title}".` };
+      const p = Number(opt.extraPrice || 0);
+      extra += p;
+      chosen.push({ label: opt.label, extraPrice: p, isVeg: opt.isVeg !== false });
+    }
+    if (chosen.length) resolved.push({ title, options: chosen });
+  }
+  return { resolved, extra: round2(extra), error: null };
+}
+
+/**
  * Back-fill any legacy cart items that predate item-level restaurant
  * ownership, deriving `restaurant` from the Menu document. Items whose menu
  * no longer exists cannot have an owner derived safely, so they are dropped
@@ -228,7 +280,17 @@ const addToCart = asyncHandler(async (req, res) => {
 
   // Multi-restaurant carts are now ALLOWED. Items from a different restaurant
   // simply form a new group — no rejection.
-  const existing = cart.items.find(i => String(i.menuItem) === String(menuItemId));
+  const { resolved, extra, error } = resolveCustomizations(menuItem, customizations);
+  if (error) return res.status(400).json({ success: false, message: error });
+  const unitPrice = round2(Number(menuItem.price) + extra);
+  const sig = JSON.stringify(resolved);
+
+  // Same item + same customizations merges; a differently-customized item
+  // forms its own line (a plain pizza and a loaded pizza are separate entries).
+  const existing = cart.items.find(i =>
+    String(i.menuItem) === String(menuItemId) &&
+    JSON.stringify(Array.isArray(i.customizations) ? i.customizations : []) === sig
+  );
   if (existing) {
     existing.quantity = Math.min(99, existing.quantity + requestedQuantity);
     // Ensure legacy items gain authoritative ownership too.
@@ -240,12 +302,12 @@ const addToCart = asyncHandler(async (req, res) => {
       restaurant: ownerRestaurant._id,          // authoritative
       restaurantName: ownerRestaurant.name,     // snapshot (display only)
       name:     menuItem.name,
-      price:    menuItem.price,
-      originalPrice: (Number(menuItem.originalPrice) > Number(menuItem.price)) ? Number(menuItem.originalPrice) : null,
+      price:    unitPrice,                       // base + priced customizations
+      originalPrice: (Number(menuItem.originalPrice) > Number(menuItem.price)) ? round2(Number(menuItem.originalPrice) + extra) : null,
       image:    menuItem.image,
       isVeg:    menuItem.isVeg,
       quantity: requestedQuantity,
-      customizations,
+      customizations: resolved,
     });
   }
 
