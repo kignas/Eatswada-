@@ -64,10 +64,14 @@ const menuItemSchema = new mongoose.Schema(
     customizations: [
       {
         title: String,
+        required: { type: Boolean, default: false },
+        minSelect: { type: Number, default: 0 },   // 0 = optional
+        maxSelect: { type: Number, default: 1 },   // 1 = single-select; N = "select up to N"
         options: [
           {
             label: String,
             extraPrice: { type: Number, default: 0 },
+            isVeg: { type: Boolean, default: true },
           },
         ],
       },
