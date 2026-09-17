@@ -192,6 +192,7 @@ const apiMounts = [
   ['/vendor',               vendorRoutes],
   ['/vendor-applications',  vendorApplicationRoutes],
   ['/admin',                adminRoutes],
+  ['/home-banners', homeBannerRoutes],
   ['/upload',               uploadRoutes],
   ['/categories',           categoryRoutes],
   ['/menu',                 menuRoutes],
