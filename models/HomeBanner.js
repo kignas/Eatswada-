@@ -12,6 +12,7 @@ const urlValidator = {
 };
 
 const homeBannerSchema = new mongoose.Schema({
+  placement: { type: String, enum: ['home', 'under99'], default: 'home', index: true },
   title: { type: String, required: true, trim: true, maxlength: 90 },
   subtitle: { type: String, trim: true, maxlength: 140, default: '' },
   offerText: { type: String, trim: true, maxlength: 60, default: '' },
@@ -33,6 +34,6 @@ const homeBannerSchema = new mongoose.Schema({
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 }, { timestamps: true });
 
-homeBannerSchema.index({ active: 1, priority: -1, createdAt: -1 });
+homeBannerSchema.index({ placement: 1, active: 1, priority: -1, createdAt: -1 });
 
 module.exports = mongoose.models.HomeBanner || mongoose.model('HomeBanner', homeBannerSchema);
