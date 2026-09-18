@@ -146,27 +146,158 @@ const getMenu = asyncHandler(async (req, res) => {
 
 const getUnder99Items = asyncHandler(async (req, res) => {
   try {
-    // 🔧 FIX: same mismatch as above — schema uses `inStock` (not `isAvailable`)
-    // and `restaurantId` (not `restaurant`), so this endpoint always returned 0
-    // items regardless of what was in the database.
-    const items = await MenuItem.find({ price: { $lte: 149 }, inStock: true })
-      .populate({ path: 'restaurantId', match: { isOpen: true, approvalStatus: 'approved' }, select: 'name image rating' })
-      .sort({ price: 1 })
-      .limit(50);
+    // The 99 Store is restaurant-led: a restaurant qualifies when it has at
+    // least one in-stock item priced at <= ₹99. Once qualified, the card gets
+    // the restaurant's COMPLETE menu so the customer can horizontally browse
+    // from lowest -> highest price and add any available item without making
+    // one API request per restaurant.
+    const qualifyingItems = await MenuItem.find({
+      price: { $lte: 99 },
+      inStock: true,
+    })
+      .select('restaurantId')
+      .lean();
 
-    // Response shape kept identical to before (key still called "restaurant")
-    // so the frontend doesn't need any changes.
-    const validItems = items
-      .filter(item => item.restaurantId != null)
-      .map(item => {
-        const obj = item.toObject();
-        obj.restaurant = obj.restaurantId;
-        return obj;
+    const restaurantIds = [...new Set(
+      qualifyingItems
+        .map(item => item.restaurantId)
+        .filter(Boolean)
+        .map(id => id.toString())
+    )];
+
+    if (!restaurantIds.length) {
+      return res.json({ success: true, count: 0, data: [] });
+    }
+
+    const visibleRestaurants = await Restaurant.find({
+      _id: { $in: restaurantIds },
+      isActive: true,
+      approvalStatus: 'approved',
+      'availability.isOpen': true,
+    })
+      .select([
+        'name',
+        'image',
+        'images',
+        'rating',
+        'ratingCount',
+        'estimatedDeliveryMin',
+        'estimatedDeliveryMax',
+        'time',
+        'distance',
+        'cuisine',
+        'cuisineDisplay',
+        'offer',
+        'freeDeliveryAbove',
+        'freeDeliveryEnabled',
+        'deliveryFee',
+      ].join(' '))
+      .lean();
+
+    if (!visibleRestaurants.length) {
+      return res.json({ success: true, count: 0, data: [] });
+    }
+
+    const visibleRestaurantIds = visibleRestaurants.map(r => r._id);
+
+    // Return every menu item, including out-of-stock items. This lets the
+    // 99 Store card represent the restaurant's whole menu while the frontend
+    // can disable the ADD control for unavailable items.
+    const menuItems = await MenuItem.find({
+      restaurantId: { $in: visibleRestaurantIds },
+    })
+      .select([
+        'restaurantId',
+        'name',
+        'description',
+        'price',
+        'originalPrice',
+        'image',
+        'isVeg',
+        'category',
+        'isUnder99',
+        'isBestseller',
+        'isRecommended',
+        'inStock',
+        'customizations',
+        'sortOrder',
+      ].join(' '))
+      .sort({ price: 1, sortOrder: 1, name: 1 })
+      .lean();
+
+    const menusByRestaurant = new Map();
+    for (const item of menuItems) {
+      const key = item.restaurantId.toString();
+      if (!menusByRestaurant.has(key)) menusByRestaurant.set(key, []);
+
+      const price = Number(item.price);
+      const originalPrice = Number(item.originalPrice);
+      const hasValidDiscount = Number.isFinite(originalPrice) && originalPrice > price;
+
+      menusByRestaurant.get(key).push({
+        id: item._id,
+        name: item.name,
+        description: item.description || '',
+        price,
+        originalPrice: hasValidDiscount ? originalPrice : null,
+        discountPercent: hasValidDiscount
+          ? Math.round(((originalPrice - price) / originalPrice) * 100)
+          : null,
+        image: item.image || '',
+        isVeg: Boolean(item.isVeg),
+        category: item.category || 'Recommended',
+        isUnder99: price <= 99,
+        isBestseller: Boolean(item.isBestseller),
+        isRecommended: Boolean(item.isRecommended),
+        inStock: item.inStock !== false,
+        customizations: item.customizations || [],
       });
+    }
 
-    res.json({ success: true, count: validItems.length, data: validItems });
+    const data = visibleRestaurants
+      .map(restaurant => {
+        const key = restaurant._id.toString();
+        const menu = menusByRestaurant.get(key) || [];
+        if (!menu.length) return null;
+
+        return {
+          restaurant: {
+            id: restaurant._id,
+            name: restaurant.name,
+            image: restaurant.image || restaurant.images?.[0] || '',
+            images: restaurant.images || [],
+            rating: restaurant.rating,
+            ratingCount: restaurant.ratingCount,
+            deliveryTime: restaurant.time || `${restaurant.estimatedDeliveryMin}-${restaurant.estimatedDeliveryMax} mins`,
+            estimatedDeliveryMin: restaurant.estimatedDeliveryMin,
+            estimatedDeliveryMax: restaurant.estimatedDeliveryMax,
+            distance: restaurant.distance || '',
+            cuisine: restaurant.cuisineDisplay || (restaurant.cuisine || []).join(', '),
+            offer: restaurant.offer || '',
+            freeDeliveryAbove: restaurant.freeDeliveryEnabled ? restaurant.freeDeliveryAbove : null,
+            deliveryFee: restaurant.deliveryFee,
+          },
+          menu,
+          // The first item is always the cheapest because the query is sorted
+          // by price, then sortOrder, then name.
+          cheapestPrice: menu[0].price,
+          menuCount: menu.length,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.cheapestPrice - b.cheapestPrice);
+
+    res.json({
+      success: true,
+      count: data.length,
+      data,
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Failed to fetch 99 store items' });
+    console.error('99 Store menu fetch failed:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch 99 store items',
+    });
   }
 });
 
