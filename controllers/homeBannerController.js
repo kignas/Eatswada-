@@ -8,6 +8,7 @@ const { logAdminAction } = require('../services/auditService');
 const ANIMATIONS = new Set(['fade', 'slide', 'scale', 'none']);
 const TEXT_COLORS = new Set(['light', 'dark']);
 const HEADER_THEMES = new Set(['anime', 'pink', 'lavender', 'magenta']);
+const PLACEMENTS = new Set(['home', 'under99']);
 
 function validBackground(value) {
   if (!value) return true;
@@ -25,6 +26,7 @@ function cleanPayload(body = {}) {
   stringFields.forEach((key) => {
     if (body[key] !== undefined) payload[key] = clean(body[key], key === 'image' || key === 'mobileImage' ? 1000 : key === 'ctaUrl' ? 300 : 140);
   });
+  if (body.placement !== undefined) payload.placement = clean(body.placement, 20).toLowerCase();
   if (body.textColor !== undefined) payload.textColor = clean(body.textColor, 10).toLowerCase();
   if (body.headerTheme !== undefined) payload.headerTheme = clean(body.headerTheme, 20).toLowerCase();
   if (body.animation !== undefined) payload.animation = clean(body.animation, 20).toLowerCase();
@@ -38,6 +40,7 @@ function cleanPayload(body = {}) {
 function validatePayload(payload, { partial = false } = {}) {
   if (!partial && !payload.title) return 'Title is required.';
   if (!partial && !payload.image) return 'Desktop image is required.';
+  if (payload.placement !== undefined && !PLACEMENTS.has(payload.placement)) return 'Invalid banner placement.';
   if (payload.animation !== undefined && !ANIMATIONS.has(payload.animation)) return 'Invalid animation type.';
   if (payload.textColor !== undefined && !TEXT_COLORS.has(payload.textColor)) return 'Invalid text color.';
   if (payload.headerTheme !== undefined && !HEADER_THEMES.has(payload.headerTheme)) return 'Invalid header theme.';
@@ -55,14 +58,17 @@ function validatePayload(payload, { partial = false } = {}) {
 
 exports.getActiveBanners = asyncHandler(async (req, res) => {
   const now = new Date();
+  const placement = String(req.query.placement || 'home').trim().toLowerCase();
+  if (!PLACEMENTS.has(placement)) return res.status(400).json({ success: false, message: 'Invalid banner placement.' });
   const banners = await HomeBanner.find({
+    placement,
     active: true,
     $and: [
       { $or: [{ startAt: null }, { startAt: { $lte: now } }] },
       { $or: [{ endAt: null }, { endAt: { $gte: now } }] },
     ],
   })
-    .select('title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation headerTheme searchPlaceholder priority')
+    .select('placement title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation headerTheme searchPlaceholder priority')
     .sort({ priority: -1, createdAt: -1 })
     .lean();
 
