@@ -13,14 +13,41 @@ const FOLDER_MAP = {
 };
 
 const streamUpload = (buffer, folder) => new Promise((resolve, reject) => {
-  const uploadStream = cloudinary.uploader.upload_stream(
-    { folder, resource_type: 'image' },
-    (error, result) => error ? reject(error) : resolve(result)
-  );
-  streamifier.createReadStream(buffer).pipe(uploadStream);
+  let settled = false;
+  const source = streamifier.createReadStream(buffer);
+  const timeout = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    try { source.destroy(); } catch (_) {}
+    const error = new Error('Image storage service timed out. Please try again.');
+    error.statusCode = 504;
+    reject(error);
+  }, 60 * 1000);
+
+  const finish = (error, result) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    if (error) return reject(error);
+    resolve(result);
+  };
+
+  let uploadStream;
+  try {
+    uploadStream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: 'image' },
+      (error, result) => finish(error, result)
+    );
+    source.on('error', finish);
+    uploadStream.on('error', finish);
+    source.pipe(uploadStream);
+  } catch (error) {
+    finish(error);
+  }
 });
 
 // @route POST /api/upload/:type
+// Supported types: restaurants | menu | categories | banners
 // @access Private (admin)
 const uploadImage = asyncHandler(async (req, res) => {
   const folder = FOLDER_MAP[req.params.type];
