@@ -173,7 +173,10 @@ const getUnder99Items = asyncHandler(async (req, res) => {
       _id: { $in: restaurantIds },
       isActive: true,
       approvalStatus: 'approved',
-      'availability.isOpen': true,
+      $or: [
+        { 'availability.isOpen': true },
+        { isOpen: true }
+      ],
     })
       .select([
         'name',
