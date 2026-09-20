@@ -10,6 +10,7 @@ const FOLDER_MAP = {
   menu: 'Nearbite/menu',
   categories: 'Nearbite/categories',
   banners: 'Eatswada/banners',
+  restaurantDelivery: 'Eatswada/restaurant-delivery',
 };
 
 const streamUpload = (buffer, folder) => new Promise((resolve, reject) => {
@@ -47,7 +48,7 @@ const streamUpload = (buffer, folder) => new Promise((resolve, reject) => {
 });
 
 // @route POST /api/upload/:type
-// Supported types: restaurants | menu | categories | banners
+// Supported types: restaurants | menu | categories | banners | restaurantDelivery
 // @access Private (admin)
 const uploadImage = asyncHandler(async (req, res) => {
   const folder = FOLDER_MAP[req.params.type];
