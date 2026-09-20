@@ -196,6 +196,17 @@ const restaurantSchema = new mongoose.Schema(
       default: true,
     },
 
+    // Customer-facing delivery banner artwork shown on the restaurant menu page.
+    // The Admin uploads the transparent rider/banner artwork to Cloudinary and
+    // this field stores only the resulting secure URL. The frontend owns the
+    // banner layout/design; the backend supplies the artwork URL.
+    deliveryBannerImage: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: [1000, 'Delivery banner image URL cannot exceed 1000 characters'],
+    },
+
     // Maximum customer-to-restaurant delivery radius. Eatswada's Maynaguri
     // launch has a hard platform cap of 10 km; individual restaurants may
     // configure a smaller radius, never a larger one. Actual order distance
