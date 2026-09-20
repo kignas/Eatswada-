@@ -26,7 +26,7 @@ const handleUpload = (req, res, next) => {
 };
 
 // @route   POST /api/upload/:type
-// @desc    Upload an image to Cloudinary. :type is one of restaurants | menu | categories | banners
+// @desc    Upload an image to Cloudinary. :type is one of restaurants | menu | categories | banners | restaurantDelivery
 // @access  Private (admin)
 router.post('/:type', protect, authorize('admin'), handleUpload, uploadImage);
 
