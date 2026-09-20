@@ -240,10 +240,10 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const { search, status = 'active' } = req.query;
   const filter = {};
-  // 'all' intentionally omits the isActive filter entirely so deactivated
-  // restaurants remain visible/recoverable instead of vanishing from admin view.
-  if (status === 'active') filter.isActive = true;
-  else if (status === 'inactive') filter.isActive = false;
+  // Active restaurants are the normal admin list. Legacy inactive records are
+  // available only when the admin explicitly selects the inactive cleanup view.
+  if (status !== 'inactive') filter.isActive = true;
+  else filter.isActive = false;
   if (search) filter.name = { $regex: search, $options: 'i' };
   const restaurants = await Restaurant.find(filter).populate('owner', 'name phone email').sort({ homeOrder: 1, isFeatured: -1, displayPriority: -1, createdAt: -1 });
   res.json({ success: true, data: restaurants.map(r => ({
