@@ -333,7 +333,11 @@ const searchRestaurants = asyncHandler(async (req, res) => {
   try {
     const menuFilter = {
       inStock: true,
-      name: regex,
+      $or: [
+        { name: regex },
+        { category: regex },
+        { description: regex },
+      ],
     };
 
     if (scope === 'under99') {
