@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Restaurant = require('../models/Restaurant');
 const MenuItem   = require('../models/Menu');
 const asyncHandler = require('express-async-handler');
@@ -306,18 +307,133 @@ const getUnder99Items = asyncHandler(async (req, res) => {
 
 const searchRestaurants = asyncHandler(async (req, res) => {
   const rawQ = String(req.query.q || '').trim();
-  if (rawQ.length < 2) return res.status(400).json({ success: false, message: 'Query must be at least 2 characters' });
-  if (rawQ.length > 80) return res.status(400).json({ success: false, message: 'Query is too long.' });
+  const scope = String(req.query.scope || 'home').trim().toLowerCase();
+  const restaurantId = String(req.query.restaurantId || '').trim();
+
+  if (rawQ.length < 2) {
+    return res.status(400).json({ success: false, message: 'Query must be at least 2 characters' });
+  }
+  if (rawQ.length > 80) {
+    return res.status(400).json({ success: false, message: 'Query is too long.' });
+  }
+
+  const allowedScopes = new Set(['home', 'under99', 'restaurant']);
+  if (!allowedScopes.has(scope)) {
+    return res.status(400).json({ success: false, message: 'Invalid search scope' });
+  }
+
+  if (scope === 'restaurant' && !mongoose.Types.ObjectId.isValid(restaurantId)) {
+    return res.status(400).json({ success: false, message: 'Valid restaurantId is required for restaurant search' });
+  }
+
+  // Keep search input safe for regex and cap result work. This endpoint is an
+  // autocomplete/search-surface API, not a full catalogue export.
   const regex = new RegExp(escapeRegex(rawQ), 'i');
+
   try {
-    const [restaurants, menuItems] = await Promise.all([
-      Restaurant.find({ isOpen: true, approvalStatus: 'approved', $or: [{ name: regex }, { cuisineDisplay: regex }] }).limit(10),
-      // 🔧 FIX: schema field is `inStock`, not `isAvailable` — same bug as above,
-      // meant menu-item search results were always empty.
-      MenuItem.find({ inStock: true, name: regex }).limit(20),
-    ]);
-    res.json({ success: true, data: { restaurants, menuItems } });
+    const menuFilter = {
+      inStock: true,
+      name: regex,
+    };
+
+    if (scope === 'under99') {
+      menuFilter.price = { $lte: 99 };
+    }
+
+    if (scope === 'restaurant') {
+      menuFilter.restaurantId = restaurantId;
+    }
+
+    // Restaurant search is intentionally no longer part of the customer
+    // homepage search response. The homepage search surface is dish-first.
+    // Restaurant search remains available elsewhere through the dedicated
+    // restaurant browse/search UI if needed.
+    const menuItems = await MenuItem.find(menuFilter)
+      .select([
+        '_id',
+        'restaurantId',
+        'name',
+        'description',
+        'price',
+        'originalPrice',
+        'image',
+        'isVeg',
+        'category',
+        'isBestseller',
+        'isRecommended',
+        'inStock',
+      ].join(' '))
+      .sort({ isBestseller: -1, isRecommended: -1, sortOrder: 1, name: 1 })
+      .limit(30)
+      .lean();
+
+    if (!menuItems.length) {
+      return res.json({
+        success: true,
+        scope,
+        query: rawQ,
+        count: 0,
+        data: { menuItems: [] },
+      });
+    }
+
+    const restaurantIds = [...new Set(menuItems.map(item => String(item.restaurantId)).filter(Boolean))];
+    const restaurants = await Restaurant.find({
+      _id: { $in: restaurantIds },
+      isActive: true,
+      approvalStatus: 'approved',
+      $or: [
+        { 'availability.isOpen': true },
+        { isOpen: true },
+      ],
+    })
+      .select('_id name image images rating ratingCount estimatedDeliveryMin estimatedDeliveryMax time cuisine cuisineDisplay')
+      .lean();
+
+    const restaurantMap = new Map(restaurants.map(r => [String(r._id), r]));
+
+    // Only return items whose restaurant is currently customer-visible/orderable.
+    const data = menuItems
+      .map(item => {
+        const restaurant = restaurantMap.get(String(item.restaurantId));
+        if (!restaurant) return null;
+
+        return {
+          id: item._id,
+          restaurantId: restaurant._id,
+          name: item.name,
+          description: item.description || '',
+          price: Number(item.price),
+          originalPrice: Number.isFinite(Number(item.originalPrice))
+            ? Number(item.originalPrice)
+            : null,
+          image: item.image || '',
+          isVeg: Boolean(item.isVeg),
+          category: item.category || 'Recommended',
+          isBestseller: Boolean(item.isBestseller),
+          isRecommended: Boolean(item.isRecommended),
+          restaurant: {
+            id: restaurant._id,
+            name: restaurant.name,
+            image: restaurant.image || restaurant.images?.[0] || '',
+            rating: restaurant.rating,
+            ratingCount: restaurant.ratingCount,
+            deliveryTime: restaurant.time || `${restaurant.estimatedDeliveryMin}-${restaurant.estimatedDeliveryMax} mins`,
+            cuisine: restaurant.cuisineDisplay || (restaurant.cuisine || []).join(', '),
+          },
+        };
+      })
+      .filter(Boolean);
+
+    res.json({
+      success: true,
+      scope,
+      query: rawQ,
+      count: data.length,
+      data: { menuItems: data },
+    });
   } catch (error) {
+    console.error('Search failed:', error);
     res.status(500).json({ success: false, message: 'Search failed' });
   }
 });
