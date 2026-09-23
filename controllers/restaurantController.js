@@ -108,6 +108,48 @@ const getRestaurants = asyncHandler(async (req, res) => {
   });
 });
 
+const getServiceability = asyncHandler(async (req, res) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return res.status(400).json({ success: false, message: 'Valid location coordinates are required.' });
+  }
+
+  // This is intentionally a tiny, indexed query. The customer does not need
+  // the complete restaurant payload just to decide whether the marketplace
+  // should open. The Restaurant.location 2dsphere index makes this much
+  // cheaper than downloading every restaurant and calculating distances in
+  // the browser.
+  const nearest = await Restaurant.aggregate([
+    {
+      $geoNear: {
+        near: { type: 'Point', coordinates: [lng, lat] },
+        key: 'location',
+        distanceField: 'distanceMeters',
+        spherical: true,
+        maxDistance: 10000,
+        query: { isActive: true, approvalStatus: 'approved' },
+      },
+    },
+    { $limit: 1 },
+    { $project: { _id: 1, distanceMeters: 1 } },
+  ]);
+
+  const nearestDistanceKm = nearest.length
+    ? Number((Number(nearest[0].distanceMeters || 0) / 1000).toFixed(2))
+    : null;
+
+  return res.json({
+    success: true,
+    data: {
+      serviceable: nearest.length > 0,
+      maxDeliveryDistanceKm: 10,
+      nearestDistanceKm,
+    },
+  });
+});
+
 const getRestaurantById = asyncHandler(async (req, res) => {
   // 🔧 CHANGE (Restaurant Availability): was `{ isOpen: true }`, which 404'd
   // closed restaurants entirely — but the customer detail page needs to be
@@ -808,7 +850,7 @@ const updateMenuItemAvailability = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
-  getRestaurants, getRestaurantById, getRestaurantReviews, getMenu, getUnder99Items,
+  getRestaurants, getServiceability, getRestaurantById, getRestaurantReviews, getMenu, getUnder99Items,
   searchRestaurants, getCategories,
   createRestaurant, updateRestaurant, deleteRestaurant, updateRestaurantAvailability,
   addMenuItem, updateMenuItem, deleteMenuItem, updateMenuItemAvailability

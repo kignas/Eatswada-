@@ -57,34 +57,23 @@ exports.firebaseAuth = asyncHandler(async (req, res) => {
   }
 
   if (!user) {
-    /*
-     * Progressive Google onboarding: create the authenticated customer shell
-     * immediately. Phone/password/profile details are optional for browsing
-     * and can be completed later from Home/Profile. This removes the old
-     * login -> complete-profile -> location -> address waterfall while keeping
-     * the account tied to the verified Google identity.
-     *
-     * The account is intentionally created without a password/phone. The
-     * profile completion endpoint (or /users/profile) adds those fields later.
-     */
-    user = await User.create({
-      name: safeName(decoded.name),
-      email,
-      googleUid,
-      avatar: String(decoded.picture || ''),
-      role: 'user',
-      isPhoneVerified: false,
-      lastLogin: new Date(),
-    });
-
-    return res.json({
-      success: true,
+    // New Google users must complete the required Eatswada profile before
+    // entering the delivery flow. No partial customer is persisted here.
+    // The verified Firebase ID token is carried in sessionStorage by the
+    // frontend and is exchanged for the real Eatswada account at the
+    // complete-profile step.
+    return res.status(200).json({
+      success: false,
+      code: 'PROFILE_REQUIRED',
       authProvider: 'google',
-      profileComplete: false,
       data: {
-        user: user.toJSON(),
-        token: generateToken(user._id, user.role, user.tokenVersion),
+        profile: {
+          name: safeName(decoded.name),
+          email,
+          avatar: String(decoded.picture || ''),
+        },
       },
+      message: 'Please complete your Eatswada profile to continue.',
     });
   }
 
@@ -165,14 +154,32 @@ exports.completeGoogleProfile = asyncHandler(async (req, res) => {
 
   if (emailUser || googleUser) {
     const existing = emailUser || googleUser;
-    if (existing.googleUid === googleUid || existing.googleUid == null) {
-      return res.status(409).json({
-        success: false,
-        code: 'ACCOUNT_EXISTS',
-        message: 'An Eatswada account already exists for this Google account. Please log in instead.',
+    if (existing.googleUid && existing.googleUid === googleUid) {
+      // A retry after a transient client failure should not create a second
+      // account. Complete the same Google-linked account idempotently.
+      if (!existing.isActive) {
+        return res.status(403).json({ success: false, message: 'Your account has been disabled.' });
+      }
+      existing.name = name;
+      existing.phone = phone;
+      existing.password = password;
+      existing.avatar = String(decoded.picture || existing.avatar || '');
+      existing.lastLogin = new Date();
+      await existing.save();
+      return res.status(200).json({
+        success: true,
+        authProvider: 'google',
+        data: {
+          user: existing.toJSON(),
+          token: generateToken(existing._id, existing.role, existing.tokenVersion),
+        },
       });
     }
-    return res.status(409).json({ success: false, message: 'This email is already registered.' });
+    return res.status(409).json({
+      success: false,
+      code: 'ACCOUNT_EXISTS',
+      message: 'An Eatswada account already exists for this email. Please log in instead.',
+    });
   }
 
   if (phoneUser) {
