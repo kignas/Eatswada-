@@ -4,6 +4,7 @@ const router = express.Router();
 // 1. Import all controllers cleanly
 const { 
   getRestaurants,
+  getServiceability,
   getRestaurantReviews, 
   getRestaurantById, 
   getMenu, 
@@ -34,6 +35,7 @@ router.get('/categories', getCategories);
 router.get('/under99', getUnder99Items);
 
 router.get('/', getRestaurants);
+router.get('/serviceability', getServiceability);
 
 // Dynamic public routes
 router.get('/:id/reviews', getRestaurantReviews);
