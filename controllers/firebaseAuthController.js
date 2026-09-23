@@ -46,7 +46,7 @@ exports.firebaseAuth = asyncHandler(async (req, res) => {
     });
   }
 
-  const { user, email, googleUid } = await findGoogleUser(decoded);
+  let { user, email, googleUid } = await findGoogleUser(decoded);
 
   if (!email || decoded.email_verified !== true) {
     return res.status(400).json({
