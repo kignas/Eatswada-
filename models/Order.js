@@ -208,6 +208,26 @@ const orderSchema = new mongoose.Schema(
     statusHistory: [statusEventSchema],
 
     estimatedDelivery: { type: Date },
+
+    // Vendor-selected kitchen preparation window.
+    // `prepMinutes` is captured when the restaurant accepts the order.
+    // The start/ready timestamps are anchored when the order actually
+    // enters `preparing`, so the customer countdown never starts early.
+    prepMinutes: {
+      type: Number,
+      min: 1,
+      max: 240,
+      default: null,
+    },
+    prepStartedAt: {
+      type: Date,
+      default: null,
+    },
+    prepReadyAt: {
+      type: Date,
+      default: null,
+    },
+
     deliveredAt:       { type: Date },
     cancelReason:      { type: String, default: '' },
     isCancellable: {
@@ -394,6 +414,20 @@ orderSchema.methods.advanceStatus = function (newStatus, note = '') {
   this.status = newStatus;
   this.statusHistory.push({ status: newStatus, note });
   if (NON_CANCELLABLE.includes(newStatus)) this.isCancellable = false;
+
+  // Start the vendor-selected preparation clock only when the kitchen
+  // actually moves the order into `preparing`. This prevents the timer
+  // from counting down while the order is merely `confirmed`.
+  if (newStatus === 'preparing' && !this.prepStartedAt) {
+    const startedAt = new Date();
+    this.prepStartedAt = startedAt;
+
+    const minutes = Number(this.prepMinutes);
+    if (Number.isFinite(minutes) && minutes > 0) {
+      this.prepReadyAt = new Date(startedAt.getTime() + minutes * 60000);
+    }
+  }
+
   if (newStatus === 'delivered') this.deliveredAt = new Date();
   return this;
 };
