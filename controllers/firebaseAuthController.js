@@ -57,16 +57,33 @@ exports.firebaseAuth = asyncHandler(async (req, res) => {
   }
 
   if (!user) {
+    /*
+     * Progressive Google onboarding: create the authenticated customer shell
+     * immediately. Phone/password/profile details are optional for browsing
+     * and can be completed later from Home/Profile. This removes the old
+     * login -> complete-profile -> location -> address waterfall while keeping
+     * the account tied to the verified Google identity.
+     *
+     * The account is intentionally created without a password/phone. The
+     * profile completion endpoint (or /users/profile) adds those fields later.
+     */
+    user = await User.create({
+      name: safeName(decoded.name),
+      email,
+      googleUid,
+      avatar: String(decoded.picture || ''),
+      role: 'user',
+      isPhoneVerified: false,
+      lastLogin: new Date(),
+    });
+
     return res.json({
-      success: false,
-      code: 'PROFILE_REQUIRED',
-      message: 'Complete your Eatswada profile to finish creating your account.',
+      success: true,
+      authProvider: 'google',
+      profileComplete: false,
       data: {
-        profile: {
-          name: safeName(decoded.name),
-          email,
-          avatar: String(decoded.picture || ''),
-        },
+        user: user.toJSON(),
+        token: generateToken(user._id, user.role, user.tokenVersion),
       },
     });
   }

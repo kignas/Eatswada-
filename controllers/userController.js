@@ -317,14 +317,30 @@ const getProfile = asyncHandler(async (req, res) => {
 });
 
 const updateProfile = asyncHandler(async (req, res) => {
-  const { name, email, password, vegOnly, avatar } = req.body;
-  const user = await User.findById(req.user._id);
-  if (name !== undefined)    user.name    = name;
-  if (email !== undefined)   user.email   = email;
+  const { name, email, phone, password, vegOnly, avatar } = req.body;
+  const user = await User.findById(req.user._id).select('+password');
+  if (!user) return res.status(404).json({ success:false, message:'User profile not found.' });
+  if (name !== undefined) user.name = String(name).trim();
+  if (email !== undefined) {
+    const normalizedEmail = normalizeEmail(email);
+    if (normalizedEmail && !isValidEmail(normalizedEmail)) {
+      return res.status(400).json({ success:false, message:'Enter a valid email address.' });
+    }
+    user.email = normalizedEmail || undefined;
+  }
+  if (phone !== undefined) {
+    const normalizedPhone = normalizePhone(phone);
+    if (!/^\+?[6-9]\d{9,14}$/.test(normalizedPhone)) {
+      return res.status(400).json({ success:false, message:'Enter a valid mobile number.' });
+    }
+    const phoneOwner = await User.findOne({ phone: normalizedPhone, _id: { $ne: user._id } }).select('_id');
+    if (phoneOwner) return res.status(409).json({ success:false, code:'PHONE_ALREADY_REGISTERED', message:'This mobile number already belongs to another Eatswada account.' });
+    user.phone = normalizedPhone;
+  }
   if (vegOnly !== undefined) user.vegOnly = vegOnly;
-  if (avatar !== undefined)  user.avatar  = avatar;
+  if (avatar !== undefined) user.avatar = avatar;
   if (password !== undefined) {
-    if (typeof password !== 'string' || password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
+    if (typeof password !== 'string' || password.length < 8) return res.status(400).json({ success:false, message:'Password must be at least 8 characters.' });
     user.password = password;
     user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
   }
