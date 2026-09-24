@@ -61,7 +61,10 @@ async function markCheckoutPaid(orders, paymentId) {
 
   // Order is now paid → visible to the vendor. Ring their device(s) until they act.
   for (const o of orders) {
-    pushService.notifyRestaurantNewOrder(o).catch(() => {});
+    // Vendor + admin notifications are emitted only after payment is verified.
+    // Both functions are idempotent and never block a successful checkout.
+    pushService.notifyRestaurantNewOrder(o).catch((err) => console.error('[PUSH] vendor new-order:', err.message));
+    pushService.notifyAdminsNewOrder(o).catch((err) => console.error('[PUSH] admin new-order:', err.message));
   }
 }
 
