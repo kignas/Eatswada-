@@ -115,6 +115,47 @@ async function notifyRestaurantNewOrder(order) {
   }
 }
 
+async function notifyAdminsNewOrder(order) {
+  const id = String(order._id);
+  const admins = await User.find({ role: 'admin' }).select('_id fcmTokens').lean();
+  if (!admins.length) return { recipients: 0, sent: 0 };
+
+  let recipients = 0, sent = 0;
+  const title = 'New order received';
+  const body = `Order ${order.orderNumber || '#' + id.slice(-6).toUpperCase()} · ₹${Number(order.total || 0)} · ${order.restaurantName || 'Restaurant'}`;
+  for (const admin of admins) {
+    // Idempotent per admin + order: payment verification/webhook retries must
+    // never create a second admin notification for the same order.
+    const exists = await Notification.exists({
+      user: admin._id,
+      type: 'order',
+      'data.kind': 'admin_new_order',
+      'data.orderId': id,
+    });
+    if (exists) continue;
+
+    await Notification.create({
+      user: admin._id,
+      type: 'order',
+      title,
+      message: body,
+      data: { orderId: id, orderNumber: order.orderNumber || '', kind: 'admin_new_order', restaurantName: order.restaurantName || '' }
+    });
+    recipients += 1;
+    try {
+      const result = await pushToUser(admin._id, {
+        type: 'admin_new_order', title, body,
+        orderId: id, orderNumber: order.orderNumber || '',
+        restaurantName: order.restaurantName || '',
+      });
+      sent += Number(result?.sent || 0);
+    } catch (err) {
+      console.error('[PUSH] admin new-order send failed:', err.message);
+    }
+  }
+  return { recipients, sent };
+}
+
 function stopRing(orderId) {
   const id = String(orderId);
   const iv = activeRings.get(id);
@@ -126,5 +167,6 @@ module.exports = {
   unregisterToken,
   pushToUser,
   notifyRestaurantNewOrder,
+  notifyAdminsNewOrder,
   stopRing,
 };
