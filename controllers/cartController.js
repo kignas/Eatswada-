@@ -141,7 +141,7 @@ async function backfillItemRestaurants(cart) {
  * Build the authoritative cart response: legacy flat fields (for older
  * frontend/API builds) PLUS grouped-by-restaurant pricing.
  */
-async function buildCartResponse(cart) {
+async function buildCartResponse(cart, options = {}) {
   if (!cart) return null;
 
   // Self-heal legacy carts before pricing.
@@ -160,10 +160,27 @@ async function buildCartResponse(cart) {
     grouped.get(key).push(item);
   }
 
-  const restaurants = await Restaurant.find({ _id: { $in: order } })
-    .select(RESTAURANT_PRICING_FIELDS)
-    .lean();
-  const restMap = new Map(restaurants.map(r => [String(r._id), r]));
+  // Callers that already loaded authoritative restaurant documents can pass
+  // them here. This avoids immediately re-reading the same restaurant after
+  // /cart/add has already resolved and validated it.
+  const providedRestaurants = Array.isArray(options.restaurants)
+    ? options.restaurants.filter(Boolean)
+    : [];
+  const providedMap = new Map(
+    providedRestaurants.map(r => [String(r._id), r])
+  );
+  const missingRestaurantIds = order.filter(id => !providedMap.has(id));
+
+  const fetchedRestaurants = missingRestaurantIds.length
+    ? await Restaurant.find({ _id: { $in: missingRestaurantIds } })
+        .select(RESTAURANT_PRICING_FIELDS)
+        .lean()
+    : [];
+
+  const restMap = new Map(
+    [...providedRestaurants, ...fetchedRestaurants]
+      .map(r => [String(r._id), r])
+  );
 
   let foodSubtotal = 0;
   let globalDeliveryFee = 0;
@@ -263,8 +280,11 @@ const addToCart = asyncHandler(async (req, res) => {
     return res.status(404).json({ success: false, message: 'Item not available' });
 
   // AUTHORITATIVE restaurant resolution — from the Menu document, never the client.
+  // Use the same pricing projection that buildCartResponse() needs so the
+  // validated restaurant document can be reused for the response instead of
+  // immediately issuing a second Restaurant query.
   const ownerRestaurant = menuItem.restaurantId
-    ? await Restaurant.findById(menuItem.restaurantId).select('name image isActive availability isOpen')
+    ? await Restaurant.findById(menuItem.restaurantId).select(RESTAURANT_PRICING_FIELDS)
     : null;
   if (!ownerRestaurant || !ownerRestaurant.isActive || ownerRestaurant.availability?.isOpen === false)
     return res.status(409).json({ success: false, message: 'This restaurant is currently closed.' });
@@ -313,7 +333,10 @@ const addToCart = asyncHandler(async (req, res) => {
 
   syncLegacyRestaurant(cart);
   await cart.save();
-  res.json({ success: true, data: await buildCartResponse(cart) });
+  res.json({
+    success: true,
+    data: await buildCartResponse(cart, { restaurants: [ownerRestaurant] }),
+  });
 });
 
 // PUT /api/cart/update
