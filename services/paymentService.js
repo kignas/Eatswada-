@@ -54,6 +54,13 @@ async function fetchPayment(paymentId) {
   return instance.payments.fetch(String(paymentId));
 }
 
+/** All payment attempts made against one Razorpay order (newest first). */
+async function fetchOrderPayments(razorpayOrderId) {
+  const instance = getRazorpay();
+  const result = await instance.orders.fetchPayments(String(razorpayOrderId));
+  return Array.isArray(result?.items) ? result.items : [];
+}
+
 /**
  * Issue a refund against a captured Razorpay payment.
  * `amountRupees` is the rupee amount to refund (converted to paise here).
@@ -91,6 +98,7 @@ module.exports = {
   assertConfigured,
   createRazorpayOrder,
   fetchPayment,
+  fetchOrderPayments,
   refundPayment,
   verifyRazorpaySignature,
   verifyWebhookSignature,
