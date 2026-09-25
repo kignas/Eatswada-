@@ -86,6 +86,8 @@ const menuItemSchema = new mongoose.Schema(
 
 // 🚨 UPDATED: Fixed the index to match the new 'restaurantId' field
 menuItemSchema.index({ restaurantId: 1, category: 1 });
+// Covers the customer menu query's restaurantId equality + category/name sort.
+menuItemSchema.index({ restaurantId: 1, category: 1, name: 1 });
 menuItemSchema.index({ name: 'text', description: 'text' });
 
 // Exported as 'Menu' to match your controller imports
