@@ -275,7 +275,13 @@ const getCart = asyncHandler(async (req, res) => {
 const addToCart = asyncHandler(async (req, res) => {
   const { menuItemId, quantity = 1, customizations = {} } = req.body;
 
-  const menuItem = await MenuItem.findById(menuItemId).select('restaurantId name price originalPrice image isVeg inStock customizations');
+  // The menu validation and this user's cart are independent reads. Start them
+  // together so /cart/add does not spend a full DB round-trip waiting on the cart.
+  const [menuItem, existingCart] = await Promise.all([
+    MenuItem.findById(menuItemId).select('restaurantId name price originalPrice image isVeg inStock customizations'),
+    Cart.findOne({ user: req.user._id }),
+  ]);
+
   if (!menuItem || menuItem.inStock === false)
     return res.status(404).json({ success: false, message: 'Item not available' });
 
@@ -293,7 +299,7 @@ const addToCart = asyncHandler(async (req, res) => {
   if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 99)
     return res.status(400).json({ success: false, message: 'Quantity must be an integer between 1 and 99.' });
 
-  let cart = await Cart.findOne({ user: req.user._id });
+  let cart = existingCart;
   if (!cart) cart = new Cart({ user: req.user._id });
 
   await backfillItemRestaurants(cart);

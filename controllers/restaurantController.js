@@ -214,7 +214,9 @@ const getMenu = asyncHandler(async (req, res) => {
   // filtering to inStock-only, unchanged, same as isOpen on the restaurant side.)
   const items = await MenuItem.find({
     restaurantId: req.params.id,
-  }).sort({ category: 1, name: 1 });
+  })
+    .sort({ category: 1, name: 1 })
+    .lean();
 
   const groupedMenu = items.reduce((acc, item) => {
     const cat = item.category || "Recommended";
@@ -554,15 +556,32 @@ const getRestaurantReviews = asyncHandler(async (req, res) => {
   const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 10));
   const skip = (page - 1) * limit;
   const filter = { restaurant: restaurant._id, isVisible: true };
-  const [reviews, total, breakdown] = await Promise.all([
-    Review.find(filter).populate('user', 'name avatar').sort({ createdAt: -1 }).skip(skip).limit(limit),
-    Review.countDocuments(filter),
+  // Reviews used to require three DB operations here: page + count + score
+  // breakdown. Keep the same response shape, but combine count/breakdown into
+  // one indexed aggregation and use lean review documents (no Mongoose methods
+  // are needed by this response).
+  const [reviews, stats] = await Promise.all([
+    Review.find(filter)
+      .populate('user', 'name avatar')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     Review.aggregate([
       { $match: filter },
-      { $group: { _id: '$score', count: { $sum: 1 } } },
-      { $sort: { _id: -1 } }
+      {
+        $facet: {
+          meta: [{ $count: 'total' }],
+          breakdown: [
+            { $group: { _id: '$score', count: { $sum: 1 } } },
+            { $sort: { _id: -1 } }
+          ]
+        }
+      }
     ])
   ]);
+  const total = Number(stats[0]?.meta?.[0]?.total || 0);
+  const breakdown = stats[0]?.breakdown || [];
   const counts = { 1:0, 2:0, 3:0, 4:0, 5:0 };
   breakdown.forEach(x => { counts[x._id] = x.count; });
   res.json({
