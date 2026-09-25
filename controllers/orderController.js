@@ -647,12 +647,19 @@ function enrichRiderLive(data, orderDoc) {
   return data;
 }
 
-const getOrders = asyncHandler(async (req, res) => {
-  const { status, page = 1, limit = 10 } = req.query;
-  const filter = { user: req.user._id };
-  if (status) filter.status = status;
+// Launch-fix: never trust a client-provided page/limit (limit=0 used to
+// return every order; a non-numeric page produced a NaN skip).
+const clampPageParam = (v) => Math.max(1, Math.floor(Number(v)) || 1);
+const clampLimitParam = (v, fallback, max) => Math.min(max, Math.max(1, Math.floor(Number(v)) || fallback));
 
-  const skip = (Number(page) - 1) * Number(limit);
+const getOrders = asyncHandler(async (req, res) => {
+  const { status } = req.query;
+  const page = clampPageParam(req.query.page);
+  const limit = clampLimitParam(req.query.limit, 10, 50);
+  const filter = { user: req.user._id };
+  if (typeof status === 'string' && status) filter.status = status;
+
+  const skip = (page - 1) * limit;
   const [orders, total] = await Promise.all([
     Order.find(filter)
       .select('+deliveryOtp')
@@ -660,14 +667,14 @@ const getOrders = asyncHandler(async (req, res) => {
       .populate('rider', 'name phone riderDetails.currentLocation')
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Number(limit)),
+      .limit(limit),
     Order.countDocuments(filter),
   ]);
 
   res.json({
     success: true,
-    page: Number(page),
-    pages: Math.ceil(total / Number(limit)),
+    page,
+    pages: Math.ceil(total / limit),
     total,
     data: orders.map(o => enrichRiderLive(withLiveDisplayData(o), o)),
   });
@@ -704,12 +711,15 @@ const cancelOrder = asyncHandler(async (req, res) => {
   order.advanceStatus('cancelled', reason);
   order.cancelReason = reason;
 
-  // Refund online payments that were actually captured. No-ops for COD/unpaid
-  // orders and never double-refunds; the cancellation still succeeds even if
-  // the refund call fails (it's recorded as 'failed' for follow-up).
-  await initiateOrderRefund(order, reason);
-
+  // Launch-fix: persist the cancellation FIRST. If the restaurant accepted the
+  // order a moment earlier, this save fails with VersionError (409) and no
+  // refund is sent for an order that is actually going ahead.
   await order.save();
+
+  // Then refund online payments that were actually captured. The refund
+  // service claims the refund atomically, so it can never run twice, and it
+  // persists its own result (do not save the order again after this).
+  await initiateOrderRefund(order, reason);
   await order.populate(ORDER_POPULATE_PATHS);
 
   res.json({ success: true, message: 'Order cancelled', data: withLiveDisplayData(order) });
@@ -855,26 +865,33 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 });
 
 const getAllOrders = asyncHandler(async (req, res) => {
-  const { status, restaurant, page = 1, limit = 20 } = req.query;
+  const { status, restaurant } = req.query;
+  const page = clampPageParam(req.query.page);
+  const limit = clampLimitParam(req.query.limit, 20, 100);
   const filter = {};
-  if (status)     filter.status     = status;
-  if (restaurant) filter.restaurant = restaurant;
+  if (typeof status === 'string' && status) filter.status = status;
+  if (restaurant) {
+    if (!mongoose.Types.ObjectId.isValid(String(restaurant))) {
+      return res.status(400).json({ success: false, message: 'Invalid restaurant id.' });
+    }
+    filter.restaurant = restaurant;
+  }
 
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
   const [orders, total] = await Promise.all([
     Order.find(filter)
       .populate('user', 'name phone')
       .populate(ORDER_POPULATE_PATHS)
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Number(limit)),
+      .limit(limit),
     Order.countDocuments(filter),
   ]);
 
   res.json({
     success: true,
-    page: Number(page),
-    pages: Math.ceil(total / Number(limit)),
+    page,
+    pages: Math.ceil(total / limit),
     total,
     data: orders.map(o => enrichRiderLive(withLiveDisplayData(o), o)),
   });

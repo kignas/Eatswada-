@@ -166,8 +166,9 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   const previousStatus = order.status;
   order.advanceStatus('cancelled', reason);
   order.cancelReason = reason;
-  await initiateOrderRefund(order, reason);
+  // Launch-fix: persist the cancellation first, then refund (atomic claim).
   await order.save();
+  await initiateOrderRefund(order, reason);
   await logAdminAction(req, {
     action: 'order.cancel',
     targetType: 'order',

@@ -31,8 +31,14 @@ const STATUS_LABELS = {
 
 /* GET /api/riders/profile */
 exports.getMyProfile = asyncHandler(async (req, res) => {
-  // req.user is already the full, password-stripped User doc (set by `protect`).
-  res.json({ success: true, data: req.user });
+  // Launch-fix: `protect` now attaches only a small lean auth object (id, role,
+  // name, phone…), so riderDetails / avatar / vehicle were missing from the
+  // rider app. Load the profile explicitly. Password, OTP and reset fields are
+  // select:false on the model; device tokens and the session counter are
+  // excluded here as they are never needed by the client.
+  const rider = await User.findById(req.user._id).select('-fcmTokens -tokenVersion').lean();
+  if (!rider) return res.status(404).json({ success: false, message: 'Rider not found.' });
+  res.json({ success: true, data: rider });
 });
 
 /* PUT /api/riders/profile */
@@ -318,7 +324,10 @@ exports.reportDeliveryIssue = asyncHandler(async (req, res) => {
   const now = new Date();
   const previousAttempts = Array.isArray(order.deliveryIssueHistory) ? order.deliveryIssueHistory.length : 0;
   const attempt = previousAttempts + 1;
-  const live = req.user?.riderDetails?.currentLocation;
+  // Launch-fix: req.user is a lean auth object without riderDetails; read the
+  // rider's last GPS fix explicitly so the issue report records a location.
+  const riderLoc = await User.findById(req.user._id).select('riderDetails.currentLocation').lean();
+  const live = riderLoc?.riderDetails?.currentLocation;
   const coords = Array.isArray(live?.coordinates) && live.coordinates.length >= 2
     ? [Number(live.coordinates[0]), Number(live.coordinates[1])] : undefined;
 

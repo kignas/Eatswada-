@@ -184,12 +184,11 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
   order.cancelReason = reason;
   order.advanceStatus('cancelled', `Rejected by restaurant: ${reason}`);
 
-  // Refund the customer if they already paid online. No-ops for COD/unpaid
-  // orders and never double-refunds; rejection still succeeds if the refund
-  // call fails (recorded as 'failed' for follow-up).
-  await initiateOrderRefund(order, `Rejected by restaurant: ${reason}`);
-
+  // Launch-fix: persist the rejection FIRST (VersionError → 409 if the
+  // customer/admin changed the order at the same moment), THEN refund. The
+  // refund service claims atomically and saves its own result.
   await order.save();
+  await initiateOrderRefund(order, `Rejected by restaurant: ${reason}`);
   stopRing(order._id);
   await notifyOrderStatus(order.user, order);
 

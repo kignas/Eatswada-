@@ -419,10 +419,11 @@ const deleteAddress = asyncHandler(async (req, res) => {
   const address = await Address.findOne({ _id: req.params.id, user: req.user._id });
   if (!address) return res.status(404).json({ success: false, message: 'Address not found' });
   await address.deleteOne();
-  await User.findByIdAndUpdate(req.user._id, {
-    $pull: { addresses: address._id },
-    ...(String(req.user.defaultAddress) === req.params.id && { defaultAddress: null }),
-  });
+  await User.findByIdAndUpdate(req.user._id, { $pull: { addresses: address._id } });
+  // Launch-fix: req.user no longer carries defaultAddress (lean auth object),
+  // so the old comparison was always false and a deleted default address
+  // stayed referenced. Clear it with an exact match in the database instead.
+  await User.updateOne({ _id: req.user._id, defaultAddress: address._id }, { $set: { defaultAddress: null } });
   res.json({ success: true, message: 'Address deleted' });
 });
 
