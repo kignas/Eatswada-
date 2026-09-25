@@ -5,9 +5,11 @@ const Cart = require('../models/Cart');
 const Coupon = require('../models/Coupon');
 const { claimCouponUsage } = require('../services/couponUsageService');
 const pushService = require('../services/pushService');
+const { initiateOrderRefund, refundDuplicatePayment } = require('../services/refundService');
 const {
   createRazorpayOrder,
   fetchPayment,
+  fetchOrderPayments,
   verifyRazorpaySignature,
   verifyWebhookSignature,
   assertConfigured,
@@ -25,47 +27,149 @@ function publicPayment(order) {
   };
 }
 
-async function findCheckoutOrders(userId, primaryOrderId) {
+// Every order that belongs to a Razorpay order id — whether it is the order's
+// CURRENT id or an OLD one kept in razorpayOrderIdHistory after a retry.
+function ordersForRazorpayOrder(razorpayOrderId, userId) {
+  const id = String(razorpayOrderId || '');
+  if (!id) return Promise.resolve([]);
+  const filter = { $or: [{ razorpayOrderId: id }, { razorpayOrderIdHistory: id }] };
+  if (userId) filter.user = userId;
+  return Order.find(filter).sort({ createdAt: 1 });
+}
+
+async function findCheckoutOrders(userId, primaryOrderId, razorpayOrderId) {
   const primary = await Order.findOne({ _id: primaryOrderId, user: userId });
   if (!primary) return null;
   if (primary.paymentMethod === 'cod') return [primary];
-  if (!primary.razorpayOrderId) return [primary];
-  return Order.find({ user: userId, razorpayOrderId: primary.razorpayOrderId }).sort({ createdAt: 1 });
+  // The client may be completing an OLDER Razorpay order of this checkout
+  // (e.g. a UPI payment that finished after a retry was started).
+  const known = [primary.razorpayOrderId, ...(primary.razorpayOrderIdHistory || [])].filter(Boolean);
+  const target = razorpayOrderId && known.includes(String(razorpayOrderId))
+    ? String(razorpayOrderId)
+    : primary.razorpayOrderId;
+  if (!target) return [primary];
+  return ordersForRazorpayOrder(target, userId);
 }
 
-async function markCheckoutPaid(orders, paymentId) {
+const isSettledPayment = (o) => ['paid', 'refunded'].includes(o.paymentStatus);
+
+/**
+ * Record a captured payment against its checkout.
+ *
+ * Launch-fixes:
+ *  - Orders the customer CANCELLED before the money arrived are no longer
+ *    turned into live paid orders. They are marked paid (so the money is
+ *    traceable) and immediately refunded; the vendor is never notified.
+ *  - If this checkout was already paid by a DIFFERENT payment (old + new
+ *    Razorpay order both paid after a retry), this payment is refunded in full
+ *    instead of being silently absorbed.
+ *
+ * Returns { liveOrderIds, refundedOrderIds, duplicate }.
+ */
+async function markCheckoutPaid(orders, paymentId, amountPaise) {
+  const pid = String(paymentId);
   const ids = orders.map(o => o._id);
-  await Order.updateMany(
-    { _id: { $in: ids }, paymentStatus: { $ne: 'paid' } },
-    { $set: { paymentStatus: 'paid', razorpayPaymentId: String(paymentId) } }
-  );
-  const couponIds = [...new Set(orders.map(o => o.coupon?.couponId).filter(Boolean).map(String))];
-  if (couponIds.length) {
-    const groupId = String(orders[0].checkoutGroupId || orders[0]._id);
-    for (const couponId of couponIds) {
-      const discount = orders
-        .filter(o => String(o.coupon?.couponId) === couponId)
-        .reduce((a, o) => a + Number(o.coupon?.discount || 0), 0);
-      await claimCouponUsage({
-        couponId,
-        userId: orders[0].user,
-        orderGroupId: groupId,
-        discount,
-      });
-    }
+
+  // Fast path for a payment that already lost to a previously settled payment.
+  // The atomic claim below is still required because two different captures can
+  // arrive at exactly the same time and both can initially read the checkout as
+  // unpaid.
+  const paidByOther = orders.some(o => isSettledPayment(o) && o.razorpayPaymentId && o.razorpayPaymentId !== pid);
+  if (paidByOther) {
+    await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
+    return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
   }
-  await Cart.findOneAndUpdate(
-    { user: orders[0].user },
-    { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
+
+  const liveOrders = orders.filter(o => o.status !== 'cancelled');
+  const liveUnpaid = liveOrders.filter(o => !isSettledPayment(o));
+  // Idempotent webhook/verify retry: if every live child is already settled by
+  // this exact payment, there is nothing left to claim and no refund is due.
+  if (liveOrders.length && liveUnpaid.length === 0 && liveOrders.every(o => o.razorpayPaymentId === pid)) {
+    return { liveOrderIds: liveOrders.map(o => o._id), refundedOrderIds: [], duplicate: false };
+  }
+
+  // Atomically elect exactly one captured payment as the owner of this checkout.
+  // This closes the webhook/verify race where payment A and payment B both read
+  // an unpaid checkout before either request writes paymentStatus='paid'.
+  // A retry of the SAME payment id is allowed to continue an interrupted claim.
+  const liveLeader = liveUnpaid[0] || liveOrders[0];
+  if (!liveLeader) return { liveOrderIds: [], refundedOrderIds: [], duplicate: false };
+  const claim = await Order.findOneAndUpdate(
+    {
+      _id: liveLeader._id,
+      paymentStatus: { $nin: ['paid', 'refunded'] },
+      $or: [
+        { paymentClaimId: { $exists: false } },
+        { paymentClaimId: null },
+        { paymentClaimId: '' },
+        { paymentClaimId: pid },
+      ],
+    },
+    { $set: { paymentClaimId: pid } },
+    { new: true }
   );
 
-  // Order is now paid → visible to the vendor. Ring their device(s) until they act.
-  for (const o of orders) {
-    // Vendor + admin notifications are emitted only after payment is verified.
-    // Both functions are idempotent and never block a successful checkout.
-    pushService.notifyRestaurantNewOrder(o).catch((err) => console.error('[PUSH] vendor new-order:', err.message));
-    pushService.notifyAdminsNewOrder(o).catch((err) => console.error('[PUSH] admin new-order:', err.message));
+  if (!claim) {
+    await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
+    return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
   }
+
+  const unpaid = { $nin: ['paid', 'refunded'] };
+  await Order.updateMany(
+    { _id: { $in: ids }, paymentStatus: unpaid, status: { $ne: 'cancelled' } },
+    { $set: { paymentStatus: 'paid', razorpayPaymentId: pid } }
+  );
+  // Cancelled before payment captured: record the money against the order so
+  // the refund service can return it.
+  await Order.updateMany(
+    { _id: { $in: ids }, paymentStatus: unpaid, status: 'cancelled' },
+    { $set: { paymentStatus: 'paid', razorpayPaymentId: pid } }
+  );
+
+  const fresh = await Order.find({ _id: { $in: ids } }).sort({ createdAt: 1 });
+  const ours = fresh.filter(o => o.razorpayPaymentId === pid);
+  const live = ours.filter(o => o.status !== 'cancelled' && o.paymentStatus === 'paid');
+  const cancelled = ours.filter(o => o.status === 'cancelled');
+
+  for (const o of cancelled) {
+    await initiateOrderRefund(o, 'Payment received after the order was cancelled');
+  }
+
+  if (live.length) {
+    const couponIds = [...new Set(live.map(o => o.coupon?.couponId).filter(Boolean).map(String))];
+    if (couponIds.length) {
+      const groupId = String(live[0].checkoutGroupId || live[0]._id);
+      for (const couponId of couponIds) {
+        const discount = live
+          .filter(o => String(o.coupon?.couponId) === couponId)
+          .reduce((a, o) => a + Number(o.coupon?.discount || 0), 0);
+        await claimCouponUsage({
+          couponId,
+          userId: live[0].user,
+          orderGroupId: groupId,
+          discount,
+        });
+      }
+    }
+    await Cart.findOneAndUpdate(
+      { user: live[0].user },
+      { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
+    );
+
+    // Order is now paid → visible to the vendor. Ring their device(s) until they act.
+    for (const o of live) {
+      // Vendor + admin notifications are emitted only after payment is verified.
+      // Both functions are idempotent and never block a successful checkout.
+      pushService.notifyRestaurantNewOrder(o).catch((err) => console.error('[PUSH] vendor new-order:', err.message));
+      pushService.notifyAdminsNewOrder(o).catch((err) => console.error('[PUSH] admin new-order:', err.message));
+    }
+  }
+
+  return {
+    liveOrderIds: live.map(o => o._id),
+    refundedOrderIds: cancelled.map(o => o._id),
+    duplicate: false,
+  };
 }
 
 exports.verifyPayment = asyncHandler(async (req, res) => {
@@ -75,16 +179,18 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Payment verification fields are required.' });
   }
 
-  const orders = await findCheckoutOrders(req.user._id, orderId);
+  const orders = await findCheckoutOrders(req.user._id, orderId, razorpayOrderId);
   if (!orders || !orders.length) return res.status(404).json({ success: false, message: 'Order not found.' });
   if (orders[0].paymentMethod === 'cod') return res.status(400).json({ success: false, message: 'This order does not use online payment.' });
 
-  const storedRazorpayOrderId = orders[0].razorpayOrderId;
-  if (!storedRazorpayOrderId || storedRazorpayOrderId !== String(razorpayOrderId)) {
+  const knownIds = new Set(orders.flatMap(o => [o.razorpayOrderId, ...(o.razorpayOrderIdHistory || [])]).filter(Boolean));
+  if (!knownIds.has(String(razorpayOrderId))) {
     return res.status(400).json({ success: false, message: 'Razorpay order mismatch.' });
   }
+  const storedRazorpayOrderId = String(razorpayOrderId);
 
-  if (orders.every(o => o.paymentStatus === 'paid' && o.razorpayPaymentId === String(razorpayPaymentId))) {
+  const liveOrders = orders.filter(o => o.status !== 'cancelled');
+  if (liveOrders.length && liveOrders.every(o => o.paymentStatus === 'paid' && o.razorpayPaymentId === String(razorpayPaymentId))) {
     return res.json({ success: true, alreadyPaid: true, paymentStatus: 'paid', orderIds: orders.map(o => o._id) });
   }
 
@@ -104,8 +210,27 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: `Payment is ${payment.status || 'not captured yet'}.`, paymentStatus: payment.status || 'pending' });
   }
 
-  await markCheckoutPaid(orders, razorpayPaymentId);
-  return res.json({ success: true, paymentStatus: 'paid', orderIds: orders.map(o => o._id), razorpayPaymentId });
+  const result = await markCheckoutPaid(orders, razorpayPaymentId, payment.amount);
+  if (result.duplicate) {
+    return res.json({
+      success: true,
+      alreadyPaid: true,
+      duplicatePaymentRefunded: true,
+      paymentStatus: 'paid',
+      orderIds: orders.map(o => o._id),
+      message: 'This order was already paid. The extra payment is being refunded to you.',
+    });
+  }
+  return res.json({
+    success: true,
+    paymentStatus: 'paid',
+    orderIds: orders.map(o => o._id),
+    razorpayPaymentId,
+    ...(result.refundedOrderIds.length ? {
+      refundedOrderIds: result.refundedOrderIds,
+      message: 'Some items were cancelled before payment. That amount is being refunded.',
+    } : {}),
+  });
 });
 
 exports.retryPayment = asyncHandler(async (req, res) => {
@@ -116,14 +241,58 @@ exports.retryPayment = asyncHandler(async (req, res) => {
   const orders = await findCheckoutOrders(req.user._id, orderId);
   if (!orders || !orders.length) return res.status(404).json({ success: false, message: 'Order not found.' });
   if (orders[0].paymentMethod === 'cod') return res.status(400).json({ success: false, message: 'COD orders do not need online payment.' });
-  if (orders.some(o => o.paymentStatus === 'paid')) return res.status(409).json({ success: false, message: 'This checkout is already paid.' });
+  if (orders.some(o => isSettledPayment(o))) return res.status(409).json({ success: false, message: 'This checkout is already paid.' });
 
-  const amount = orders.reduce((sum, o) => sum + Number(o.total || 0), 0);
-  const rpOrder = await createRazorpayOrder(amount, orders[0].orderNumber || orders[0]._id, {
+  // Cancelled orders are not charged again.
+  const live = orders.filter(o => o.status !== 'cancelled');
+  if (!live.length) return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
+
+  // Launch-fix: before opening a NEW Razorpay order, check whether the current
+  // one was actually paid (UPI can confirm late). If so, record that payment
+  // instead of asking the customer to pay twice.
+  const previousRazorpayOrderId = live[0].razorpayOrderId || '';
+  if (previousRazorpayOrderId) {
+    let captured = null;
+    try {
+      const attempts = await fetchOrderPayments(previousRazorpayOrderId);
+      captured = attempts.find(p => p.status === 'captured') || null;
+    } catch (err) {
+      console.warn(`[PAYMENT] retry pre-check failed for ${previousRazorpayOrderId}: ${err.message}`);
+    }
+    if (captured) {
+      const all = await ordersForRazorpayOrder(previousRazorpayOrderId, req.user._id);
+      const expected = Math.round(all.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+      if (Number(captured.amount) === expected && String(captured.currency || '') === 'INR') {
+        await markCheckoutPaid(all, captured.id, captured.amount);
+        return res.status(409).json({ success: false, alreadyPaid: true, paymentStatus: 'paid', message: 'Your earlier payment went through. No need to pay again.' });
+      }
+    }
+  }
+
+  const amount = live.reduce((sum, o) => sum + Number(o.total || 0), 0);
+  const rpOrder = await createRazorpayOrder(amount, live[0].orderNumber || live[0]._id, {
     userId: String(req.user._id),
-    orderIds: orders.map(o => String(o._id)).join(',').slice(0, 240),
+    orderIds: live.map(o => String(o._id)).join(',').slice(0, 240),
   });
-  await Order.updateMany({ _id: { $in: orders.map(o => o._id) } }, { $set: { razorpayOrderId: rpOrder.id, paymentStatus: 'pending', razorpayPaymentId: '' } });
+
+  // Keep the old Razorpay order id in history so a late capture on it is
+  // still matched (and refunded if this new payment also succeeds).
+  const update = {
+    $set: { razorpayOrderId: rpOrder.id, paymentStatus: 'pending', razorpayPaymentId: '' },
+    ...(previousRazorpayOrderId ? { $addToSet: { razorpayOrderIdHistory: previousRazorpayOrderId } } : {}),
+  };
+  const result = await Order.updateMany(
+    {
+      _id: { $in: live.map(o => o._id) },
+      razorpayOrderId: previousRazorpayOrderId,
+      paymentStatus: { $nin: ['paid', 'refunded'] },
+      status: { $ne: 'cancelled' },
+    },
+    update
+  );
+  if (result.modifiedCount !== live.length) {
+    return res.status(409).json({ success: false, message: 'Payment status changed while retrying. Please refresh My Orders.' });
+  }
 
   return res.json({
     success: true,
@@ -197,7 +366,7 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
   const paymentId = String(paymentEntity.id || '');
   if (!razorpayOrderId || !paymentId) return res.json({ success: true, ignored: true });
 
-  const orders = await Order.find({ razorpayOrderId });
+  const orders = await ordersForRazorpayOrder(razorpayOrderId);
   if (!orders.length) return res.json({ success: true, ignored: true });
 
   const expectedAmount = Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
@@ -207,9 +376,14 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
   }
 
   if (event.event === 'payment.captured' || paymentEntity.status === 'captured') {
-    await markCheckoutPaid(orders, paymentId);
+    await markCheckoutPaid(orders, paymentId, actualAmount);
   } else if (event.event === 'payment.failed') {
-    await Order.updateMany({ _id: { $in: orders.map(o => o._id) }, paymentStatus: { $ne: 'paid' } }, { $set: { paymentStatus: 'failed', razorpayPaymentId: paymentId } });
+    // Only the orders whose CURRENT Razorpay order failed. A failure on an old
+    // (retried) Razorpay order must not mark the new attempt as failed.
+    await Order.updateMany(
+      { _id: { $in: orders.map(o => o._id) }, razorpayOrderId, paymentStatus: { $nin: ['paid', 'refunded'] } },
+      { $set: { paymentStatus: 'failed', razorpayPaymentId: paymentId } }
+    );
   }
 
   return res.json({ success: true });
