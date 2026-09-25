@@ -18,7 +18,11 @@
     "test:payment-security": "node tests/payment-security.js",
     "test:vendor-application": "node tests/vendor-application-phase-p01.js",
     "test:foundation1": "node tests/foundation1.js",
-    "test:foundation1-financial": "node tests/foundation1-financial.js"
+    "test:foundation1-financial": "node tests/foundation1-financial.js",
+    "loadtest:setup": "node loadtest/prepare-staging.js setup",
+    "loadtest": "node loadtest/lunch-rush.js",
+    "loadtest:cleanup": "node loadtest/prepare-staging.js cleanup",
+    "test:payment-fixes": "node tests/payment-fixes.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
