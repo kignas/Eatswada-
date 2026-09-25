@@ -12,6 +12,48 @@ const clampPage = (value, fallback = 1) => Math.max(1, Number(value) || fallback
 const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+
+// Only return fields required by customer restaurant-list consumers. This keeps
+// the existing response shape intact while avoiding private/admin/vendor data.
+const CUSTOMER_LIST_PROJECTION = {
+  _id: 1,
+  name: 1,
+  slug: 1,
+  image: 1,
+  images: 1,
+  cuisine: 1,
+  cuisineDisplay: 1,
+  rating: 1,
+  ratingCount: 1,
+  estimatedDeliveryMin: 1,
+  estimatedDeliveryMax: 1,
+  distanceMeters: 1,
+  time: 1,
+  distance: 1,
+  offer: 1,
+  minOrder: 1,
+  deliveryFee: 1,
+  freeDeliveryAbove: 1,
+  freeDeliveryEnabled: 1,
+  deliveryRadiusKm: 1,
+  isVeg: 1,
+  isOpen: 1,
+  availability: 1,
+  isActive: 1,
+  isFeatured: 1,
+  isBestSeller: 1,
+  isNearFast: 1,
+  homeOrder: 1,
+  displayPriority: 1,
+  reviewCount: 1,
+  totalOrders: 1,
+  address: 1,
+  location: 1,
+  categories: 1,
+  createdAt: 1,
+  updatedAt: 1
+};
+
 /**
  * Restaurant-level authorization for Availability + Permissions feature:
  *  - CEO (admin) can manage every restaurant.
@@ -65,7 +107,7 @@ const getRestaurants = asyncHandler(async (req, res) => {
         { $sort: { __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 } },
         { $skip: groupSkip },
         { $limit: groupLimit },
-        { $project: { ...CUSTOMER_LIST_PROJECTION, __homeOrder: 0 } }
+        { $project: CUSTOMER_LIST_PROJECTION }
       ]);
     }
 
