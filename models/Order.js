@@ -183,6 +183,28 @@ const orderSchema = new mongoose.Schema(
     },
     razorpayOrderId:   { type: String, default: '' },
     razorpayPaymentId: { type: String, default: '' },
+    // Atomic payment-capture claim. The first captured payment id that claims
+    // a checkout becomes the owner; concurrent different captures are treated
+    // as duplicate payments and refunded. Keeping the claim allows a retried
+    // webhook for the same payment to safely finish an interrupted capture.
+    paymentClaimId: { type: String, default: '' },
+    // Launch-fix: every Razorpay order id this checkout has ever used. When the
+    // customer retries payment, the old id moves here instead of being lost, so
+    // a late-captured payment on the OLD Razorpay order is still matched to
+    // this order by the webhook (previously it was silently ignored).
+    razorpayOrderIdHistory: { type: [String], default: [] },
+    // Launch-fix: extra captured payments for a checkout that was already paid
+    // (e.g. old + new Razorpay order both paid after a retry). Each is refunded
+    // in full automatically; admins can see the outcome here.
+    duplicatePayments: [{
+      _id: false,
+      paymentId: { type: String, default: '' },
+      amount:    { type: Number, default: 0 },
+      status:    { type: String, enum: ['processing', 'completed', 'failed'], default: 'processing' },
+      refundId:  { type: String, default: '' },
+      error:     { type: String, default: '' },
+      at:        { type: Date, default: Date.now },
+    }],
 
     // Idempotency: same key => same checkout. Set on every child order of a
     // multi-restaurant checkout so a retry returns the existing set.
@@ -360,6 +382,10 @@ orderSchema.index({ restaurant: 1, status: 1 });
 // is built.
 orderSchema.index({ restaurant: 1, status: 1, createdAt: -1 });
 orderSchema.index({ user: 1, idempotencyKey: 1 });
+// Launch-fix: webhook + payment verification look orders up by Razorpay order
+// id. Without these indexes every payment event scanned the whole collection.
+orderSchema.index({ razorpayOrderId: 1 });
+orderSchema.index({ razorpayOrderIdHistory: 1 });
 
 /* ── Pre-save: generate order number ── */
 orderSchema.pre('save', async function (next) {
