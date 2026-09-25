@@ -70,8 +70,46 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
   const pid = String(paymentId);
   const ids = orders.map(o => o._id);
 
+  // Fast path for a payment that already lost to a previously settled payment.
+  // The atomic claim below is still required because two different captures can
+  // arrive at exactly the same time and both can initially read the checkout as
+  // unpaid.
   const paidByOther = orders.some(o => isSettledPayment(o) && o.razorpayPaymentId && o.razorpayPaymentId !== pid);
   if (paidByOther) {
+    await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
+    return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
+  }
+
+  const liveOrders = orders.filter(o => o.status !== 'cancelled');
+  const liveUnpaid = liveOrders.filter(o => !isSettledPayment(o));
+  // Idempotent webhook/verify retry: if every live child is already settled by
+  // this exact payment, there is nothing left to claim and no refund is due.
+  if (liveOrders.length && liveUnpaid.length === 0 && liveOrders.every(o => o.razorpayPaymentId === pid)) {
+    return { liveOrderIds: liveOrders.map(o => o._id), refundedOrderIds: [], duplicate: false };
+  }
+
+  // Atomically elect exactly one captured payment as the owner of this checkout.
+  // This closes the webhook/verify race where payment A and payment B both read
+  // an unpaid checkout before either request writes paymentStatus='paid'.
+  // A retry of the SAME payment id is allowed to continue an interrupted claim.
+  const liveLeader = liveUnpaid[0] || liveOrders[0];
+  if (!liveLeader) return { liveOrderIds: [], refundedOrderIds: [], duplicate: false };
+  const claim = await Order.findOneAndUpdate(
+    {
+      _id: liveLeader._id,
+      paymentStatus: { $nin: ['paid', 'refunded'] },
+      $or: [
+        { paymentClaimId: { $exists: false } },
+        { paymentClaimId: null },
+        { paymentClaimId: '' },
+        { paymentClaimId: pid },
+      ],
+    },
+    { $set: { paymentClaimId: pid } },
+    { new: true }
+  );
+
+  if (!claim) {
     await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
     return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
   }
@@ -244,7 +282,12 @@ exports.retryPayment = asyncHandler(async (req, res) => {
     ...(previousRazorpayOrderId ? { $addToSet: { razorpayOrderIdHistory: previousRazorpayOrderId } } : {}),
   };
   const result = await Order.updateMany(
-    { _id: { $in: live.map(o => o._id) }, paymentStatus: { $nin: ['paid', 'refunded'] }, status: { $ne: 'cancelled' } },
+    {
+      _id: { $in: live.map(o => o._id) },
+      razorpayOrderId: previousRazorpayOrderId,
+      paymentStatus: { $nin: ['paid', 'refunded'] },
+      status: { $ne: 'cancelled' },
+    },
     update
   );
   if (result.modifiedCount !== live.length) {
