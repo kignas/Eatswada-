@@ -65,14 +65,15 @@ const getRestaurants = asyncHandler(async (req, res) => {
         { $sort: { __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 } },
         { $skip: groupSkip },
         { $limit: groupLimit },
-        { $project: { __homeOrder: 0 } }
+        { $project: { ...CUSTOMER_LIST_PROJECTION, __homeOrder: 0 } }
       ]);
     }
 
-    return Restaurant.find(groupFilter)
+    return Restaurant.find(groupFilter, CUSTOMER_LIST_PROJECTION)
       .sort(sortOpt)
       .skip(groupSkip)
-      .limit(groupLimit);
+      .limit(groupLimit)
+      .lean();
   };
 
   const [openCount, closedCount] = await Promise.all([
