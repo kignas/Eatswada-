@@ -391,6 +391,18 @@ const restaurantSchema = new mongoose.Schema(
 // ── Geospatial index for $near queries ──
 restaurantSchema.index({ location: '2dsphere' });
 restaurantSchema.index({ approvalStatus: 1, isActive: 1, 'availability.isOpen': 1 });
+// Supports the customer homepage's recommended open-restaurant query:
+// equality filters first, then the exact recommended sort fields.
+restaurantSchema.index({
+  approvalStatus: 1,
+  isActive: 1,
+  'availability.isOpen': 1,
+  homeOrder: 1,
+  isFeatured: -1,
+  displayPriority: -1,
+  rating: -1,
+  createdAt: -1
+});
 
 // ── Full-text search index for /search endpoint ──
 restaurantSchema.index({ name: 'text', cuisineDisplay: 'text' });
