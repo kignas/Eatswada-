@@ -137,9 +137,47 @@ async function backfillItemRestaurants(cart) {
   return mutated;
 }
 
+// Distinct item-level restaurant ids, first-seen order (same keys the
+// grouping below produces from the plain items).
+function groupRestaurantIds(items) {
+  const ids = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    const key = String(item.restaurant);
+    if (!seen.has(key)) { seen.add(key); ids.push(key); }
+  }
+  return ids;
+}
+
+// Current pricing fields for the given restaurants. Always read from MongoDB
+// (never from the client and never cached across requests).
+function fetchPricingRestaurants(restaurantIds) {
+  if (!restaurantIds.length) return Promise.resolve([]);
+  return Restaurant.find({ _id: { $in: restaurantIds } })
+    .select(RESTAURANT_PRICING_FIELDS)
+    .lean()
+    .exec();
+}
+
+// `prefetched` = { ids, rows } fetched earlier IN THE SAME REQUEST (e.g. in
+// parallel with cart.save()). Any id it does not cover is fetched now.
+async function loadPricingRestaurants(restaurantIds, prefetched) {
+  if (!restaurantIds.length) return [];
+  if (!prefetched) return fetchPricingRestaurants(restaurantIds);
+  const known = new Set(prefetched.ids);
+  const missing = restaurantIds.filter(id => !known.has(id));
+  if (!missing.length) return prefetched.rows;
+  return prefetched.rows.concat(await fetchPricingRestaurants(missing));
+}
+
 /**
  * Build the authoritative cart response: legacy flat fields (for older
  * frontend/API builds) PLUS grouped-by-restaurant pricing.
+ *
+ * options (all optional, backward compatible with buildCartResponse(cart)):
+ *   populateAddress        — populate deliveryAddress here, in parallel with
+ *                            the restaurant pricing read (used by GET /cart).
+ *   prefetchedRestaurants  — { ids, rows } already read in this request.
  */
 async function buildCartResponse(cart, options = {}) {
   if (!cart) return null;
@@ -147,6 +185,16 @@ async function buildCartResponse(cart, options = {}) {
   // Self-heal legacy carts before pricing.
   const mutated = await backfillItemRestaurants(cart);
   if (mutated) await cart.save();
+
+  // PERFORMANCE: the restaurant pricing read and the delivery-address
+  // populate are independent, so they run together (one round trip, not two).
+  // An empty cart no longer issues a Restaurant query that cannot match.
+  const [restaurants] = await Promise.all([
+    loadPricingRestaurants(groupRestaurantIds(cart.items), options.prefetchedRestaurants),
+    options.populateAddress && cart.deliveryAddress
+      ? Cart.populate(cart, { path: 'deliveryAddress' })
+      : null,
+  ]);
 
   const plain = cart.toObject({ virtuals: true });
   const items = Array.isArray(plain.items) ? plain.items : [];
@@ -160,27 +208,7 @@ async function buildCartResponse(cart, options = {}) {
     grouped.get(key).push(item);
   }
 
-  // Callers that already loaded authoritative restaurant documents can pass
-  // them here. This avoids immediately re-reading the same restaurant after
-  // /cart/add has already resolved and validated it.
-  const providedRestaurants = Array.isArray(options.restaurants)
-    ? options.restaurants.filter(Boolean)
-    : [];
-  const providedMap = new Map(
-    providedRestaurants.map(r => [String(r._id), r])
-  );
-  const missingRestaurantIds = order.filter(id => !providedMap.has(id));
-
-  const fetchedRestaurants = missingRestaurantIds.length
-    ? await Restaurant.find({ _id: { $in: missingRestaurantIds } })
-        .select(RESTAURANT_PRICING_FIELDS)
-        .lean()
-    : [];
-
-  const restMap = new Map(
-    [...providedRestaurants, ...fetchedRestaurants]
-      .map(r => [String(r._id), r])
-  );
+  const restMap = new Map(restaurants.map(r => [String(r._id), r]));
 
   let foodSubtotal = 0;
   let globalDeliveryFee = 0;
@@ -266,31 +294,32 @@ function syncLegacyRestaurant(cart) {
 
 // GET /api/cart
 const getCart = asyncHandler(async (req, res) => {
-  const cart = await Cart.findOne({ user: req.user._id }).populate('deliveryAddress');
+  // deliveryAddress is populated inside buildCartResponse, in parallel with
+  // the restaurant pricing read (was: cart -> address -> restaurants, now:
+  // cart -> [address + restaurants]). Response is unchanged.
+  const cart = await Cart.findOne({ user: req.user._id });
   if (!cart) return res.json({ success: true, data: null });
-  res.json({ success: true, data: await buildCartResponse(cart) });
+  res.json({ success: true, data: await buildCartResponse(cart, { populateAddress: true }) });
 });
 
 // POST /api/cart/add
 const addToCart = asyncHandler(async (req, res) => {
   const { menuItemId, quantity = 1, customizations = {} } = req.body;
 
-  // The menu validation and this user's cart are independent reads. Start them
-  // together so /cart/add does not spend a full DB round-trip waiting on the cart.
-  const [menuItem, existingCart] = await Promise.all([
-    MenuItem.findById(menuItemId).select('restaurantId name price originalPrice image isVeg inStock customizations'),
-    Cart.findOne({ user: req.user._id }),
-  ]);
-
+  const menuItem = await MenuItem.findById(menuItemId).select('restaurantId name price originalPrice image isVeg inStock customizations');
   if (!menuItem || menuItem.inStock === false)
     return res.status(404).json({ success: false, message: 'Item not available' });
 
+  // PERFORMANCE: the user's cart does not depend on the restaurant lookup, so
+  // it is read in parallel with it. It is still only USED after every
+  // validation below has passed, in the same order as before (an unused read
+  // on a rejected request is simply discarded).
+  const cartPromise = Cart.findOne({ user: req.user._id }).exec();
+  cartPromise.catch(() => {}); // surfaced when awaited below, not as an unhandled rejection
+
   // AUTHORITATIVE restaurant resolution — from the Menu document, never the client.
-  // Use the same pricing projection that buildCartResponse() needs so the
-  // validated restaurant document can be reused for the response instead of
-  // immediately issuing a second Restaurant query.
   const ownerRestaurant = menuItem.restaurantId
-    ? await Restaurant.findById(menuItem.restaurantId).select(RESTAURANT_PRICING_FIELDS)
+    ? await Restaurant.findById(menuItem.restaurantId).select('name image isActive availability isOpen')
     : null;
   if (!ownerRestaurant || !ownerRestaurant.isActive || ownerRestaurant.availability?.isOpen === false)
     return res.status(409).json({ success: false, message: 'This restaurant is currently closed.' });
@@ -299,7 +328,7 @@ const addToCart = asyncHandler(async (req, res) => {
   if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 99)
     return res.status(400).json({ success: false, message: 'Quantity must be an integer between 1 and 99.' });
 
-  let cart = existingCart;
+  let cart = await cartPromise;
   if (!cart) cart = new Cart({ user: req.user._id });
 
   await backfillItemRestaurants(cart);
@@ -338,10 +367,19 @@ const addToCart = asyncHandler(async (req, res) => {
   }
 
   syncLegacyRestaurant(cart);
-  await cart.save();
+
+  // PERFORMANCE: read the current pricing fields of every restaurant in the
+  // cart while the cart is being saved (one round trip instead of two). The
+  // group set cannot change during save(), and prices/ownership were already
+  // resolved from the Menu + Restaurant documents above.
+  const pricingIds = groupRestaurantIds(cart.items);
+  const [, pricingRows] = await Promise.all([
+    cart.save(),
+    fetchPricingRestaurants(pricingIds),
+  ]);
   res.json({
     success: true,
-    data: await buildCartResponse(cart, { restaurants: [ownerRestaurant] }),
+    data: await buildCartResponse(cart, { prefetchedRestaurants: { ids: pricingIds, rows: pricingRows } }),
   });
 });
 

@@ -66,6 +66,78 @@ const canManageRestaurant = (user, restaurant) => {
   return user.role === 'vendor' && restaurant.owner.toString() === user._id.toString();
 };
 
+// ── Lean menu documents with hydration-equivalent defaults ────────────────
+// .lean() skips Mongoose document hydration, which is the main CPU cost of the
+// menu endpoint. Hydration is ALSO what fills schema defaults into documents
+// that were saved before a field existed (e.g. items created before `inStock`,
+// `sortOrder` or `minSelect`/`maxSelect` were added). To keep the JSON
+// byte-for-byte compatible, the same defaults are re-applied to missing
+// (undefined) fields only. Values are read from models/Menu.js at startup so
+// they follow the schema; the literals are only a fallback.
+function schemaDefaults(schema, fallbacks) {
+  const out = {};
+  for (const [path, fallback] of Object.entries(fallbacks)) {
+    let value = fallback;
+    try {
+      const type = schema.path(path);
+      value = type ? type.defaultValue : undefined;
+    } catch (_) {
+      value = fallback;
+    }
+    if (typeof value === 'function') value = fallback;
+    if (value !== undefined) out[path] = value;
+  }
+  return out;
+}
+
+function childSchema(schema, path) {
+  try {
+    const type = schema && schema.path(path);
+    return (type && type.schema) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const MENU_CUSTOMIZATION_SCHEMA = childSchema(MenuItem.schema, 'customizations');
+const MENU_ITEM_DEFAULTS = schemaDefaults(MenuItem.schema, {
+  description: '',
+  image: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c',
+  isVeg: true,
+  category: 'Main Course',
+  isUnder99: false,
+  isBestseller: false,
+  isRecommended: false,
+  inStock: true,
+  sortOrder: 0,
+});
+const MENU_GROUP_DEFAULTS = schemaDefaults(MENU_CUSTOMIZATION_SCHEMA, { required: false, minSelect: 0, maxSelect: 1 });
+const MENU_OPTION_DEFAULTS = schemaDefaults(childSchema(MENU_CUSTOMIZATION_SCHEMA, 'options'), { extraPrice: 0, isVeg: true });
+
+function fillMissing(target, defaults) {
+  for (const key of Object.keys(defaults)) {
+    if (target[key] === undefined) target[key] = defaults[key];
+  }
+}
+
+function applyMenuItemDefaults(item) {
+  fillMissing(item, MENU_ITEM_DEFAULTS);
+  if (item.customizations === undefined) item.customizations = [];
+  if (Array.isArray(item.customizations)) {
+    for (const group of item.customizations) {
+      if (!group || typeof group !== 'object') continue;
+      fillMissing(group, MENU_GROUP_DEFAULTS);
+      if (group.options === undefined) group.options = [];
+      if (Array.isArray(group.options)) {
+        for (const option of group.options) {
+          if (option && typeof option === 'object') fillMissing(option, MENU_OPTION_DEFAULTS);
+        }
+      }
+    }
+  }
+  return item;
+}
+
 const getRestaurants = asyncHandler(async (req, res) => {
   const { veg, category, search, sort = 'recommended' } = req.query;
   const page = clampPage(req.query.page);
@@ -90,57 +162,42 @@ const getRestaurants = asyncHandler(async (req, res) => {
   const sortOpt = sortMap[sort] || { rating: -1 };
   const skip = (page - 1) * limit;
 
-  // Fetch one availability group at a time. `availability.isOpen` is the
-  // canonical field; the top-level `isOpen` is only a legacy mirror.
-  const openFilter = { ...filter, 'availability.isOpen': true };
-  const closedFilter = { ...filter, 'availability.isOpen': { $ne: true } };
+  // PERFORMANCE: this used to be up to three SEQUENTIAL round trips
+  // (count open + count closed -> open page -> closed page). It is now one
+  // aggregate that preserves the exact same ordering contract:
+  //   1. restaurants that can accept orders (`availability.isOpen === true`,
+  //      the canonical field) come before every other restaurant, and this
+  //      happens BEFORE pagination;
+  //   2. inside each group the requested sort applies (recommended keeps the
+  //      explicit homeOrder -> 999999 fallback for old documents);
+  //   3. `total` counts both groups, exactly like openCount + closedCount.
+  // `__isOpen` / `__homeOrder` are helper keys only; the inclusion
+  // $project below strips them, so the response shape is unchanged.
+  const groupSort = sort === 'recommended'
+    ? { __isOpen: -1, __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 }
+    : { __isOpen: -1, ...sortOpt };
 
-  const findGroup = async (groupFilter, groupSkip, groupLimit) => {
-    if (groupLimit <= 0) return [];
+  const addFields = { __isOpen: { $eq: ['$availability.isOpen', true] } };
+  if (sort === 'recommended') addFields.__homeOrder = { $ifNull: ['$homeOrder', 999999] };
 
-    if (sort === 'recommended') {
-      // Keep the existing recommended-order semantics, including the explicit
-      // fallback for old documents that do not have homeOrder.
-      return Restaurant.aggregate([
-        { $match: groupFilter },
-        { $addFields: { __homeOrder: { $ifNull: ['$homeOrder', 999999] } } },
-        { $sort: { __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 } },
-        { $skip: groupSkip },
-        { $limit: groupLimit },
-        { $project: CUSTOMER_LIST_PROJECTION }
-      ]);
-    }
-
-    return Restaurant.find(groupFilter, CUSTOMER_LIST_PROJECTION)
-      .sort(sortOpt)
-      .skip(groupSkip)
-      .limit(groupLimit)
-      .lean();
-  };
-
-  const [openCount, closedCount] = await Promise.all([
-    Restaurant.countDocuments(openFilter),
-    Restaurant.countDocuments(closedFilter)
+  const [result] = await Restaurant.aggregate([
+    { $match: filter },
+    { $addFields: addFields },
+    {
+      $facet: {
+        total: [{ $count: 'n' }],
+        data: [
+          { $sort: groupSort },
+          { $skip: skip },
+          { $limit: limit },
+          { $project: CUSTOMER_LIST_PROJECTION },
+        ],
+      },
+    },
   ]);
 
-  const total = openCount + closedCount;
-  let restaurants = [];
-
-  // Pagination is applied to the combined [open..., closed...] sequence.
-  if (skip < openCount) {
-    const openTake = Math.min(limit, openCount - skip);
-    const openRows = await findGroup(openFilter, skip, openTake);
-    restaurants = openRows;
-
-    const remaining = limit - openRows.length;
-    if (remaining > 0) {
-      const closedRows = await findGroup(closedFilter, 0, remaining);
-      restaurants = restaurants.concat(closedRows);
-    }
-  } else {
-    const closedSkip = skip - openCount;
-    restaurants = await findGroup(closedFilter, closedSkip, limit);
-  }
+  const total = (result && result.total && result.total[0] && result.total[0].n) || 0;
+  const restaurants = (result && result.data) || [];
 
   res.json({
     success: true,
@@ -212,11 +269,13 @@ const getMenu = asyncHandler(async (req, res) => {
   // included on every item for the frontend to key off.
   // (Discovery/browse endpoints — getUnder99Items, searchRestaurants — are left
   // filtering to inStock-only, unchanged, same as isOpen on the restaurant side.)
+  // PERFORMANCE: lean documents (no hydration / toJSON pass) + the same
+  // schema defaults hydration used to add. Same fields, same order, same
+  // grouping; out-of-stock items are still returned.
   const items = await MenuItem.find({
     restaurantId: req.params.id,
-  })
-    .sort({ category: 1, name: 1 })
-    .lean();
+  }).sort({ category: 1, name: 1 }).lean();
+  for (const item of items) applyMenuItemDefaults(item);
 
   const groupedMenu = items.reduce((acc, item) => {
     const cat = item.category || "Recommended";
@@ -232,157 +291,216 @@ const getMenu = asyncHandler(async (req, res) => {
   });
 });
 
+// ── ₹99 Store: short response cache + single-flight ───────────────────────
+// GET /restaurants/under99 is identical for every caller (no user data), runs
+// on every home-screen load, and is the heaviest public response because it
+// carries each qualifying restaurant's COMPLETE menu. Under concurrency the
+// same three queries + a large JSON build were repeated for every customer.
+//
+//  • Single-flight: requests that arrive while a build is running share it.
+//  • Short TTL (UNDER99_CACHE_TTL_MS, default 10000 ms; 0 disables caching):
+//    the finished payload is reused until it expires.
+//  • Invalidation: every menu/restaurant write handled by THIS controller
+//    clears the cache immediately (see invalidateUnder99Cache() calls below).
+//    Writes made elsewhere (other controllers, other instances, direct DB
+//    edits) become visible within the TTL.
+//  • Safety: this is a browse listing only. POST /cart/add still re-reads the
+//    Menu + Restaurant documents and enforces inStock / open / price, and
+//    checkout re-verifies again, so a briefly stale card can never add a
+//    stale price or an unavailable item to a cart.
+const UNDER99_CACHE_TTL_MS = (() => {
+  const raw = process.env.UNDER99_CACHE_TTL_MS;
+  if (raw === undefined || String(raw).trim() === '') return 10000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 10000;
+})();
+
+const under99Cache = { payload: null, expiresAt: 0, inFlight: null, generation: 0 };
+
+function invalidateUnder99Cache() {
+  under99Cache.generation += 1;   // a build already running must not be stored
+  under99Cache.payload = null;
+  under99Cache.expiresAt = 0;
+  under99Cache.inFlight = null;   // later requests start a fresh build
+}
+
+async function buildUnder99Payload() {
+  // The 99 Store is restaurant-led: a restaurant qualifies when it has at
+  // least one in-stock item priced at <= ₹99. Once qualified, the card gets
+  // the restaurant's COMPLETE menu so the customer can horizontally browse
+  // from lowest -> highest price and add any available item without making
+  // one API request per restaurant.
+  // PERFORMANCE: distinct() returns each qualifying restaurantId once instead
+  // of one document per qualifying menu item (same set, far less transfer).
+  const qualifyingRestaurantIds = await MenuItem.distinct('restaurantId', {
+    price: { $lte: 99 },
+    inStock: true,
+  });
+
+  const restaurantIds = [...new Set(
+    qualifyingRestaurantIds
+      .filter(Boolean)
+      .map(id => id.toString())
+  )];
+
+  if (!restaurantIds.length) {
+    return { success: true, count: 0, data: [] };
+  }
+
+  const visibleRestaurants = await Restaurant.find({
+    _id: { $in: restaurantIds },
+    isActive: true,
+    approvalStatus: 'approved',
+    $or: [
+      { 'availability.isOpen': true },
+      { isOpen: true }
+    ],
+  })
+    .select([
+      'name',
+      'image',
+      'images',
+      'rating',
+      'ratingCount',
+      'estimatedDeliveryMin',
+      'estimatedDeliveryMax',
+      'time',
+      'distance',
+      'cuisine',
+      'cuisineDisplay',
+      'offer',
+      'freeDeliveryAbove',
+      'freeDeliveryEnabled',
+      'deliveryFee',
+    ].join(' '))
+    .lean();
+
+  if (!visibleRestaurants.length) {
+    return { success: true, count: 0, data: [] };
+  }
+
+  const visibleRestaurantIds = visibleRestaurants.map(r => r._id);
+
+  // Return every menu item, including out-of-stock items. This lets the
+  // 99 Store card represent the restaurant's whole menu while the frontend
+  // can disable the ADD control for unavailable items.
+  const menuItems = await MenuItem.find({
+    restaurantId: { $in: visibleRestaurantIds },
+  })
+    .select([
+      'restaurantId',
+      'name',
+      'description',
+      'price',
+      'originalPrice',
+      'image',
+      'isVeg',
+      'category',
+      'isUnder99',
+      'isBestseller',
+      'isRecommended',
+      'inStock',
+      'customizations',
+      'sortOrder',
+    ].join(' '))
+    .sort({ price: 1, sortOrder: 1, name: 1 })
+    .lean();
+
+  const menusByRestaurant = new Map();
+  for (const item of menuItems) {
+    const key = item.restaurantId.toString();
+    if (!menusByRestaurant.has(key)) menusByRestaurant.set(key, []);
+
+    const price = Number(item.price);
+    const originalPrice = Number(item.originalPrice);
+    const hasValidDiscount = Number.isFinite(originalPrice) && originalPrice > price;
+
+    menusByRestaurant.get(key).push({
+      id: item._id,
+      name: item.name,
+      description: item.description || '',
+      price,
+      originalPrice: hasValidDiscount ? originalPrice : null,
+      discountPercent: hasValidDiscount
+        ? Math.round(((originalPrice - price) / originalPrice) * 100)
+        : null,
+      image: item.image || '',
+      isVeg: Boolean(item.isVeg),
+      category: item.category || 'Recommended',
+      isUnder99: price <= 99,
+      isBestseller: Boolean(item.isBestseller),
+      isRecommended: Boolean(item.isRecommended),
+      inStock: item.inStock !== false,
+      customizations: item.customizations || [],
+    });
+  }
+
+  const data = visibleRestaurants
+    .map(restaurant => {
+      const key = restaurant._id.toString();
+      const menu = menusByRestaurant.get(key) || [];
+      if (!menu.length) return null;
+
+      return {
+        restaurant: {
+          id: restaurant._id,
+          name: restaurant.name,
+          image: restaurant.image || restaurant.images?.[0] || '',
+          images: restaurant.images || [],
+          rating: restaurant.rating,
+          ratingCount: restaurant.ratingCount,
+          deliveryTime: restaurant.time || `${restaurant.estimatedDeliveryMin}-${restaurant.estimatedDeliveryMax} mins`,
+          estimatedDeliveryMin: restaurant.estimatedDeliveryMin,
+          estimatedDeliveryMax: restaurant.estimatedDeliveryMax,
+          distance: restaurant.distance || '',
+          cuisine: restaurant.cuisineDisplay || (restaurant.cuisine || []).join(', '),
+          offer: restaurant.offer || '',
+          freeDeliveryAbove: restaurant.freeDeliveryEnabled ? restaurant.freeDeliveryAbove : null,
+          deliveryFee: restaurant.deliveryFee,
+        },
+        menu,
+        // The first item is always the cheapest because the query is sorted
+        // by price, then sortOrder, then name.
+        cheapestPrice: menu[0].price,
+        menuCount: menu.length,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.cheapestPrice - b.cheapestPrice);
+
+  return {
+    success: true,
+    count: data.length,
+    data,
+  };
+}
+
+function loadUnder99Payload() {
+  if (under99Cache.payload && Date.now() < under99Cache.expiresAt) {
+    return Promise.resolve(under99Cache.payload);
+  }
+  if (under99Cache.inFlight) return under99Cache.inFlight;
+
+  const generation = under99Cache.generation;
+  const build = buildUnder99Payload()
+    .then((payload) => {
+      if (UNDER99_CACHE_TTL_MS > 0 && under99Cache.generation === generation) {
+        under99Cache.payload = payload;
+        under99Cache.expiresAt = Date.now() + UNDER99_CACHE_TTL_MS;
+      }
+      return payload;
+    })
+    .finally(() => {
+      if (under99Cache.inFlight === build) under99Cache.inFlight = null;
+    });
+  under99Cache.inFlight = build;
+  return build;
+}
+
 const getUnder99Items = asyncHandler(async (req, res) => {
   try {
-    // The 99 Store is restaurant-led: a restaurant qualifies when it has at
-    // least one in-stock item priced at <= ₹99. Once qualified, the card gets
-    // the restaurant's COMPLETE menu so the customer can horizontally browse
-    // from lowest -> highest price and add any available item without making
-    // one API request per restaurant.
-    const qualifyingItems = await MenuItem.find({
-      price: { $lte: 99 },
-      inStock: true,
-    })
-      .select('restaurantId')
-      .lean();
-
-    const restaurantIds = [...new Set(
-      qualifyingItems
-        .map(item => item.restaurantId)
-        .filter(Boolean)
-        .map(id => id.toString())
-    )];
-
-    if (!restaurantIds.length) {
-      return res.json({ success: true, count: 0, data: [] });
-    }
-
-    const visibleRestaurants = await Restaurant.find({
-      _id: { $in: restaurantIds },
-      isActive: true,
-      approvalStatus: 'approved',
-      $or: [
-        { 'availability.isOpen': true },
-        { isOpen: true }
-      ],
-    })
-      .select([
-        'name',
-        'image',
-        'images',
-        'rating',
-        'ratingCount',
-        'estimatedDeliveryMin',
-        'estimatedDeliveryMax',
-        'time',
-        'distance',
-        'cuisine',
-        'cuisineDisplay',
-        'offer',
-        'freeDeliveryAbove',
-        'freeDeliveryEnabled',
-        'deliveryFee',
-      ].join(' '))
-      .lean();
-
-    if (!visibleRestaurants.length) {
-      return res.json({ success: true, count: 0, data: [] });
-    }
-
-    const visibleRestaurantIds = visibleRestaurants.map(r => r._id);
-
-    // Return every menu item, including out-of-stock items. This lets the
-    // 99 Store card represent the restaurant's whole menu while the frontend
-    // can disable the ADD control for unavailable items.
-    const menuItems = await MenuItem.find({
-      restaurantId: { $in: visibleRestaurantIds },
-    })
-      .select([
-        'restaurantId',
-        'name',
-        'description',
-        'price',
-        'originalPrice',
-        'image',
-        'isVeg',
-        'category',
-        'isUnder99',
-        'isBestseller',
-        'isRecommended',
-        'inStock',
-        'customizations',
-        'sortOrder',
-      ].join(' '))
-      .sort({ price: 1, sortOrder: 1, name: 1 })
-      .lean();
-
-    const menusByRestaurant = new Map();
-    for (const item of menuItems) {
-      const key = item.restaurantId.toString();
-      if (!menusByRestaurant.has(key)) menusByRestaurant.set(key, []);
-
-      const price = Number(item.price);
-      const originalPrice = Number(item.originalPrice);
-      const hasValidDiscount = Number.isFinite(originalPrice) && originalPrice > price;
-
-      menusByRestaurant.get(key).push({
-        id: item._id,
-        name: item.name,
-        description: item.description || '',
-        price,
-        originalPrice: hasValidDiscount ? originalPrice : null,
-        discountPercent: hasValidDiscount
-          ? Math.round(((originalPrice - price) / originalPrice) * 100)
-          : null,
-        image: item.image || '',
-        isVeg: Boolean(item.isVeg),
-        category: item.category || 'Recommended',
-        isUnder99: price <= 99,
-        isBestseller: Boolean(item.isBestseller),
-        isRecommended: Boolean(item.isRecommended),
-        inStock: item.inStock !== false,
-        customizations: item.customizations || [],
-      });
-    }
-
-    const data = visibleRestaurants
-      .map(restaurant => {
-        const key = restaurant._id.toString();
-        const menu = menusByRestaurant.get(key) || [];
-        if (!menu.length) return null;
-
-        return {
-          restaurant: {
-            id: restaurant._id,
-            name: restaurant.name,
-            image: restaurant.image || restaurant.images?.[0] || '',
-            images: restaurant.images || [],
-            rating: restaurant.rating,
-            ratingCount: restaurant.ratingCount,
-            deliveryTime: restaurant.time || `${restaurant.estimatedDeliveryMin}-${restaurant.estimatedDeliveryMax} mins`,
-            estimatedDeliveryMin: restaurant.estimatedDeliveryMin,
-            estimatedDeliveryMax: restaurant.estimatedDeliveryMax,
-            distance: restaurant.distance || '',
-            cuisine: restaurant.cuisineDisplay || (restaurant.cuisine || []).join(', '),
-            offer: restaurant.offer || '',
-            freeDeliveryAbove: restaurant.freeDeliveryEnabled ? restaurant.freeDeliveryAbove : null,
-            deliveryFee: restaurant.deliveryFee,
-          },
-          menu,
-          // The first item is always the cheapest because the query is sorted
-          // by price, then sortOrder, then name.
-          cheapestPrice: menu[0].price,
-          menuCount: menu.length,
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.cheapestPrice - b.cheapestPrice);
-
-    res.json({
-      success: true,
-      count: data.length,
-      data,
-    });
+    // Failures are never cached; the next request retries the build.
+    res.json(await loadUnder99Payload());
   } catch (error) {
     console.error('99 Store menu fetch failed:', error);
     res.status(500).json({
@@ -439,24 +557,45 @@ const searchRestaurants = asyncHandler(async (req, res) => {
     // homepage search response. The homepage search surface is dish-first.
     // Restaurant search remains available elsewhere through the dedicated
     // restaurant browse/search UI if needed.
-    const menuItems = await MenuItem.find(menuFilter)
-      .select([
-        '_id',
-        'restaurantId',
-        'name',
-        'description',
-        'price',
-        'originalPrice',
-        'image',
-        'isVeg',
-        'category',
-        'isBestseller',
-        'isRecommended',
-        'inStock',
-      ].join(' '))
-      .sort({ isBestseller: -1, isRecommended: -1, sortOrder: 1, name: 1 })
-      .limit(30)
-      .lean();
+    //
+    // PERFORMANCE: the dish query and the "which restaurants are currently
+    // customer-visible/orderable" query are independent, so they now run in
+    // parallel (one round trip instead of two). The visibility rules are the
+    // same as before; items are still ranked and capped at 30 FIRST and then
+    // dropped if their restaurant is not visible, so the result is identical.
+    const visibleRestaurantFilter = {
+      isActive: true,
+      approvalStatus: 'approved',
+      $or: [
+        { 'availability.isOpen': true },
+        { isOpen: true },
+      ],
+    };
+    if (scope === 'restaurant') visibleRestaurantFilter._id = restaurantId;
+
+    const [menuItems, restaurants] = await Promise.all([
+      MenuItem.find(menuFilter)
+        .select([
+          '_id',
+          'restaurantId',
+          'name',
+          'description',
+          'price',
+          'originalPrice',
+          'image',
+          'isVeg',
+          'category',
+          'isBestseller',
+          'isRecommended',
+          'inStock',
+        ].join(' '))
+        .sort({ isBestseller: -1, isRecommended: -1, sortOrder: 1, name: 1 })
+        .limit(30)
+        .lean(),
+      Restaurant.find(visibleRestaurantFilter)
+        .select('_id name image images rating ratingCount estimatedDeliveryMin estimatedDeliveryMax time cuisine cuisineDisplay')
+        .lean(),
+    ]);
 
     if (!menuItems.length) {
       return res.json({
@@ -467,19 +606,6 @@ const searchRestaurants = asyncHandler(async (req, res) => {
         data: { menuItems: [] },
       });
     }
-
-    const restaurantIds = [...new Set(menuItems.map(item => String(item.restaurantId)).filter(Boolean))];
-    const restaurants = await Restaurant.find({
-      _id: { $in: restaurantIds },
-      isActive: true,
-      approvalStatus: 'approved',
-      $or: [
-        { 'availability.isOpen': true },
-        { isOpen: true },
-      ],
-    })
-      .select('_id name image images rating ratingCount estimatedDeliveryMin estimatedDeliveryMax time cuisine cuisineDisplay')
-      .lean();
 
     const restaurantMap = new Map(restaurants.map(r => [String(r._id), r]));
 
@@ -548,42 +674,60 @@ const normalizeRestaurantImages = (body) => {
 };
 
 
-const getRestaurantReviews = asyncHandler(async (req, res) => {
-  const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true, approvalStatus: 'approved' }).select('_id name rating ratingCount reviewCount');
-  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
+const OBJECT_ID_HEX = /^[0-9a-fA-F]{24}$/;
 
+const getRestaurantReviews = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(30, Math.max(1, Number(req.query.limit) || 10));
   const skip = (page - 1) * limit;
-  const filter = { restaurant: restaurant._id, isVisible: true };
-  // Reviews used to require three DB operations here: page + count + score
-  // breakdown. Keep the same response shape, but combine count/breakdown into
-  // one indexed aggregation and use lean review documents (no Mongoose methods
-  // are needed by this response).
-  const [reviews, stats] = await Promise.all([
-    Review.find(filter)
-      .populate('user', 'name avatar')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    Review.aggregate([
-      { $match: filter },
-      {
-        $facet: {
-          meta: [{ $count: 'total' }],
-          breakdown: [
-            { $group: { _id: '$score', count: { $sum: 1 } } },
-            { $sort: { _id: -1 } }
-          ]
-        }
-      }
-    ])
-  ]);
-  const total = Number(stats[0]?.meta?.[0]?.total || 0);
-  const breakdown = stats[0]?.breakdown || [];
+
+  const restaurantQuery = Restaurant.findOne({ _id: req.params.id, isActive: true, approvalStatus: 'approved' }).select('_id name rating ratingCount reviewCount');
+
+  // PERFORMANCE:
+  //  • The separate countDocuments() is gone: `total` is the sum of the score
+  //    breakdown, which groups the exact same matched set (every review lands
+  //    in exactly one score bucket), so the number is identical.
+  //  • The review queries no longer wait for the restaurant lookup; both run
+  //    together. The 404 contract is unchanged: if the restaurant is not
+  //    customer-visible, nothing from the review queries is returned (and any
+  //    review-query error is ignored, exactly as if it had never run).
+  //  • Only the review fields the response uses are fetched.
+  const loadReviews = (restaurantObjectId) => {
+    const filter = { restaurant: restaurantObjectId, isVisible: true };
+    return Promise.all([
+      Review.find(filter)
+        .select('score riderScore comment createdAt user')
+        .populate('user', 'name avatar')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Review.aggregate([
+        { $match: filter },
+        { $group: { _id: '$score', count: { $sum: 1 } } },
+        { $sort: { _id: -1 } }
+      ]),
+    ]);
+  };
+
+  let restaurant;
+  let reviewResult;
+  if (OBJECT_ID_HEX.test(String(req.params.id))) {
+    const settledReviews = loadReviews(new mongoose.Types.ObjectId(String(req.params.id)))
+      .then(value => ({ value }), error => ({ error }));
+    [restaurant, reviewResult] = await Promise.all([restaurantQuery, settledReviews]);
+  } else {
+    // Malformed ids keep the original sequential path (same cast error / 404).
+    restaurant = await restaurantQuery;
+  }
+  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
+
+  if (!reviewResult) reviewResult = { value: await loadReviews(restaurant._id) };
+  if (reviewResult.error) throw reviewResult.error;
+  const [reviews, breakdown] = reviewResult.value;
+
   const counts = { 1:0, 2:0, 3:0, 4:0, 5:0 };
-  breakdown.forEach(x => { counts[x._id] = x.count; });
+  let total = 0;
+  breakdown.forEach(x => { counts[x._id] = x.count; total += x.count; });
   res.json({
     success: true,
     summary: { rating: total ? restaurant.rating : null, ratingCount: total, reviewCount: total, breakdown: counts },
@@ -653,6 +797,7 @@ const updateRestaurant = asyncHandler(async (req, res) => {
 
   normalizeRestaurantImages(update);
   const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
+  invalidateUnder99Cache();
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });
 });
@@ -767,6 +912,7 @@ const deleteRestaurant = asyncHandler(async (req, res) => {
       };
     });
 
+    invalidateUnder99Cache();
     return res.json({
       success: true,
       message: 'Restaurant permanently deleted. Historical orders and financial records were preserved.',
@@ -820,6 +966,7 @@ const updateRestaurantAvailability = asyncHandler(async (req, res) => {
   if (typeof autoHours === 'boolean') update['availability.autoHours'] = autoHours;
 
   const updated = await Restaurant.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true });
+  invalidateUnder99Cache();
   res.json({ success: true, data: updated });
 });
 
@@ -845,6 +992,7 @@ const addMenuItem = asyncHandler(async (req, res) => {
   }
   const item = await MenuItem.create(payload);
   if (item.price <= 99) { item.isUnder99 = true; await item.save(); }
+  invalidateUnder99Cache();
   res.status(201).json({ success: true, data: item });
 });
 
@@ -865,6 +1013,7 @@ const updateMenuItem = asyncHandler(async (req, res) => {
     update.originalPrice = null;
   }
   const item = await MenuItem.findByIdAndUpdate(req.params.itemId, update, { new: true, runValidators: true });
+  invalidateUnder99Cache();
   res.json({ success: true, data: item });
 });
 
@@ -878,6 +1027,7 @@ const deleteMenuItem = asyncHandler(async (req, res) => {
   }
 
   const item = await MenuItem.findByIdAndDelete(req.params.itemId);
+  invalidateUnder99Cache();
   res.json({ success: true, message: 'Menu item deleted' });
 });
 
@@ -907,6 +1057,7 @@ const updateMenuItemAvailability = asyncHandler(async (req, res) => {
 
   item.inStock = isAvailable;
   await item.save();
+  invalidateUnder99Cache();
 
   res.json({ success: true, data: item });
 });
