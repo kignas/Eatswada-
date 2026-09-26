@@ -4,6 +4,7 @@ const asyncHandler = require('express-async-handler');
 const mongoose = require('mongoose');
 const HomeBanner = require('../models/HomeBanner');
 const { logAdminAction } = require('../services/auditService');
+const { createMemoryCache, readTtlMs } = require('../utils/memoryCache');
 
 const ANIMATIONS = new Set(['fade', 'slide', 'scale', 'none']);
 const TEXT_COLORS = new Set(['light', 'dark']);
@@ -56,21 +57,68 @@ function validatePayload(payload, { partial = false } = {}) {
   return null;
 }
 
+const PUBLIC_BANNER_FIELDS = 'placement title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation headerTheme searchPlaceholder priority';
+
+// PERFORMANCE: GET /api/home-banners is identical for every customer and runs
+// on every homepage / ₹99-page load, but banners only change when an admin
+// edits them. The active banners of each placement are kept in memory
+// (default 60 s, HOME_BANNER_CACHE_TTL_MS=0 disables) and every admin write
+// below clears the cache immediately.
+//
+// The start/end schedule is NOT frozen by the cache: startAt/endAt are loaded
+// with the cached rows and the time window is applied on EVERY request, with
+// the same rules the MongoDB filter used —
+//   { startAt: null } matches null or missing; { startAt: { $lte: now } } only
+//   matches real dates (and the same for endAt with $gte) —
+// so a scheduled banner still appears/disappears at exactly the same moment.
+// startAt/endAt are removed again before responding, so the JSON is unchanged.
+const bannerCache = createMemoryCache({ ttlMs: readTtlMs('HOME_BANNER_CACHE_TTL_MS', 60000) });
+const invalidateBannerCache = () => bannerCache.invalidate();
+
+const isDateValue = (value) => Object.prototype.toString.call(value) === '[object Date]';
+
+function isWithinSchedule(banner, now) {
+  const startOk = banner.startAt == null || (isDateValue(banner.startAt) && banner.startAt.getTime() <= now.getTime());
+  const endOk = banner.endAt == null || (isDateValue(banner.endAt) && banner.endAt.getTime() >= now.getTime());
+  return startOk && endOk;
+}
+
 exports.getActiveBanners = asyncHandler(async (req, res) => {
   const now = new Date();
   const placement = String(req.query.placement || 'home').trim().toLowerCase();
   if (!PLACEMENTS.has(placement)) return res.status(400).json({ success: false, message: 'Invalid banner placement.' });
-  const banners = await HomeBanner.find({
-    placement,
-    active: true,
-    $and: [
-      { $or: [{ startAt: null }, { startAt: { $lte: now } }] },
-      { $or: [{ endAt: null }, { endAt: { $gte: now } }] },
-    ],
-  })
-    .select('placement title subtitle offerText badgeText ctaText ctaUrl image mobileImage background textColor animation headerTheme searchPlaceholder priority')
-    .sort({ priority: -1, createdAt: -1 })
-    .lean();
+
+  if (!bannerCache.enabled) {
+    // Cache disabled: the original query, unchanged.
+    const banners = await HomeBanner.find({
+      placement,
+      active: true,
+      $and: [
+        { $or: [{ startAt: null }, { startAt: { $lte: now } }] },
+        { $or: [{ endAt: null }, { endAt: { $gte: now } }] },
+      ],
+    })
+      .select(PUBLIC_BANNER_FIELDS)
+      .sort({ priority: -1, createdAt: -1 })
+      .lean();
+
+    return res.json({ success: true, data: banners });
+  }
+
+  const candidates = await bannerCache.get(placement, () =>
+    HomeBanner.find({ placement, active: true })
+      .select(`${PUBLIC_BANNER_FIELDS} startAt endAt`)
+      .sort({ priority: -1, createdAt: -1 })
+      .lean()
+  );
+
+  const banners = [];
+  for (const banner of candidates) {
+    if (!isWithinSchedule(banner, now)) continue;
+    // New object per response: the cached rows are never mutated or exposed.
+    const { startAt, endAt, ...publicFields } = banner;
+    banners.push(publicFields);
+  }
 
   res.json({ success: true, data: banners });
 });
@@ -88,6 +136,7 @@ exports.createBanner = asyncHandler(async (req, res) => {
   payload.createdBy = req.user._id;
   payload.updatedBy = req.user._id;
   const banner = await HomeBanner.create(payload);
+  invalidateBannerCache();
 
   await logAdminAction(req, {
     action: 'home_banner.create',
@@ -112,6 +161,7 @@ exports.updateBanner = asyncHandler(async (req, res) => {
 
   Object.assign(banner, payload, { updatedBy: req.user._id });
   await banner.save();
+  invalidateBannerCache();
 
   await logAdminAction(req, {
     action: 'home_banner.update',
@@ -134,6 +184,7 @@ exports.toggleBanner = asyncHandler(async (req, res) => {
   banner.active = !banner.active;
   banner.updatedBy = req.user._id;
   await banner.save();
+  invalidateBannerCache();
 
   await logAdminAction(req, {
     action: 'home_banner.toggle',
@@ -153,6 +204,7 @@ exports.deleteBanner = asyncHandler(async (req, res) => {
   if (!banner) return res.status(404).json({ success: false, message: 'Banner not found.' });
   const oldValue = banner.toObject();
   await banner.deleteOne();
+  invalidateBannerCache();
 
   await logAdminAction(req, {
     action: 'home_banner.delete',
@@ -177,7 +229,12 @@ exports.reorderBanners = asyncHandler(async (req, res) => {
     operations.push({ updateOne: { filter: { _id: item.id }, update: { $set: { priority, updatedBy: req.user._id } } } });
   }
   if (!operations.length) return res.status(400).json({ success: false, message: 'No valid banner order items supplied.' });
-  await HomeBanner.bulkWrite(operations);
+  try {
+    await HomeBanner.bulkWrite(operations);
+  } finally {
+    // Also on failure: a bulkWrite can be partially applied before it throws.
+    invalidateBannerCache();
+  }
   const banners = await HomeBanner.find({}).sort({ priority: -1, createdAt: -1 }).lean();
   res.json({ success: true, data: banners });
 });
