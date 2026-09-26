@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-const perfDiagnostics = require('../utils/perfDiagnostics');
 
 const connectDB = async () => {
   try {
@@ -12,9 +11,6 @@ const connectDB = async () => {
       serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) || 10000,
       socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS) || 45000,
       connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS) || 10000,
-      // Only with PERF_DIAGNOSTICS=true: lets utils/perfDiagnostics.js time
-      // each MongoDB command. Off by default (same options as before).
-      ...(perfDiagnostics.enabled ? { monitorCommands: true } : {}),
     });
 
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
