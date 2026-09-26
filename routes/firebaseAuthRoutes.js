@@ -22,6 +22,7 @@ router.post('/firebase/complete-profile', firebaseAuthLimiter, [
   body('phone').isString().isLength({ min: 10, max: 16 }).withMessage('Invalid phone number'),
   body('password').isString().isLength({ min: 8, max: 128 }).withMessage('Password must be 8-128 characters'),
   body('name').optional().isString().isLength({ min: 2, max: 60 }).withMessage('Invalid name'),
+  body('adultConfirmed').isBoolean().withMessage('Age eligibility confirmation is required'),
 ], validate, completeGoogleProfile);
 
 module.exports = router;
