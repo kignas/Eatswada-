@@ -102,16 +102,33 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
         { paymentClaimId: { $exists: false } },
         { paymentClaimId: null },
         { paymentClaimId: '' },
-        { paymentClaimId: pid },
       ],
     },
     { $set: { paymentClaimId: pid } },
     { new: true }
   );
 
+  // Only the request that actually elects a fresh payment claim should emit
+  // vendor/admin notifications. A same-payment retry may still finish a
+  // partially committed checkout, but must not ring the vendor twice.
+  let shouldNotify = !!claim;
+
   if (!claim) {
-    await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
-    return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
+    // IMPORTANT: a webhook and /payments/verify can race for the SAME captured
+    // payment. If the other request already claimed this exact payment id, it
+    // is NOT a duplicate payment and must never be refunded. The old code
+    // treated every failed claim as a duplicate, which could refund the real
+    // checkout while leaving the customer order in `placed` and hiding it from
+    // the vendor queue.
+    const currentLeader = await Order.findById(liveLeader._id).select('paymentClaimId paymentStatus razorpayPaymentId');
+    if (currentLeader && String(currentLeader.paymentClaimId || '') !== pid) {
+      await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
+      return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
+    }
+    // Same payment id already owns the claim. Continue idempotently and let
+    // this request finish the shared checkout state if the original claimant
+    // was interrupted. It does not become the notification owner.
+    shouldNotify = false;
   }
 
   const unpaid = { $nin: ['paid', 'refunded'] };
@@ -157,11 +174,15 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
     );
 
     // Order is now paid → visible to the vendor. Ring their device(s) until they act.
-    for (const o of live) {
-      // Vendor + admin notifications are emitted only after payment is verified.
-      // Both functions are idempotent and never block a successful checkout.
-      pushService.notifyRestaurantNewOrder(o).catch((err) => console.error('[PUSH] vendor new-order:', err.message));
-      pushService.notifyAdminsNewOrder(o).catch((err) => console.error('[PUSH] admin new-order:', err.message));
+    // If this is a concurrent retry of the SAME payment after another request
+    // already committed the checkout, do not ring the restaurant a second time.
+    if (shouldNotify) {
+      for (const o of live) {
+        // Vendor + admin notifications are emitted only after payment is verified.
+        // Both functions are idempotent and never block a successful checkout.
+        pushService.notifyRestaurantNewOrder(o).catch((err) => console.error('[PUSH] vendor new-order:', err.message));
+        pushService.notifyAdminsNewOrder(o).catch((err) => console.error('[PUSH] admin-new-order:', err.message));
+      }
     }
   }
 

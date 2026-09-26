@@ -1,5 +1,6 @@
 // File 2: controllers/orderController.js
 const mongoose    = require('mongoose');
+const crypto       = require('crypto');
 const Order      = require('../models/Order');
 const Cart       = require('../models/Cart');
 const Address    = require('../models/Address');
@@ -356,7 +357,7 @@ function buildCheckoutResponse(orders, replay) {
     : null;
 
   if (shaped.length === 1) {
-    return { success: true, replay: !!replay, data: shaped[0].order, deliveryOtp: shaped[0].deliveryOtp, ...(payment ? { payment } : {}) };
+    return { success: true, replay: !!replay, checkoutGroupId: primary?.checkoutGroupId || null, data: shaped[0].order, deliveryOtp: shaped[0].deliveryOtp, ...(payment ? { payment } : {}) };
   }
 
   return {
@@ -364,6 +365,7 @@ function buildCheckoutResponse(orders, replay) {
     replay: !!replay,
     multiple: true,
     count: shaped.length,
+    checkoutGroupId: primary?.checkoutGroupId || null,
     data: shaped[0].order,
     orders: shaped.map(s => s.order),
     deliveryOtps: shaped.reduce((acc, s) => { acc[s.order._id] = s.deliveryOtp; return acc; }, {}),
@@ -532,6 +534,10 @@ const createOrder = asyncHandler(async (req, res) => {
   // orders AND releases the idempotency lock — otherwise a held lock would wedge
   // the customer behind the 409 above and they could never retry.
   const created = [];
+  // One checkout can create multiple restaurant-specific Order documents.
+  // Generate exactly one server-side group id and persist it on every child.
+  // This identifier is never trusted from the browser.
+  const checkoutGroupId = crypto.randomUUID();
   try {
     for (let i = 0; i < priced.length; i += 1) {
       const p = priced[i];
@@ -549,6 +555,7 @@ const createOrder = asyncHandler(async (req, res) => {
         restaurant: p.restaurant._id,
         restaurantName: p.restaurant.name,
         restaurantImage: p.restaurant.image || '',
+        checkoutGroupId,
         customerName: customer?.name || '',
         customerPhone: customer?.phone || '',
         items: p.serverItems,
