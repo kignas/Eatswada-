@@ -317,7 +317,7 @@ const getProfile = asyncHandler(async (req, res) => {
 });
 
 const updateProfile = asyncHandler(async (req, res) => {
-  const { name, email, phone, password, vegOnly, avatar } = req.body;
+  const { name, email, phone, password, vegOnly, avatar, adultConfirmed } = req.body;
   const user = await User.findById(req.user._id).select('+password');
   if (!user) return res.status(404).json({ success:false, message:'User profile not found.' });
   if (name !== undefined) user.name = String(name).trim();
@@ -339,6 +339,7 @@ const updateProfile = asyncHandler(async (req, res) => {
   }
   if (vegOnly !== undefined) user.vegOnly = vegOnly;
   if (avatar !== undefined) user.avatar = avatar;
+  if (adultConfirmed === true && !user.adultConfirmedAt) user.adultConfirmedAt = new Date();
   if (password !== undefined) {
     if (typeof password !== 'string' || password.length < 8) return res.status(400).json({ success:false, message:'Password must be at least 8 characters.' });
     user.password = password;

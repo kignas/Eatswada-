@@ -129,6 +129,7 @@ exports.completeGoogleProfile = asyncHandler(async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const name = safeName(req.body.name || decoded.name);
   const password = String(req.body.password || '');
+  const adultConfirmed = req.body.adultConfirmed === true;
 
   if (!email || !isValidEmail(email)) {
     return res.status(400).json({ success: false, message: 'A valid Google email address is required.' });
@@ -141,6 +142,9 @@ exports.completeGoogleProfile = asyncHandler(async (req, res) => {
   }
   if (name.length < 2) {
     return res.status(400).json({ success: false, message: 'Name is required.' });
+  }
+  if (!adultConfirmed) {
+    return res.status(400).json({ success: false, message: 'You must confirm that you are 18 years old or older.' });
   }
 
   // Never silently overwrite an existing account. A Google email that already
@@ -164,6 +168,7 @@ exports.completeGoogleProfile = asyncHandler(async (req, res) => {
       existing.phone = phone;
       existing.password = password;
       existing.avatar = String(decoded.picture || existing.avatar || '');
+      if (!existing.adultConfirmedAt) existing.adultConfirmedAt = new Date();
       existing.lastLogin = new Date();
       await existing.save();
       return res.status(200).json({
@@ -200,6 +205,7 @@ exports.completeGoogleProfile = asyncHandler(async (req, res) => {
     role: 'user',
     // The phone is NOT SMS verified. It is only the customer's contact number.
     isPhoneVerified: false,
+    adultConfirmedAt: new Date(),
   });
 
   user.lastLogin = new Date();
