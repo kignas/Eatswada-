@@ -14,6 +14,7 @@ const morgan         = require('morgan');
 const connectDB      = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 const { requestLogger } = require('./middleware/requestLogger');
+const perfDiagnostics = require('./utils/perfDiagnostics'); // no-op unless PERF_DIAGNOSTICS=true
 
 // ── Route & Model imports ─────────────────────────────────────
 const userRoutes       = require('./routes/userRoutes');
@@ -131,6 +132,7 @@ if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
 // is not yet set here — actor is resolved at res 'finish', by which point auth
 // middleware on the matched route has populated req.user.
 app.use(requestLogger);
+if (perfDiagnostics.enabled) app.use(perfDiagnostics.middleware);
 
 // ── OTP diagnostic logging ────────────────────────────────────
 // Keep this lightweight and production-safe: log request flow and a masked phone,
@@ -227,6 +229,7 @@ connectDB().then(() => {
   // lost on restart/sleep, so on boot (and periodically) sweep for orders left
   // in 'assigned' past the accept window and reassign them.
   startAssignmentRecovery();
+  if (perfDiagnostics.enabled) perfDiagnostics.start(mongoose.connection);
 
   server = app.listen(PORT, '0.0.0.0', () => {
     console.log('╔══════════════════════════════════════════════╗');
