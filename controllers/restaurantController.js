@@ -7,7 +7,6 @@ const Order = require('../models/Order');
 const Cart = require('../models/Cart');
 const User = require('../models/User');
 const RestaurantDeletionAudit = require('../models/RestaurantDeletionAudit');
-const { createMemoryCache, readTtlMs } = require('../utils/memoryCache');
 
 const clampPage = (value, fallback = 1) => Math.max(1, Number(value) || fallback);
 const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
@@ -262,7 +261,7 @@ const getRestaurantById = asyncHandler(async (req, res) => {
   res.json({ success: true, data: restaurant });
 });
 
-async function buildMenuPayload(restaurantId) {
+const getMenu = asyncHandler(async (req, res) => {
   // 🔧 CHANGE (Menu Item Availability): was `{ inStock: true }`, which hid
   // out-of-stock items entirely. The customer menu page needs to render
   // unavailable items grayed out with a dark overlay and a disabled "Unavailable"
@@ -274,7 +273,7 @@ async function buildMenuPayload(restaurantId) {
   // schema defaults hydration used to add. Same fields, same order, same
   // grouping; out-of-stock items are still returned.
   const items = await MenuItem.find({
-    restaurantId,
+    restaurantId: req.params.id,
   }).sort({ category: 1, name: 1 }).lean();
   for (const item of items) applyMenuItemDefaults(item);
 
@@ -285,43 +284,11 @@ async function buildMenuPayload(restaurantId) {
     return acc;
   }, {});
 
-  return {
+  res.json({
     success: true,
     count: items.length,
     data: groupedMenu
-  };
-}
-
-// ── Public menu: short response cache ─────────────────────────────────────
-// GET /restaurants/:id/menu is identical for every caller (no user data) and
-// its whole cost is one MongoDB round trip that every visitor of the same
-// restaurant repeats. The finished payload is reused per restaurant id:
-//  • Exact for writes made by this server: models/Menu.js bumps a write
-//    counter after EVERY successful menu write (create, edit, in-stock toggle,
-//    delete, ...); when it moves, all cached menus are dropped before serving.
-//  • MENU_CACHE_TTL_MS (default 30000; 0 = off, original behaviour) only
-//    bounds writes made outside this process (seeder, direct DB edits, a
-//    second instance).
-//  • At most 300 restaurants are held (oldest dropped first).
-//  • Safety: browse data only. POST /cart/add and checkout still re-read the
-//    Menu document and enforce inStock / price, exactly as before.
-const menuCache = createMemoryCache({ ttlMs: readTtlMs('MENU_CACHE_TTL_MS', 30000), maxEntries: 300 });
-let menuCacheWriteVersion = null;
-const currentMenuWriteVersion = () =>
-  (typeof MenuItem.menuWriteVersion === 'function' ? MenuItem.menuWriteVersion() : 0);
-
-const getMenu = asyncHandler(async (req, res) => {
-  if (!menuCache.enabled) {
-    res.json(await buildMenuPayload(req.params.id));
-    return;
-  }
-  const writeVersion = currentMenuWriteVersion();
-  if (writeVersion !== menuCacheWriteVersion) {
-    menuCache.invalidate(); // a menu changed since these entries were built
-    menuCacheWriteVersion = writeVersion;
-  }
-  const restaurantId = req.params.id;
-  res.json(await menuCache.get(String(restaurantId), () => buildMenuPayload(restaurantId)));
+  });
 });
 
 // ── ₹99 Store: short response cache + single-flight ───────────────────────
@@ -946,9 +913,6 @@ const deleteRestaurant = asyncHandler(async (req, res) => {
     });
 
     invalidateUnder99Cache();
-    // The menu deleteMany above ran inside the transaction, so its write hook
-    // fired before the commit; mark again now that the deletion is visible.
-    if (typeof MenuItem.markMenuWrite === 'function') MenuItem.markMenuWrite();
     return res.json({
       success: true,
       message: 'Restaurant permanently deleted. Historical orders and financial records were preserved.',
