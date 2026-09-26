@@ -100,29 +100,5 @@ menuItemSchema.index({ restaurantId: 1, inStock: 1 }); // Corrected schema and f
 // then walks price in order — replacing a full-collection scan + in-memory sort.
 menuItemSchema.index({ inStock: 1, price: 1 });
 
-// --- MENU WRITE COUNTER (performance: public menu response cache) ---
-// GET /api/restaurants/:id/menu keeps a short in-memory cache
-// (restaurantController). To keep it exact, every successful menu write made
-// through this model — create/save, update, in-stock toggle, delete,
-// insertMany — increments this counter AFTER MongoDB acknowledges it, and the
-// cache drops everything whenever the counter has moved. Nothing here changes
-// what a write does; the hooks only increment a number.
-let menuWriteVersion = 0;
-function markMenuWrite() { menuWriteVersion += 1; }
-
-menuItemSchema.post('save', markMenuWrite);
-for (const op of ['updateMany', 'findOneAndUpdate', 'findOneAndReplace', 'findOneAndDelete', 'replaceOne', 'deleteMany']) {
-  menuItemSchema.post(op, markMenuWrite);
-}
-// updateOne / deleteOne exist as both query and document middleware.
-menuItemSchema.post('updateOne', { document: true, query: true }, markMenuWrite);
-menuItemSchema.post('deleteOne', { document: true, query: true }, markMenuWrite);
-menuItemSchema.post('insertMany', markMenuWrite);
-menuItemSchema.post('bulkWrite', markMenuWrite);
-
-menuItemSchema.statics.menuWriteVersion = function menuWriteVersionStatic() { return menuWriteVersion; };
-// For writes whose visibility is delayed (a transaction commits later).
-menuItemSchema.statics.markMenuWrite = function markMenuWriteStatic() { markMenuWrite(); };
-
 // Exported as 'Menu' to match your controller imports
 module.exports = mongoose.model('Menu', menuItemSchema);
