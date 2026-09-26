@@ -14,8 +14,6 @@
  *    callers waiting on it, but its (possibly pre-write) result is never
  *    stored — the next call reloads.
  *  • Failures are never cached; the next call retries.
- *  • Optional maxEntries bound (oldest entry dropped first) for caches keyed
- *    by request input, so random keys can never grow memory without limit.
  *
  * Scope: one Node process. Writes made through this process invalidate
  * instantly; writes made elsewhere (another instance, a direct DB edit, the
@@ -29,19 +27,12 @@ function readTtlMs(envName, fallbackMs) {
   return Number.isFinite(n) && n >= 0 ? n : fallbackMs;
 }
 
-function createMemoryCache({ ttlMs, maxEntries = Infinity }) {
-  const entries = new Map();   // key -> { value, expiresAt } (insertion order = age)
+function createMemoryCache({ ttlMs }) {
+  const entries = new Map();   // key -> { value, expiresAt }
   const inFlight = new Map();  // key -> Promise
   let generation = 0;
 
   const enabled = Number(ttlMs) > 0;
-  const limit = Number(maxEntries) > 0 ? Number(maxEntries) : Infinity;
-
-  function store(key, value) {
-    entries.delete(key); // re-insert so the newest entry is last
-    entries.set(key, { value, expiresAt: Date.now() + ttlMs });
-    while (entries.size > limit) entries.delete(entries.keys().next().value); // drop the oldest
-  }
 
   function get(key, loader) {
     if (!enabled) return Promise.resolve().then(loader);
@@ -57,7 +48,9 @@ function createMemoryCache({ ttlMs, maxEntries = Infinity }) {
     const load = Promise.resolve()
       .then(loader)
       .then((value) => {
-        if (startedGeneration === generation) store(key, value);
+        if (startedGeneration === generation) {
+          entries.set(key, { value, expiresAt: Date.now() + ttlMs });
+        }
         return value;
       })
       .finally(() => {
