@@ -7,6 +7,23 @@ const User = require('../models/User');
 // document, addresses, saved restaurants, FCM tokens, or OTP/reset fields.
 const AUTH_PROJECTION = '_id role isActive tokenVersion restaurantId permissions name phone';
 
+// Request-scoped de-duplication (performance). If protect/optionalAuth has
+// already verified THIS token earlier in the SAME request — e.g. a router-level
+// router.use(protect) plus a route-level protect — the later pass reuses that
+// result instead of running another User.findById(). Nothing is stored beyond
+// the lifetime of `req`, so every new request still reads isActive and
+// tokenVersion from MongoDB and revocation/deactivation behave exactly as before.
+const AUTH_VERIFIED = Symbol('eatswada.authVerified');
+
+function alreadyVerifiedThisRequest(req, token) {
+  const verified = req[AUTH_VERIFIED];
+  return Boolean(verified && verified.token === token && req.user && verified.user === req.user);
+}
+
+function markVerifiedThisRequest(req, token) {
+  req[AUTH_VERIFIED] = { token, user: req.user };
+}
+
 const protect = async (req, res, next) => {
   let token;
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
@@ -16,6 +33,8 @@ const protect = async (req, res, next) => {
   if (!token) {
     return res.status(401).json({ success: false, message: 'Not authorised — no token provided.' });
   }
+
+  if (alreadyVerifiedThisRequest(req, token)) return next();
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -29,6 +48,7 @@ const protect = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Session expired or revoked. Please log in again.' });
     }
 
+    markVerifiedThisRequest(req, token);
     next();
   } catch (err) {
     if (process.env.NODE_ENV === 'development') {
@@ -52,12 +72,14 @@ const optionalAuth = async (req, res, next) => {
   const header = req.headers.authorization;
   const token = header && header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!token) return next();
+  if (alreadyVerifiedThisRequest(req, token)) return next();
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.id).select(AUTH_PROJECTION).lean();
     if (user && user.isActive && (Number(decoded.tv) || 0) === (Number(user.tokenVersion) || 0)) {
       req.user = user;
+      markVerifiedThisRequest(req, token);
     }
   } catch (_) {
     // Optional auth intentionally continues as a guest.
