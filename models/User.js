@@ -95,6 +95,17 @@ const userSchema = new mongoose.Schema(
         ref: 'Restaurant',
       },
     ],
+    // Optional nominee for exercising the Data Principal's rights in case of death/incapacity.
+    dataNominee: {
+      name: { type: String, trim: true, maxlength: 80, default: '' },
+      email: { type: String, trim: true, lowercase: true, maxlength: 254, default: '' },
+      phone: { type: String, trim: true, maxlength: 20, default: '' },
+      relationship: { type: String, trim: true, maxlength: 60, default: '' },
+      updatedAt: { type: Date, default: null },
+    },
+    // Stores only an adult-eligibility attestation timestamp, never a date of birth.
+    // Used when a new customer completes the public 18+ onboarding flow.
+    adultConfirmedAt: { type: Date, default: null },
     // Veg preference (mirrors frontend veg-filter toggle)
     vegOnly: {
       type: Boolean,
@@ -343,6 +354,8 @@ userSchema.methods.toJSON = function () {
   delete obj.passwordResetOtpLockedUntil;
   delete obj.passwordResetOtpLastSentAt;
   delete obj.googleUid;
+  delete obj.fcmTokens;
+  delete obj.tokenVersion;
   return obj;
 };
 
