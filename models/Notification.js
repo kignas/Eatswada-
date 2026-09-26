@@ -23,5 +23,16 @@ const schema = new mongoose.Schema({
 schema.index({ user: 1, createdAt: -1 });
 schema.index({ dedupeKey: 1 }, { unique: true, sparse: true });
 schema.index({ 'ring.active': 1, 'ring.leaseUntil': 1, 'ring.lastSentAt': 1 });
+// PERFORMANCE: backs pushService.stopRing(), which runs on every vendor
+// accept/reject (vendorController) with the filter
+//   { 'data.orderId': <orderId string>, 'data.kind': 'new_order' }.
+// No existing index covered that filter, so each call scanned the entire
+// notifications collection (which grows by several rows per order). The
+// index is PARTIAL — only vendor 'new_order' ring rows are indexed (about one
+// entry per order) — and the query's 'data.kind' equality makes it eligible.
+schema.index(
+  { 'data.orderId': 1 },
+  { name: 'data.orderId_1_kind_new_order', partialFilterExpression: { 'data.kind': 'new_order' } }
+);
 
 module.exports = mongoose.models.Notification || mongoose.model('Notification', schema);
