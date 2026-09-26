@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 'use strict';
-// Regression test for the in-memory caches on GET /api/categories and
-// GET /api/home-banners (utils/memoryCache.js). Runs with no database and no
+// Regression test for the in-memory caches on GET /api/categories,
+// GET /api/home-banners and GET /api/restaurants/:id/menu
+// (utils/memoryCache.js). Runs with no database and no
 // npm packages (in-memory fakes, same pattern as tests/payment-fixes.js).
 // Usage: node tests/perf-cache.js
 
@@ -57,6 +58,9 @@ function sortDocs(docs, spec) {
     for (const [k, dir] of keys) {
       const av = a[k] instanceof RealDate ? a[k].getTime() : a[k];
       const bv = b[k] instanceof RealDate ? b[k].getTime() : b[k];
+      const an = av === undefined || av === null; const bn = bv === undefined || bv === null;
+      if (an !== bn) return (an ? -1 : 1) * dir; // MongoDB: missing/null sorts lowest
+      if (an && bn) continue;
       if (av < bv) return -dir;
       if (av > bv) return dir;
     }
@@ -138,13 +142,50 @@ function makeBannerModel() {
   };
 }
 
+// ── Fake Menu model (lean docs + the write counter models/Menu.js exposes) ──
+function makeMenuModel() {
+  const store = [];
+  const stats = { reads: 0 };
+  let writeVersion = 0;
+  const OBJECT_ID = /^[0-9a-fA-F]{24}$/;
+  const query = (filter) => {
+    let sortSpec = null; let delayMs = 0;
+    const q = {
+      sort(s) { sortSpec = s; return q; },
+      lean() { return q; },
+      then(resolve, reject) {
+        stats.reads += 1;
+        if (!OBJECT_ID.test(String(filter.restaurantId))) {
+          const err = new Error(`Cast to ObjectId failed for value "${filter.restaurantId}"`); err.name = 'CastError';
+          return Promise.reject(err).then(resolve, reject);
+        }
+        // Snapshot at query time (like MongoDB), then optionally delay the reply.
+        const rows = sortDocs(store.filter((d) => d.restaurantId === String(filter.restaurantId)), sortSpec).map((d) => JSON.parse(JSON.stringify(d)));
+        return new Promise((r) => setTimeout(() => r(rows), stats.delayMs || delayMs)).then(resolve, reject);
+      },
+    };
+    return q;
+  };
+  return {
+    stats, store, schema: null,
+    find(filter) { return query(filter || {}); },
+    menuWriteVersion() { return writeVersion; },
+    markMenuWrite() { writeVersion += 1; },
+    // Simulates any Mongoose write: change the data, then the post-hook bump.
+    write(mutator) { mutator(store); writeVersion += 1; },
+  };
+}
+
 // ── Module stubbing ───────────────────────────────────────────────────────
 const CATEGORY_MODEL = path.join(ROOT, 'models/Category.js');
 const BANNER_MODEL = path.join(ROOT, 'models/HomeBanner.js');
 const AUDIT = path.join(ROOT, 'services/auditService.js');
 const stubs = {
   'express-async-handler': (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next),
-  mongoose: { isValidObjectId: (v) => typeof v === 'string' && v.length > 0 },
+  mongoose: {
+    isValidObjectId: (v) => typeof v === 'string' && v.length > 0,
+    Types: { ObjectId: Object.assign(function ObjectId(v) { return v; }, { isValid: (v) => /^[0-9a-fA-F]{24}$/.test(String(v)) }) },
+  },
   [AUDIT]: { logAdminAction: async () => {} },
 };
 const origResolve = Module._resolveFilename;
@@ -379,6 +420,104 @@ function call(handler, req = {}) {
     const before = Banner.stats.reads;
     await call(banCached.getAllBanners); await call(banCached.getAllBanners);
     assert.strictEqual(Banner.stats.reads - before, 2);
+  });
+
+  // ── 4. Public restaurant menu (GET /api/restaurants/:id/menu) ───────────
+  const Menu = makeMenuModel();
+  install(path.join(ROOT, 'models/Menu.js'), Menu);
+  for (const m of ['Restaurant', 'Review', 'Order', 'Cart', 'User', 'RestaurantDeletionAudit']) install(path.join(ROOT, `models/${m}.js`), {});
+  const R1 = '65f1a2b3c4d5e6f708192a01'; const R2 = '65f1a2b3c4d5e6f708192a02'; const EMPTY = '65f1a2b3c4d5e6f708192aff';
+  let n = 0;
+  const item = (restaurantId, extra) => ({ _id: `i${++n}`, restaurantId, name: `Dish ${n}`, price: 50 + n, category: 'Main Course', inStock: true, customizations: [], createdAt: '2026-09-26T06:00:00.000Z', updatedAt: '2026-09-26T06:00:00.000Z', __v: 0, ...extra });
+  Menu.store.push(
+    item(R1, { name: 'Biryani', category: 'Biryani' }), item(R1, { name: 'Aloo Roll', category: 'Rolls' }),
+    item(R1, { name: 'Legacy (no defaults)', category: undefined, inStock: undefined, customizations: [{ title: 'Size', options: [{ label: 'L' }] }] }),
+    item(R1, { name: 'Out of stock', category: 'Rolls', inStock: false }), item(R2, { name: 'Momo', category: 'Momos' }),
+  );
+  for (const d of Menu.store) for (const k of Object.keys(d)) if (d[k] === undefined) delete d[k];
+
+  const menuCached = loadController('controllers/restaurantController.js', { MENU_CACHE_TTL_MS: undefined });
+  const menuUncached = loadController('controllers/restaurantController.js', { MENU_CACHE_TTL_MS: '0' });
+  const getMenu = (ctl, id) => call(ctl.getMenu, { params: { id } });
+
+  await check('menu: cached response identical to uncached (original) response', async () => {
+    for (const id of [R1, R2, EMPTY]) assert.deepStrictEqual(await getMenu(menuCached, id), await getMenu(menuUncached, id));
+    const r = await getMenu(menuCached, R1);
+    assert.strictEqual(r.body.count, 4);
+    assert.deepStrictEqual(Object.keys(r.body.data), ['Main Course', 'Biryani', 'Rolls']); // missing category sorts first, gets the 'Main Course' default
+    assert.ok(r.body.data.Rolls.some((i) => i.inStock === false));                      // out-of-stock still returned
+  });
+
+  await check('menu: 30 concurrent + repeat GETs hit MongoDB once per restaurant', async () => {
+    const fresh = loadController('controllers/restaurantController.js', { MENU_CACHE_TTL_MS: undefined });
+    const before = Menu.stats.reads;
+    await Promise.all([...Array.from({ length: 20 }, () => getMenu(fresh, R1)), ...Array.from({ length: 10 }, () => getMenu(fresh, R2))]);
+    for (let i = 0; i < 5; i++) { await getMenu(fresh, R1); await getMenu(fresh, R2); }
+    assert.strictEqual(Menu.stats.reads - before, 2);
+  });
+
+  await check('menu: any menu write (e.g. vendor in-stock toggle) is visible on the next request', async () => {
+    await getMenu(menuCached, R1); // warm
+    Menu.write((s) => { s.find((d) => d.name === 'Biryani').inStock = false; });
+    const before = Menu.stats.reads;
+    const r = await getMenu(menuCached, R1);
+    assert.strictEqual(Menu.stats.reads - before, 1);
+    assert.strictEqual(r.body.data.Biryani[0].inStock, false);
+    assert.deepStrictEqual(r, await getMenu(menuUncached, R1));
+  });
+
+  await check('menu: a write during an in-flight load is never served from cache afterwards', async () => {
+    const fresh = loadController('controllers/restaurantController.js', { MENU_CACHE_TTL_MS: undefined });
+    Menu.stats.delayMs = 20;
+    const slow = getMenu(fresh, R2);                       // reads the OLD data, then waits
+    await new Promise((r) => setTimeout(r, 5));
+    Menu.write((s) => { s.find((d) => d.name === 'Momo').price = 999; });
+    await slow;
+    Menu.stats.delayMs = 0;
+    const r = await getMenu(fresh, R2);
+    assert.strictEqual(r.body.data.Momos[0].price, 999);
+  });
+
+  await check('menu: restaurant-delete transaction marker invalidates too', async () => {
+    await getMenu(menuCached, R2); // warm
+    Menu.store.splice(0, Menu.store.length, ...Menu.store.filter((d) => d.restaurantId !== R2));
+    Menu.markMenuWrite(); // what deleteRestaurant calls after the commit
+    const r = await getMenu(menuCached, R2);
+    assert.strictEqual(r.body.count, 0);
+  });
+
+  await check('menu: invalid id still reaches the error handler and is not cached', async () => {
+    const before = Menu.stats.reads;
+    const a = await getMenu(menuCached, 'not-an-id'); const b = await getMenu(menuCached, 'not-an-id');
+    assert.ok(a.error && a.error.name === 'CastError' && b.error && b.error.name === 'CastError');
+    assert.strictEqual(Menu.stats.reads - before, 2);
+  });
+
+  await check('menu: memory is bounded to 300 restaurants (oldest dropped first)', async () => {
+    const fresh = loadController('controllers/restaurantController.js', { MENU_CACHE_TTL_MS: undefined });
+    const ids = Array.from({ length: 301 }, (_, i) => `65f1a2b3c4d5e6f7081${String(i).padStart(5, '0')}`);
+    for (const id of ids) await getMenu(fresh, id);
+    let before = Menu.stats.reads;
+    await getMenu(fresh, ids[300]);                      // newest: still cached
+    assert.strictEqual(Menu.stats.reads - before, 0);
+    before = Menu.stats.reads;
+    await getMenu(fresh, ids[0]);                        // oldest: was evicted
+    assert.strictEqual(Menu.stats.reads - before, 1);
+  });
+
+  await check('menu: expires after MENU_CACHE_TTL_MS (writes made outside this server)', async () => {
+    const fresh = loadController('controllers/restaurantController.js', { MENU_CACHE_TTL_MS: '30' });
+    await getMenu(fresh, R1);
+    Menu.store.find((d) => d.name === 'Aloo Roll').price = 1; // no hook: simulates a direct DB edit
+    await new Promise((r) => setTimeout(r, 50));
+    const r = await getMenu(fresh, R1);
+    assert.strictEqual(r.body.data.Rolls.find((i) => i.name === 'Aloo Roll').price, 1);
+  });
+
+  await check('menu: MENU_CACHE_TTL_MS=0 reads MongoDB every time', async () => {
+    const before = Menu.stats.reads;
+    await getMenu(menuUncached, R1); await getMenu(menuUncached, R1);
+    assert.strictEqual(Menu.stats.reads - before, 2);
   });
 
   global.Date = RealDate;
