@@ -14,6 +14,7 @@ const morgan         = require('morgan');
 const connectDB      = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 const { requestLogger } = require('./middleware/requestLogger');
+const perfDiagnostics = require('./utils/perfDiagnostics');
 
 // ── Route & Model imports ─────────────────────────────────────
 const userRoutes       = require('./routes/userRoutes');
@@ -47,6 +48,11 @@ const { handleWebhook } = require('./controllers/paymentController');
 const app = express();
 
 app.set("trust proxy", 1);
+
+// Opt-in performance diagnostics for controlled staging/load-test runs.
+// Disabled by default; when enabled it records request latency, event-loop
+// delay, CPU/cgroup throttling, MongoDB command timings and pool behavior.
+if (perfDiagnostics.enabled) app.use(perfDiagnostics.middleware);
 
 // ── Middleware ────────────────────────────────────────────────
 app.use(compression());
@@ -229,6 +235,8 @@ connectDB().then(() => {
   // lost on restart/sleep, so on boot (and periodically) sweep for orders left
   // in 'assigned' past the accept window and reassign them.
   startAssignmentRecovery();
+
+  if (perfDiagnostics.enabled) perfDiagnostics.start(mongoose.connection);
 
   server = app.listen(PORT, '0.0.0.0', () => {
     console.log('╔══════════════════════════════════════════════╗');
