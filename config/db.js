@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 
+const perfDiagnosticsEnabled = String(process.env.PERF_DIAGNOSTICS || '').trim().toLowerCase() === 'true';
+
 const connectDB = async () => {
   try {
     const conn = await mongoose.connect(process.env.MONGO_URI, {
@@ -11,6 +13,7 @@ const connectDB = async () => {
       serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) || 10000,
       socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS) || 45000,
       connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS) || 10000,
+      ...(perfDiagnosticsEnabled ? { monitorCommands: true } : {}),
     });
 
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
