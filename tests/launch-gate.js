@@ -13,6 +13,32 @@ function check(name,fn){
   catch(e){tests.push(['FAIL',name,e.message]);}
 }
 
+check('Liveness endpoint does not depend on MongoDB',()=>{
+  const s=read('server.js');
+  assert.match(s,/app\.get\(['"]\/live['"],\s*\(req,\s*res\)\s*=>\s*\{\s*res\.status\(200\)/);
+});
+check('Readiness endpoint reports MongoDB connectivity',()=>{
+  const s=read('server.js');
+  assert.match(s,/app\.get\(['"]\/ready['"],\s*\(req,\s*res\)\s*=>/);
+  assert(s.includes('mongoose.connection.readyState === 1'));
+  assert(s.includes('res.status(ready ? 200 : 503)'));
+});
+check('Legacy health endpoint remains available',()=>{
+  assert(read('server.js').includes("app.get('/health'"));
+});
+check('Order lifecycle E2E is blocked until UPI test-mode flow exists',()=>{
+  const s=read('tests/order-lifecycle-e2e.js');
+  assert(s.includes('intentionally disabled'));
+  assert(s.includes('UPI-only checkout'));
+  assert(s.includes('No network request or database mutation was performed'));
+  assert(s.includes('process.exit(2)'));
+});
+check('Deployment gate checks liveness and readiness before traffic',()=>{
+  const s=read('tests/deployment-gate.js');
+  assert(s.includes('`${apiOrigin}/live`'));
+  assert(s.includes('`${apiOrigin}/ready`'));
+  assert(s.includes('body.ready === true'));
+});
 check('New orders default to UPI-only',()=>{
   const s=read('models/Order.js');
   assert(s.includes("enum: ['upi', 'card', 'wallet', 'cod']"));

@@ -37,9 +37,25 @@ async function get(path, headers = {}) {
 
   // Backend health is mounted outside /api in server.js.
   const apiOrigin = new URL(base).origin;
-  await check('Production backend health', async () => {
-    const r = await fetch(`${apiOrigin}/health`, { redirect: 'manual' });
+  await check('Backend liveness endpoint', async () => {
+    const r = await fetch(`${apiOrigin}/live`, { redirect: 'manual' });
+    const body = await r.json().catch(() => null);
     assert.strictEqual(r.status, 200, `expected 200, got ${r.status}`);
+    assert(body && body.live === true, 'expected live=true');
+  });
+
+  await check('Backend readiness endpoint and MongoDB connectivity', async () => {
+    const r = await fetch(`${apiOrigin}/ready`, { redirect: 'manual' });
+    const body = await r.json().catch(() => null);
+    assert.strictEqual(r.status, 200, `expected ready HTTP 200, got ${r.status}`);
+    assert(body && body.ready === true, 'expected ready=true');
+  });
+
+  await check('Backward-compatible health endpoint', async () => {
+    const r = await fetch(`${apiOrigin}/health`, { redirect: 'manual' });
+    const body = await r.json().catch(() => null);
+    assert.strictEqual(r.status, 200, `expected 200, got ${r.status}`);
+    assert(body && body.ready === true, 'expected health ready=true');
   });
 
   await check('Public restaurants endpoint responds', async () => {
