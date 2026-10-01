@@ -25,7 +25,13 @@ function isGatewayError(err) {
 // Unexpected/internal errors are intentionally generic in production, but they
 // are ALWAYS logged in full so production issues remain diagnosable.
 const errorHandler = (err, req, res, next) => {
+  // If headers were already sent, let Express handle the remaining stream error.
+  if (res.headersSent) return next(err);
+
+  // Only emit valid HTTP error statuses; malformed custom errors must not crash
+  // the handler or accidentally produce a success response.
   let statusCode = Number(err.statusCode || err.status) || 500;
+  if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode > 599) statusCode = 500;
   let message = 'Internal Server Error';
   let logDetail = err && (err.stack || err.message) ? (err.stack || err.message) : String(err);
 
@@ -104,7 +110,8 @@ const errorHandler = (err, req, res, next) => {
   // Razorpay key) traceable in the Render logs.
   const shouldLog = statusCode >= 500 || isGatewayError(err) || !isProduction();
   if (shouldLog) {
-    const where = `${req && req.method ? req.method : ''} ${req && req.originalUrl ? req.originalUrl : ''}`.trim();
+    // req.path excludes query parameters, which may contain sensitive values.
+    const where = `${req && req.method ? req.method : ''} ${req && req.path ? req.path : ''}`.trim();
     console.error(`[ERROR] ${statusCode}${where ? ' ' + where : ''} — ${logDetail}`);
   }
 

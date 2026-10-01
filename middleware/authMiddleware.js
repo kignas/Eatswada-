@@ -40,7 +40,11 @@ const protect = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = await User.findById(decoded.id).select(AUTH_PROJECTION).lean();
 
-    if (!req.user || !req.user.isActive) {
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Account not found or deactivated.' });
+    }
+
+    if (!req.user.isActive) {
       return res.status(401).json({ success: false, message: 'Account not found or deactivated.' });
     }
 
