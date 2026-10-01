@@ -1,5 +1,5 @@
 const express  = require('express');
-const { body } = require('express-validator');
+const { body, param } = require('express-validator');
 const rateLimit = require('express-rate-limit'); // Ensure you ran: npm install express-rate-limit
 const router   = express.Router();
 
@@ -105,7 +105,18 @@ router.post('/logout', protect, logout);
 
 // ── Profile ───────────────────────────────────────────────────
 router.get('/profile',  protect, getProfile);
-router.put('/profile',  protect, updateProfile);
+router.put('/profile',  protect,
+  [
+    body('name').optional().isString().trim().isLength({ min: 1, max: 80 }).withMessage('Name must be 1-80 characters'),
+    body('email').optional({ values: 'falsy' }).isEmail().withMessage('Enter a valid email address'),
+    body('phone').optional().isString().isLength({ min: 10, max: 20 }).withMessage('Enter a valid mobile number'),
+    body('password').optional().isString().isLength({ min: 8, max: 128 }).withMessage('Password must be 8-128 characters'),
+    body('vegOnly').optional().isBoolean().withMessage('vegOnly must be boolean'),
+    body('avatar').optional({ values: 'null' }).isString().isLength({ max: 2048 }).withMessage('Avatar value is too long'),
+    body('adultConfirmed').optional().isBoolean().withMessage('adultConfirmed must be boolean'),
+  ],
+  validate, updateProfile
+);
 
 // ── Addresses ────────────────────────────────────────────────
 router.get   ('/addresses',              protect, getAddresses);
@@ -116,8 +127,35 @@ router.post  ('/addresses',              protect,
   ],
   validate, addAddress
 );
-router.put   ('/addresses/:id',          protect, updateAddress);
-router.delete('/addresses/:id',          protect, deleteAddress);
-router.patch ('/addresses/:id/default',  protect, setDefaultAddress);
+const addressIdValidation = [param('id').isMongoId().withMessage('Invalid address ID')];
+const addressFieldValidation = [
+  body('tag').optional().isString().trim().isLength({ min: 1, max: 30 }),
+  body('house').optional().isString().trim().isLength({ min: 1, max: 120 }),
+  body('area').optional().isString().trim().isLength({ min: 1, max: 160 }),
+  body('landmark').optional().isString().trim().isLength({ max: 160 }),
+  body('city').optional().isString().trim().isLength({ min: 1, max: 80 }),
+  body('pincode').optional().isString().matches(/^\d{6}$/).withMessage('Pincode must be 6 digits'),
+  body('isDefault').optional().isBoolean().withMessage('isDefault must be boolean'),
+  body().custom((value) => {
+    const hasCoords = value.coordinates !== undefined || value.latitude !== undefined || value.longitude !== undefined;
+    if (!hasCoords) return true;
+    let longitude, latitude;
+    if (Array.isArray(value.coordinates) && value.coordinates.length === 2) {
+      [longitude, latitude] = value.coordinates.map(Number);
+    } else if (value.coordinates !== undefined) {
+      throw new Error('Coordinates must contain longitude and latitude');
+    } else {
+      longitude = Number(value.longitude);
+      latitude = Number(value.latitude);
+    }
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude) || longitude < -180 || longitude > 180 || latitude < -90 || latitude > 90) {
+      throw new Error('Coordinates are invalid');
+    }
+    return true;
+  }),
+];
+router.put   ('/addresses/:id',          protect, addressIdValidation, addressFieldValidation, validate, updateAddress);
+router.delete('/addresses/:id',          protect, addressIdValidation, validate, deleteAddress);
+router.patch ('/addresses/:id/default',  protect, addressIdValidation, validate, setDefaultAddress);
 
 module.exports = router;
