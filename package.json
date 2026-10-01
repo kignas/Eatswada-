@@ -22,7 +22,8 @@
     "loadtest:setup": "node loadtest/prepare-staging.js setup",
     "loadtest": "node loadtest/lunch-rush.js",
     "loadtest:cleanup": "node loadtest/prepare-staging.js cleanup",
-    "test:payment-fixes": "node tests/payment-fixes.js"
+    "test:payment-fixes": "node tests/payment-fixes.js",
+    "test:error-handling": "node tests/error-middleware-security.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

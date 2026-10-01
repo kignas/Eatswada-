@@ -168,6 +168,27 @@ app.use('/api/users/forgot-password/email', (req, res, next) => {
 });
 
 // ── Health & Welcome Routes ───────────────────────────────────
+// Liveness answers only whether this Node process is running. It deliberately
+// does not depend on MongoDB, so an orchestrator can distinguish a live process
+// from a temporarily unavailable dependency.
+app.get('/live', (req, res) => {
+  res.status(200).json({ success: true, live: true, service: 'Eatswada API' });
+});
+
+// Readiness is dependency-aware: do not send production traffic until MongoDB
+// is connected. Keep the response free of connection strings/internal details.
+app.get('/ready', (req, res) => {
+  const ready = mongoose.connection.readyState === 1;
+  res.status(ready ? 200 : 503).json({
+    success: ready,
+    ready,
+    service: 'Eatswada API',
+    version: '1.0.0',
+    uptime: process.uptime().toFixed(2) + 's'
+  });
+});
+
+// Backward-compatible health endpoint used by existing deployment checks.
 app.get('/health', (req, res) => {
   const ready = mongoose.connection.readyState === 1;
   res.status(ready ? 200 : 503).json({
