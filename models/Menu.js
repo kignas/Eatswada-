@@ -61,6 +61,23 @@ const menuItemSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+
+    // Vendor-created menu items enter a pending review state. Inventory-only
+    // changes (stock quantity / availability) do not require re-approval.
+    approvalStatus: {
+      type: String,
+      enum: ['pending', 'approved', 'rejected'],
+      default: 'approved',
+      index: true,
+    },
+    rejectionReason: { type: String, trim: true, maxlength: 500, default: '' },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    reviewedAt: { type: Date, default: null },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    isActive: { type: Boolean, default: true, index: true },
+    trackStock: { type: Boolean, default: false },
+    stockQuantity: { type: Number, min: 0, default: 0 },
+    lowStockThreshold: { type: Number, min: 0, default: 5 },
     customizations: [
       {
         title: String,
@@ -93,7 +110,7 @@ menuItemSchema.index({ name: 'text', description: 'text' });
 // declarations must be registered on the schema before the model is compiled
 // to be reliably part of the model's index set, so they now live here. Same
 // indexes, same keys, no new ones.
-menuItemSchema.index({ restaurantId: 1, inStock: 1 }); // Corrected schema and field names!
+menuItemSchema.index({ restaurantId: 1, inStock: 1, approvalStatus: 1, isActive: 1 }); // Corrected schema and field names!
 // Phase 2 (Performance at Scale): backs getUnder99Items (the ₹99 store / deals
 // browse), which filters price + inStock ACROSS all restaurants and sorts by
 // price. inStock leads (equality) so Mongo seeks straight to in-stock items,

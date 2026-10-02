@@ -80,6 +80,9 @@ const orderSchema = new mongoose.Schema(
     },
     restaurantName: { type: String, required: true },
     restaurantImage: { type: String, default: '' },
+    // Immutable business/delivery snapshot captured when the order is created.
+    deliveryModeSnapshot: { type: String, enum: ['self_delivery', 'eatswada_rider'], default: 'eatswada_rider' },
+    businessTypeSnapshot: { type: String, enum: ['restaurant', 'cloud_kitchen'], default: 'restaurant' },
 
     // Multi-restaurant checkout grouping.
     // ONE customer checkout can produce several Order documents — exactly one

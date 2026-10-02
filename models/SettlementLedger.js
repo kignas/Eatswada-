@@ -13,11 +13,12 @@ const settlementLedgerSchema = new mongoose.Schema({
   adjustmentAmount: { type: Number, default: 0 },
   netSettlementAmount: { type: Number, required: true },
   currency: { type: String, default: 'INR' },
-  status: { type: String, enum: ['eligible', 'settled', 'void'], default: 'eligible', index: true },
+  status: { type: String, enum: ['eligible', 'reserved', 'settled', 'void'], default: 'eligible', index: true },
   settlementBatch: { type: mongoose.Schema.Types.ObjectId, ref: 'SettlementBatch', default: null, index: true },
   eligibleAt: { type: Date, default: Date.now },
   settledAt: { type: Date, default: null },
   source: { type: String, enum: ['order_delivery', 'refund_adjustment'], default: 'order_delivery' },
+  payoutRequest: { type: mongoose.Schema.Types.ObjectId, ref: 'PayoutRequest', default: null, index: true },
 }, { timestamps: true });
 settlementLedgerSchema.index({ order: 1, source: 1 }, { unique: true });
 module.exports = mongoose.models.SettlementLedger || mongoose.model('SettlementLedger', settlementLedgerSchema);

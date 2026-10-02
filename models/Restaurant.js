@@ -51,6 +51,15 @@ const restaurantSchema = new mongoose.Schema(
       default: '',
       maxlength: [100, 'FSSAI licence/reference cannot exceed 100 characters'],
     },
+    fssaiCertificateUrl: { type: String, trim: true, default: '', maxlength: 2000 },
+    fssaiExpiryDate: { type: Date, default: null },
+    fssaiVerificationStatus: {
+      type: String,
+      enum: ['pending', 'verified', 'expired', 'rejected'],
+      default: 'pending',
+      index: true,
+    },
+    fssaiVerifiedAt: { type: Date, default: null },
 
     slug: {
       type: String,
@@ -84,6 +93,46 @@ const restaurantSchema = new mongoose.Schema(
       default: '',
     },
     approvedAt: { type: Date, default: null },
+
+    // Vendor business model selected during onboarding.
+    businessType: {
+      type: String,
+      enum: ['restaurant', 'cloud_kitchen'],
+      default: 'restaurant',
+      index: true,
+    },
+
+    // Delivery ownership controls the operational workflow and default
+    // commercial plan for NEW orders. Existing legacy restaurants keep their
+    // current commissionRate until an admin explicitly migrates them.
+    deliveryMode: {
+      type: String,
+      enum: ['self_delivery', 'eatswada_rider'],
+      default: 'eatswada_rider',
+      index: true,
+    },
+    commissionPlan: {
+      type: String,
+      enum: ['self_delivery', 'eatswada_rider', 'custom', 'legacy'],
+      default: 'legacy',
+      index: true,
+    },
+
+    // Maximum number of active orders the restaurant can have waiting at one
+    // time. This is an acceptance guard, not a customer-facing minimum-order
+    // value.
+    maxActiveOrders: {
+      type: Number,
+      default: 20,
+      min: 1,
+      max: 500,
+    },
+
+    settlementSchedule: {
+      type: String,
+      enum: ['weekly', 'monthly'],
+      default: 'weekly',
+    },
 
     // Platform commission charged on the restaurant's commissionable food
     // subtotal. This is a CURRENT configuration value; every new order takes
