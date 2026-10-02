@@ -3,6 +3,17 @@
 // Commission policy for P0.2. Keep this logic isolated so P0.3 (earnings) and
 // P0.4 (settlements) can consume the exact same financial definitions.
 const DEFAULT_COMMISSION_RATE = 15;
+const DELIVERY_COMMISSION_RATES = Object.freeze({ self_delivery: 15, eatswada_rider: 25 });
+
+function commissionRateForDeliveryMode(deliveryMode) {
+  return DELIVERY_COMMISSION_RATES[deliveryMode] ?? DEFAULT_COMMISSION_RATE;
+}
+
+function commissionPlanForDeliveryMode(deliveryMode) {
+  return Object.prototype.hasOwnProperty.call(DELIVERY_COMMISSION_RATES, deliveryMode)
+    ? deliveryMode
+    : 'legacy';
+}
 
 function roundCurrency(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
@@ -49,4 +60,7 @@ module.exports = {
   normalizeCommissionRate,
   calculateRestaurantCommission,
   roundCurrency,
+  DELIVERY_COMMISSION_RATES,
+  commissionRateForDeliveryMode,
+  commissionPlanForDeliveryMode,
 };
