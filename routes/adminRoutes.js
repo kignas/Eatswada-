@@ -1,6 +1,7 @@
 const { requirePermission } = require('../middleware/permissionMiddleware');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const adminMarketplace = require('../controllers/adminMarketplaceController');
 const router  = express.Router();
 const { protect, authorize } = require('../middleware/authMiddleware');
 const {
@@ -9,7 +10,8 @@ const {
   getCustomers, getRevenueAnalytics, getTopRestaurants,
   getVendors, getVendorById, updateVendor, toggleVendorStatus,
   getReviews, moderateReview, getPlatformRatings,
-  getRestaurantCommission, updateRestaurantCommission,
+  getRestaurantCommission, updateRestaurantCommission, updateRestaurantFssai,
+  getRestaurantDeliverySettings, updateRestaurantDeliverySettings,
   getAdminPermissions, updateAdminPermissions,
 } = require('../controllers/adminController');
 const {
@@ -37,8 +39,19 @@ router.get('/orders', protect, authorize('admin'), getOrders);
 router.patch('/orders/:id/status', protect, authorize('admin'), updateOrderStatus);
 router.patch('/orders/:id/cancel', protect, authorize('admin'), cancelOrder);
 router.get('/restaurants', protect, authorize('admin'), getRestaurants);
+router.get('/restaurants/:id/fssai', protect, authorize('admin'), async (req,res,next) => {
+  // Reuse the restaurant settings reader so admin UI can inspect FSSAI data.
+  try { return getRestaurantDeliverySettings(req,res,next); } catch (e) { return next(e); }
+});
+router.patch('/restaurants/:id/fssai', protect, authorize('admin'), updateRestaurantFssai);
 router.get('/restaurants/:id/commission', protect, authorize('admin'), getRestaurantCommission);
 router.patch('/restaurants/:id/commission', protect, authorize('admin'), updateRestaurantCommission);
+router.get('/restaurants/:id/delivery-settings', protect, authorize('admin'), getRestaurantDeliverySettings);
+router.patch('/restaurants/:id/delivery-settings', protect, authorize('admin'), updateRestaurantDeliverySettings);
+router.get('/payout-requests', protect, authorize('admin'), adminMarketplace.listPayoutRequests);
+router.patch('/payout-requests/:id', protect, authorize('admin'), adminMarketplace.updatePayoutRequest);
+router.get('/support/tickets', protect, authorize('admin'), adminMarketplace.listSupportTickets);
+router.post('/support/tickets/:id/reply', protect, authorize('admin'), adminMarketplace.replySupportTicket);
 router.patch('/restaurants/:id/toggle', protect, authorize('admin'), toggleRestaurant);
 router.get('/customers', protect, authorize('admin'), getCustomers);
 router.get('/analytics/revenue', protect, authorize('admin'), getRevenueAnalytics);

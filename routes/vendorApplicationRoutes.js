@@ -11,6 +11,7 @@ const {
   getVendorApplicationById,
   approveVendorApplication,
   rejectVendorApplication,
+  getVendorApplicationConfig,
 } = require('../controllers/vendorApplicationController');
 
 const applicationLimiter = rateLimit({
@@ -22,6 +23,7 @@ const applicationLimiter = rateLimit({
 });
 
 // Public seller onboarding.
+router.get('/config', getVendorApplicationConfig);
 router.post('/', applicationLimiter, submitVendorApplication);
 router.get('/:id/status', applicationLimiter, getVendorApplicationStatus);
 
