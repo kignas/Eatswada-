@@ -23,7 +23,8 @@
     "loadtest": "node loadtest/lunch-rush.js",
     "loadtest:cleanup": "node loadtest/prepare-staging.js cleanup",
     "test:payment-fixes": "node tests/payment-fixes.js",
-    "test:error-handling": "node tests/error-middleware-security.js"
+    "test:error-handling": "node tests/error-middleware-security.js",
+    "test:vendor-ecosystem": "node tests/vendor-ecosystem-contract.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
