@@ -9,6 +9,8 @@ const Restaurant = require('../models/Restaurant');
 const Ledger = require('../models/SettlementLedger');
 const PayoutRequest = require('../models/PayoutRequest');
 const SupportTicket = require('../models/SupportTicket');
+const VendorActivity = require('../models/VendorActivity');
+const InventoryMovement = require('../models/InventoryMovement');
 const { ACTIVE_ORDER_STATUSES, getRestaurantCapacity } = require('../services/vendorMarketplaceService');
 const { commissionRateForDeliveryMode, commissionPlanForDeliveryMode } = require('../services/commissionService');
 
@@ -150,6 +152,7 @@ exports.createVendorMenuItem = asyncHandler(async (req, res) => {
     approvalStatus: 'pending',
     createdBy: req.user._id,
   });
+  await VendorActivity.create({restaurantId:restaurant._id,actorId:req.user._id,type:'menu_submitted',message:`Submitted ${item.name} for admin approval.`,entityType:'menu',entityId:item._id});
   res.status(201).json({ success: true, message: 'Menu item submitted for admin approval.', data: item });
 });
 
@@ -167,13 +170,14 @@ exports.updateVendorMenuItem = asyncHandler(async (req, res) => {
 
   for (const key of keys) item[key] = body[key];
   if (body.price !== undefined) item.isUnder99 = Number(item.price) <= 99;
-  if (materialChange && item.approvalStatus === 'approved') {
+  if (materialChange && ['approved', 'rejected'].includes(item.approvalStatus)) {
     item.approvalStatus = 'pending';
     item.rejectionReason = '';
     item.reviewedBy = null;
     item.reviewedAt = null;
   }
   await item.save();
+  if (materialChange) await VendorActivity.create({restaurantId:item.restaurantId,actorId:req.user._id,type:'menu_updated',message:`Updated ${item.name}; changes require admin approval.`,entityType:'menu',entityId:item._id});
   res.json({ success:true, message: materialChange ? 'Menu change submitted for admin approval.' : 'Inventory updated.', data:item });
 });
 
@@ -209,8 +213,86 @@ exports.setVendorInventory = asyncHandler(async (req, res) => {
   }
   if (!Object.keys(update).length) return res.status(400).json({ success:false, message:'No inventory fields supplied.' });
 
+  const before = Number(item.stockQuantity || 0);
   const updated = await Menu.findByIdAndUpdate(item._id, { $set:update }, { new:true, runValidators:true });
+  if (update.stockQuantity !== undefined && Number(updated.stockQuantity) !== before) await InventoryMovement.create({restaurantId:item.restaurantId,menuItemId:item._id,actorId:req.user._id,change:Number(updated.stockQuantity)-before,before,after:Number(updated.stockQuantity),reason:'vendor_manual_adjustment'});
+  await VendorActivity.create({restaurantId:item.restaurantId,actorId:req.user._id,type:'inventory_updated',message:`Updated inventory for ${item.name}.`,entityType:'menu',entityId:item._id});
   res.json({success:true, data:updated});
+});
+
+
+// Compact, vendor-scoped dashboard. All monetary figures are INR and based on
+// orders visible to the restaurant; online unpaid orders are excluded.
+exports.getVendorDashboard = asyncHandler(async (req, res) => {
+  if (!assertVendor(req, res)) return;
+  const restaurant = await Restaurant.findOne(vendorRestaurantFilter(req)).select('name createdAt isOpen availability deliveryMode').lean();
+  if (!restaurant) return res.status(404).json({success:false,message:'Restaurant not found.'});
+  const start = new Date(); start.setHours(0,0,0,0);
+  const filter = { restaurant: restaurant._id, createdAt: { $gte: start }, $or: [{paymentMethod:'cod'},{paymentMethod:{$ne:'cod'},paymentStatus:'paid'}] };
+  const [orders, pendingSettlement, pendingMenu, lowStock, recent] = await Promise.all([
+    Order.find(filter).select('status total subtotal paymentStatus').lean(),
+    Ledger.aggregate([{ $match:{restaurant:restaurant._id,vendor:req.user._id,status:'eligible'} },{ $group:{_id:null,total:{$sum:'$netSettlementAmount'}} }]),
+    Menu.countDocuments({restaurantId:restaurant._id,isActive:{$ne:false},approvalStatus:{$in:['pending','rejected']}}),
+    Menu.find({restaurantId:restaurant._id,isActive:{$ne:false},trackStock:true}).select('name stockQuantity lowStockThreshold inStock').lean(),
+    VendorActivity.find({restaurantId:restaurant._id}).sort({createdAt:-1}).limit(8).lean(),
+  ]);
+  const statusCounts = {}; let sales=0, cancelled=0;
+  for (const o of orders) { statusCounts[o.status]=(statusCounts[o.status]||0)+1; if(o.status==='delivered') sales += Number(o.subtotal||0); if(o.status==='cancelled') cancelled++; }
+  const actionableStock = lowStock.filter(i => Number(i.stockQuantity)<=Number(i.lowStockThreshold));
+  res.json({success:true,data:{date:start.toISOString().slice(0,10),restaurant:{name:restaurant.name,createdAt:restaurant.createdAt,isOpen:restaurant.isOpen,availability:restaurant.availability,deliveryMode:restaurant.deliveryMode},today:{orders:orders.length,sales:money(sales),averageOrderValue:orders.length?money(orders.reduce((a,o)=>a+Number(o.total||0),0)/orders.length):0,statusCounts,cancelled},pendingSettlement:money(pendingSettlement[0]?.total||0),alerts:{menuReview:pendingMenu,lowStock:actionableStock.length,outOfStock:actionableStock.filter(i=>Number(i.stockQuantity)<=0).length},recentActivity:recent}});
+});
+
+exports.getVendorAlerts = asyncHandler(async (req,res)=>{
+  if(!assertVendor(req,res)) return;
+  const restaurantId=req.user.restaurantId;
+  const [menu, stock, orders]=await Promise.all([
+    Menu.find({restaurantId,isActive:{$ne:false},approvalStatus:{$in:['pending','rejected']}}).select('name approvalStatus rejectionReason updatedAt').sort({updatedAt:-1}).limit(50).lean(),
+    Menu.find({restaurantId,isActive:{$ne:false},trackStock:true}).select('name stockQuantity lowStockThreshold').lean(),
+    Order.find({restaurant:restaurantId,status:'placed',$or:[{paymentMethod:'cod'},{paymentMethod:{$ne:'cod'},paymentStatus:'paid'}]}).select('orderNumber createdAt').sort({createdAt:1}).limit(50).lean()
+  ]);
+  const alerts=[...menu.map(i=>({type:i.approvalStatus==='rejected'?'menu_rejected':'menu_pending',entityId:i._id,title:i.name,message:i.rejectionReason|| (i.approvalStatus==='pending'?'Waiting for admin approval.':'Item needs correction.'),createdAt:i.updatedAt})),...stock.filter(i=>Number(i.stockQuantity)<=Number(i.lowStockThreshold)).map(i=>({type:Number(i.stockQuantity)<=0?'out_of_stock':'low_stock',entityId:i._id,title:i.name,message:`${i.stockQuantity} unit(s) remaining`,createdAt:null})),...orders.map(o=>({type:'order_action',entityId:o._id,title:o.orderNumber||'New order',message:'Order requires your response.',createdAt:o.createdAt}))];
+  res.json({success:true,data:alerts});
+});
+
+exports.getVendorActivity = asyncHandler(async(req,res)=>{
+  if(!assertVendor(req,res)) return;
+  const limit=Math.min(100,Math.max(1,Number(req.query.limit)||30));
+  const data=await VendorActivity.find({restaurantId:req.user.restaurantId}).sort({createdAt:-1}).limit(limit).lean();
+  res.json({success:true,data});
+});
+
+exports.getVendorProfile = asyncHandler(async(req,res)=>{
+  if(!assertVendor(req,res)) return;
+  const r=await Restaurant.findOne(vendorRestaurantFilter(req)).select('name description image address phone email slug createdAt approvalStatus rejectionReason deliveryMode businessType fssaiLicenseNumber fssaiVerificationStatus fssaiExpiryDate availability openingHours isOpen').lean();
+  if(!r) return res.status(404).json({success:false,message:'Restaurant not found.'});
+  res.json({success:true,data:{...r,joinedAt:r.createdAt,policies:{privacyPolicyUrl:process.env.VENDOR_PRIVACY_POLICY_URL||process.env.PRIVACY_POLICY_URL||'',termsUrl:process.env.VENDOR_TERMS_URL||''}}});
+});
+
+exports.bulkSetVendorAvailability=asyncHandler(async(req,res)=>{
+  if(!assertVendor(req,res)) return;
+  const ids=req.body?.itemIds; const inStock=req.body?.inStock;
+  if(!Array.isArray(ids)||!ids.length||ids.length>200||typeof inStock!=='boolean'||ids.some(id=>!mongoose.Types.ObjectId.isValid(id))) return res.status(400).json({success:false,message:'Provide 1–200 valid itemIds and a boolean inStock.'});
+  const result=await Menu.updateMany({restaurantId:req.user.restaurantId,_id:{$in:ids},isActive:{$ne:false}},{$set:{inStock}});
+  res.json({success:true,data:{matchedCount:result.matchedCount??result.n,modifiedCount:result.modifiedCount??result.nModified}});
+});
+
+exports.reorderVendorMenu=asyncHandler(async(req,res)=>{
+  if(!assertVendor(req,res)) return;
+  const items=req.body?.items;
+  if(!Array.isArray(items)||!items.length||items.length>500||items.some((x,i)=>!mongoose.Types.ObjectId.isValid(x?.id)||!Number.isInteger(x?.sortOrder)||x.sortOrder<0)) return res.status(400).json({success:false,message:'items must contain valid item id and non-negative integer sortOrder.'});
+  const ids=items.map(x=>String(x.id)); if(new Set(ids).size!==ids.length) return res.status(400).json({success:false,message:'Duplicate menu item ids are not allowed.'});
+  const owned=await Menu.countDocuments({restaurantId:req.user.restaurantId,_id:{$in:ids},isActive:{$ne:false}});
+  if(owned!==ids.length) return res.status(404).json({success:false,message:'One or more items were not found in your restaurant.'});
+  await Promise.all(items.map(x=>Menu.updateOne({_id:x.id,restaurantId:req.user.restaurantId},{$set:{sortOrder:x.sortOrder}})));
+  res.json({success:true,message:'Menu order updated.'});
+});
+
+exports.getVendorStockHistory=asyncHandler(async(req,res)=>{
+  if(!assertVendor(req,res)) return;
+  const filter={restaurantId:req.user.restaurantId};
+  if(req.query.itemId){if(!mongoose.Types.ObjectId.isValid(req.query.itemId))return res.status(400).json({success:false,message:'Invalid itemId.'});filter.menuItemId=req.query.itemId;}
+  const data=await InventoryMovement.find(filter).sort({createdAt:-1}).limit(Math.min(100,Math.max(1,Number(req.query.limit)||50))).populate('menuItemId','name').lean();
+  res.json({success:true,data});
 });
 
 exports.verifySelfDeliveryOtp = asyncHandler(async (req, res) => {

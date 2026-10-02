@@ -75,4 +75,16 @@ const uploadImage = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: { url: result.secure_url } });
 });
 
-module.exports = { uploadImage };
+const uploadVendorMenuImage = asyncHandler(async (req, res) => {
+  if (req.user?.role !== 'vendor' || !req.user.restaurantId) {
+    return res.status(403).json({ success: false, message: 'Vendor restaurant access required.' });
+  }
+  if (!req.file) return res.status(400).json({ success: false, message: 'No image file provided.' });
+  const validation = validateImageBuffer(req.file.buffer, req.file.mimetype);
+  if (!validation.valid) return res.status(400).json({ success: false, message: validation.message });
+  const folder = `Eatswada/vendors/${String(req.user.restaurantId)}/menu`;
+  const result = await streamUpload(req.file.buffer, folder);
+  res.status(200).json({ success: true, data: { url: result.secure_url } });
+});
+
+module.exports = { uploadImage, uploadVendorMenuImage };

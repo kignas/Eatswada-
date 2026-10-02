@@ -1,9 +1,12 @@
+const mongoose = require('mongoose');
 const { notifyOrderStatus } = require('../services/notificationService');
 const asyncHandler   = require('express-async-handler');
 const Order           = require('../models/Order');
 const Menu            = require('../models/Menu');
 const Restaurant      = require('../models/Restaurant');
 const Review          = require('../models/Review');
+const InventoryMovement = require('../models/InventoryMovement');
+const { releaseOrderInventory } = require('../services/inventoryReservationService');
 
 // FIX: Import the auto-assignment service here
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService'); 
@@ -168,11 +171,45 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
     });
   }
 
+  // Reserve tracked stock exactly once when the vendor accepts the order.
+  // Atomic conditional updates prevent two simultaneous accepts overselling.
+  const stockNeeds = new Map();
+  for (const line of (order.items || [])) {
+    const id = String(line.menuItem || '');
+    if (id) stockNeeds.set(id, (stockNeeds.get(id) || 0) + Number(line.quantity || 0));
+  }
+  const reserved = [];
+  try {
+    for (const [itemId, quantity] of stockNeeds) {
+      const item = await Menu.findOne({ _id:itemId, restaurantId:req.user.restaurantId, trackStock:true, isActive:{$ne:false} }).select('_id stockQuantity name');
+      if (!item) continue;
+      const before = Number(item.stockQuantity || 0);
+      const updated = await Menu.findOneAndUpdate(
+        { _id:itemId, restaurantId:req.user.restaurantId, trackStock:true, stockQuantity:{$gte:quantity} },
+        { $inc:{stockQuantity:-quantity}, $set:{inStock: before-quantity > 0} },
+        { new:true }
+      );
+      if (!updated) throw Object.assign(new Error(`${item.name} no longer has enough stock.`), { statusCode:409 });
+      reserved.push({itemId,quantity,before,after:Number(updated.stockQuantity)});
+    }
+    for (const r of reserved) await InventoryMovement.create({restaurantId:req.user.restaurantId,menuItemId:r.itemId,actorId:req.user._id,orderId:order._id,change:-r.quantity,before:r.before,after:r.after,reason:'order_accepted'});
+  } catch (err) {
+    for (const r of reserved.reverse()) {
+      await Menu.updateOne({_id:r.itemId,restaurantId:req.user.restaurantId},{$inc:{stockQuantity:r.quantity},$set:{inStock:true}});
+    }
+    throw err;
+  }
+
   const prep = Number(req.body && req.body.prepMinutes);
   if (Number.isFinite(prep) && prep > 0 && prep <= 240) order.prepMinutes = Math.round(prep);
 
   order.advanceStatus('confirmed', 'Accepted by restaurant');
-  await order.save();
+  if (reserved.length) order.inventoryReservedAt = new Date();
+  try { await order.save(); } catch (err) {
+    for (const line of reserved) { await Menu.updateOne({_id:line.itemId,restaurantId:req.user.restaurantId},{$inc:{stockQuantity:line.quantity},$set:{inStock:true}}); }
+    await InventoryMovement.deleteMany({orderId:order._id,reason:'order_accepted'});
+    throw err;
+  }
   stopRing(order._id);
   await notifyOrderStatus(order.user, order);
 
@@ -461,3 +498,68 @@ exports.getVendorReviews = asyncHandler(async (req, res) => {
   res.json({ success:true, summary:{ name:restaurant.name, rating:restaurant.rating, ratingCount:restaurant.ratingCount, reviewCount:restaurant.reviewCount || total }, page, pages:Math.ceil(total/limit), total, data:reviews });
 });
 
+
+
+/* Vendor analytics: server-computed, restaurant-scoped metrics. */
+exports.getVendorAnalytics = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const period = ['7d', '30d', '90d', 'all'].includes(req.query.period) ? req.query.period : '30d';
+  const match = { restaurant: new mongoose.Types.ObjectId(String(req.user.restaurantId)) };
+  if (period !== 'all') {
+    const days = Number(period.slice(0, -1));
+    match.createdAt = { $gte: new Date(Date.now() - days * 86400000), $lte: new Date() };
+  }
+  const [summaryRows, statusRows, dailyRows, topItems] = await Promise.all([
+    Order.aggregate([
+      { $match: match },
+      { $group: { _id: null,
+        totalOrders: { $sum: 1 },
+        deliveredOrders: { $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] } },
+        cancelledOrders: { $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] } },
+        deliveredFoodSales: { $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, { $ifNull: ['$subtotal', 0] }, 0] } },
+      } },
+    ]),
+    Order.aggregate([{ $match: match }, { $group: { _id: '$status', count: { $sum: 1 } } }, { $sort: { _id: 1 } }]),
+    Order.aggregate([
+      { $match: match },
+      { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'Asia/Kolkata' } }, orders: { $sum: 1 }, deliveredSales: { $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, { $ifNull: ['$subtotal', 0] }, 0] } } } },
+      { $sort: { _id: 1 } },
+    ]),
+    Order.aggregate([
+      { $match: match }, { $unwind: '$items' },
+      { $group: { _id: '$items.name', quantity: { $sum: { $ifNull: ['$items.quantity', 0] } }, sales: { $sum: { $multiply: [{ $ifNull: ['$items.price', 0] }, { $ifNull: ['$items.quantity', 0] }] } } } },
+      { $sort: { quantity: -1, sales: -1 } }, { $limit: 5 },
+      { $project: { _id: 0, name: '$_id', quantity: 1, sales: 1 } },
+    ]),
+  ]);
+  const summary = summaryRows[0] || { totalOrders: 0, deliveredOrders: 0, cancelledOrders: 0, deliveredFoodSales: 0 };
+  const money = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+  res.json({ success: true, data: {
+    period,
+    summary: {
+      totalOrders: summary.totalOrders || 0,
+      deliveredOrders: summary.deliveredOrders || 0,
+      cancelledOrders: summary.cancelledOrders || 0,
+      deliveredFoodSales: money(summary.deliveredFoodSales),
+      averageDeliveredOrderValue: summary.deliveredOrders ? money(summary.deliveredFoodSales / summary.deliveredOrders) : 0,
+    },
+    statusCounts: statusRows.map(row => ({ status: row._id, count: row.count })),
+    daily: dailyRows.map(row => ({ date: row._id, orders: row.orders, deliveredSales: money(row.deliveredSales) })),
+    topItems: topItems.map(row => ({ ...row, sales: money(row.sales) })),
+    currency: 'INR',
+  }});
+});
+
+exports.replyToVendorReview = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid review id.' });
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ success: false, message: 'Reply message is required.' });
+  if (message.length > 500) return res.status(400).json({ success: false, message: 'Reply cannot exceed 500 characters.' });
+  const review = await Review.findOne({ _id: req.params.id, restaurant: req.user.restaurantId, isVisible: true });
+  if (!review) return res.status(404).json({ success: false, message: 'Review not found or not visible.' });
+  const now = new Date();
+  review.vendorReply = { message, repliedAt: review.vendorReply?.repliedAt || now, updatedAt: now };
+  await review.save();
+  res.json({ success: true, data: { reviewId: review._id, vendorReply: review.vendorReply } });
+});

@@ -1,7 +1,6 @@
 'use strict';
 
 const crypto = require('crypto');
-const bcrypt = require('bcryptjs');
 const asyncHandler = require('express-async-handler');
 const mongoose = require('mongoose');
 const User = require('../models/User');
@@ -46,9 +45,6 @@ function normalizeHours(value) {
   }
   return out;
 }
-function validMoney(v, max = 100000) {
-  return Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) <= max;
-}
 function normalizeRestaurantImages(body) {
   const raw = Array.isArray(body?.images)
     ? body.images
@@ -70,12 +66,10 @@ function publicApplication(application, includeToken = false, token = null) {
     ownerName: application.ownerName,
     businessType: application.businessType || 'restaurant',
     deliveryMode: application.deliveryMode || 'eatswada_rider',
-    requestedCommissionRate: Number(application.requestedCommissionRate) || commissionRateForDeliveryMode(application.deliveryMode || 'eatswada_rider'),
-    maxActiveOrders: application.maxActiveOrders || 20,
-    settlementSchedule: application.settlementSchedule || 'weekly',
     createdAt: application.createdAt,
     reviewedAt: application.reviewedAt,
     rejectionReason: application.status === 'rejected' ? application.rejectionReason : '',
+    changeRequest: application.status === 'needs_changes' ? application.changeRequest : '',
   };
   if (includeToken && token) out.statusToken = token;
   return out;
@@ -85,51 +79,14 @@ function adminApplication(application) {
   const a = application.toObject({ virtuals: false });
   delete a.statusTokenHash;
   delete a.statusTokenExpiresAt;
+  // Legacy application fields are retained in MongoDB for backward compatibility,
+  // but are not part of the current application review contract. Pricing and
+  // commission are configured by Admin after approval.
+  for (const key of ['requestedCommissionRate','minOrder','deliveryFee','freeDeliveryEnabled','freeDeliveryAbove','fssaiCertificateUrl','fssaiExpiryDate','maxActiveOrders','settlementSchedule']) delete a[key];
   if (a.applicant?.password) delete a.applicant.password;
   return a;
 }
 
-async function createRestaurantForApplication(application, vendorUser) {
-  const payload = {
-    name: application.restaurantName,
-    owner: vendorUser._id,
-    cuisine: application.cuisine,
-    description: application.description || '',
-    phone: application.phone || '',
-    address: application.address || '',
-    fssaiLicenseNumber: application.fssaiLicenseNumber || '',
-    fssaiCertificateUrl: application.fssaiCertificateUrl || '',
-    fssaiExpiryDate: application.fssaiExpiryDate || null,
-    businessType: application.businessType || 'restaurant',
-    deliveryMode: application.deliveryMode || 'eatswada_rider',
-    commissionPlan: application.deliveryMode ? commissionPlanForDeliveryMode(application.deliveryMode) : 'legacy',
-    commissionRate: Number.isFinite(Number(application.requestedCommissionRate)) ? Number(application.requestedCommissionRate) : commissionRateForDeliveryMode(application.deliveryMode || 'eatswada_rider'),
-    maxActiveOrders: application.maxActiveOrders || 20,
-    settlementSchedule: application.settlementSchedule || 'weekly',
-    openingHours: application.openingHours,
-    minOrder: application.minOrder ?? 0,
-    deliveryFee: application.deliveryFee ?? 40,
-    freeDeliveryEnabled: application.freeDeliveryEnabled !== false,
-    freeDeliveryAbove: application.freeDeliveryAbove ?? 200,
-    deliveryRadiusKm: 10,
-    codEnabled: false,
-    isActive: true,
-    availability: { isOpen: true, autoHours: false, closedReason: '' },
-    ...(application.location?.coordinates ? { location: application.location } : {}),
-  };
-
-  try {
-    return await Restaurant.create(payload);
-  } catch (err) {
-    if (err.code === 11000 && err.keyPattern?.slug) {
-      return Restaurant.create({
-        ...payload,
-        slug: `${slugify(application.restaurantName)}-${vendorUser._id.toString().slice(-5)}`,
-      });
-    }
-    throw err;
-  }
-}
 
 /**
  * Public vendor application.
@@ -144,12 +101,10 @@ exports.getVendorApplicationConfig = asyncHandler(async (req, res) => {
       { key:'cloud_kitchen', label:'Cloud kitchen' },
     ],
     deliveryModes:[
-      { key:'self_delivery', label:'Restaurant delivery', commissionRate:commissionRateForDeliveryMode('self_delivery') },
-      { key:'eatswada_rider', label:'Eatswada rider delivery', commissionRate:commissionRateForDeliveryMode('eatswada_rider') },
+      { key:'self_delivery', label:'Self delivery' },
+      { key:'eatswada_rider', label:'Eatswada delivery' },
     ],
-    settlementSchedules:['weekly','monthly'],
-    maxActiveOrders:{min:1,max:500,default:20},
-    fssai:{ required:true, certificateRecommended:true },
+    fssai:{ required:true, certificateUploadRequired:false },
     policies:{
       vendorAgreementVersion:String(process.env.VENDOR_AGREEMENT_VERSION || '2026-10-01'),
       vendorPrivacyPolicyVersion:String(process.env.VENDOR_PRIVACY_POLICY_VERSION || '2026-10-01'),
@@ -161,7 +116,8 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
   const {
     ownerName, email, phone, password, restaurantName, cuisine,
     description, address, location, fssaiLicenseNumber, openingHours,
-    minOrder, deliveryFee, freeDeliveryEnabled, freeDeliveryAbove,
+    businessType, deliveryMode, vendorAgreementVersion, vendorAgreementAcceptedAt,
+    privacyPolicyVersion, privacyPolicyAcceptedAt,
   } = req.body || {};
 
   const normalizedEmail = String(email || '').toLowerCase().trim();
@@ -193,23 +149,13 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
   }
   const normalizedBusinessType = ['restaurant', 'cloud_kitchen'].includes(String(businessType)) ? String(businessType) : null;
   const normalizedDeliveryMode = ['self_delivery', 'eatswada_rider'].includes(String(deliveryMode)) ? String(deliveryMode) : null;
-  const normalizedMaxActiveOrders = maxActiveOrders === '' || maxActiveOrders === undefined ? 20 : Number(maxActiveOrders);
-  const normalizedSettlementSchedule = ['weekly', 'monthly'].includes(String(settlementSchedule)) ? String(settlementSchedule) : null;
   if (!normalizedBusinessType) return res.status(400).json({ success:false, message:'businessType must be restaurant or cloud_kitchen.' });
   if (!normalizedDeliveryMode) return res.status(400).json({ success:false, message:'deliveryMode must be self_delivery or eatswada_rider.' });
-  if (!Number.isInteger(normalizedMaxActiveOrders) || normalizedMaxActiveOrders < 1 || normalizedMaxActiveOrders > 500) return res.status(400).json({ success:false, message:'maxActiveOrders must be an integer between 1 and 500.' });
-  if (!normalizedSettlementSchedule) return res.status(400).json({ success:false, message:'settlementSchedule must be weekly or monthly.' });
   const requiredAgreement = String(process.env.VENDOR_AGREEMENT_VERSION || '').trim();
   const requiredPrivacy = String(process.env.VENDOR_PRIVACY_POLICY_VERSION || '').trim();
   if (process.env.REQUIRE_VENDOR_POLICY_ACCEPTANCE === 'true') {
     if (!requiredAgreement || vendorAgreementVersion !== requiredAgreement || !vendorAgreementAcceptedAt) return res.status(400).json({success:false,message:'Current vendor agreement must be accepted before submitting this application.'});
     if (!requiredPrivacy || privacyPolicyVersion !== requiredPrivacy || !privacyPolicyAcceptedAt) return res.status(400).json({success:false,message:'Current vendor privacy policy must be accepted before submitting this application.'});
-  }
-  const normalizedMinOrder = minOrder === undefined || minOrder === '' ? 0 : Number(minOrder);
-  const normalizedDeliveryFee = deliveryFee === undefined || deliveryFee === '' ? 40 : Number(deliveryFee);
-  const normalizedFreeAbove = freeDeliveryAbove === undefined || freeDeliveryAbove === '' ? 200 : Number(freeDeliveryAbove);
-  if (!validMoney(normalizedMinOrder) || !validMoney(normalizedDeliveryFee) || !validMoney(normalizedFreeAbove)) {
-    return res.status(400).json({ success: false, message: 'Order and delivery amounts must be valid non-negative values.' });
   }
   if (String(fssaiLicenseNumber || '').trim().length > 100) {
     return res.status(400).json({ success: false, message: 'FSSAI license / registration number is too long.' });
@@ -260,21 +206,13 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
       businessType: normalizedBusinessType,
       deliveryMode: normalizedDeliveryMode,
       requestedCommissionRate: commissionRateForDeliveryMode(normalizedDeliveryMode),
-      maxActiveOrders: normalizedMaxActiveOrders,
-      settlementSchedule: normalizedSettlementSchedule,
       vendorAgreementVersion: String(vendorAgreementVersion || '').trim().slice(0, 100),
       vendorAgreementAcceptedAt: vendorAgreementAcceptedAt ? new Date(vendorAgreementAcceptedAt) : null,
       privacyPolicyVersion: String(privacyPolicyVersion || '').trim().slice(0, 100),
       privacyPolicyAcceptedAt: privacyPolicyAcceptedAt ? new Date(privacyPolicyAcceptedAt) : null,
       address: address || '',
       fssaiLicenseNumber: String(fssaiLicenseNumber || '').trim(),
-      fssaiCertificateUrl: String(fssaiCertificateUrl || '').trim().slice(0, 2000),
-      fssaiExpiryDate: fssaiExpiryDate ? new Date(fssaiExpiryDate) : null,
       openingHours: normalizedOpeningHours,
-      minOrder: normalizedMinOrder,
-      deliveryFee: normalizedDeliveryFee,
-      freeDeliveryEnabled: freeDeliveryEnabled !== false,
-      freeDeliveryAbove: normalizedFreeAbove,
       ...(location ? { location } : {}),
       status: 'pending',
       rejectionReason: '',
@@ -294,24 +232,17 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
     application.businessType = normalizedBusinessType;
     application.deliveryMode = normalizedDeliveryMode;
     application.requestedCommissionRate = commissionRateForDeliveryMode(normalizedDeliveryMode);
-    application.maxActiveOrders = normalizedMaxActiveOrders;
-    application.settlementSchedule = normalizedSettlementSchedule;
     application.vendorAgreementVersion = String(vendorAgreementVersion || '').trim().slice(0, 100);
     application.vendorAgreementAcceptedAt = vendorAgreementAcceptedAt ? new Date(vendorAgreementAcceptedAt) : null;
     application.privacyPolicyVersion = String(privacyPolicyVersion || '').trim().slice(0, 100);
     application.privacyPolicyAcceptedAt = privacyPolicyAcceptedAt ? new Date(privacyPolicyAcceptedAt) : null;
     application.address = address || '';
     application.fssaiLicenseNumber = String(fssaiLicenseNumber || '').trim();
-    application.fssaiCertificateUrl = String(fssaiCertificateUrl || '').trim().slice(0, 2000);
-    application.fssaiExpiryDate = fssaiExpiryDate ? new Date(fssaiExpiryDate) : null;
     application.openingHours = normalizedOpeningHours;
-    application.minOrder = normalizedMinOrder;
-    application.deliveryFee = normalizedDeliveryFee;
-    application.freeDeliveryEnabled = freeDeliveryEnabled !== false;
-    application.freeDeliveryAbove = normalizedFreeAbove;
     application.location = location || undefined;
     application.status = 'pending';
     application.rejectionReason = '';
+    application.changeRequest = '';
     application.adminNotes = '';
     application.reviewedBy = null;
     application.reviewedAt = null;
@@ -350,7 +281,7 @@ exports.getVendorApplicationStatus = asyncHandler(async (req, res) => {
 });
 
 exports.getVendorApplications = asyncHandler(async (req, res) => {
-  const status = ['pending', 'approved', 'rejected'].includes(req.query.status) ? req.query.status : null;
+  const status = ['pending', 'needs_changes', 'approved', 'rejected'].includes(req.query.status) ? req.query.status : null;
   const page = Math.max(1, Number(req.query.page) || 1);
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
   const filter = status ? { status } : {};
@@ -435,20 +366,16 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
         phone: current.phone || '',
         address: current.address || '',
         fssaiLicenseNumber: current.fssaiLicenseNumber || '',
-        fssaiCertificateUrl: current.fssaiCertificateUrl || '',
-        fssaiExpiryDate: current.fssaiExpiryDate || null,
         fssaiVerificationStatus: 'pending',
         businessType: current.businessType || 'restaurant',
         deliveryMode: current.deliveryMode || 'eatswada_rider',
         commissionPlan: commissionPlanForDeliveryMode(current.deliveryMode || 'eatswada_rider'),
         commissionRate: commissionRateForDeliveryMode(current.deliveryMode || 'eatswada_rider'),
-        maxActiveOrders: current.maxActiveOrders || 20,
-        settlementSchedule: current.settlementSchedule || 'weekly',
+        maxActiveOrders: 20,
+        settlementSchedule: 'weekly',
         openingHours: current.openingHours,
-        minOrder: current.minOrder ?? 0,
-        deliveryFee: current.deliveryFee ?? 40,
-        freeDeliveryEnabled: current.freeDeliveryEnabled !== false,
-        freeDeliveryAbove: current.freeDeliveryAbove ?? 200,
+        // minOrder/deliveryFee/free-delivery are intentionally omitted here.
+        // Restaurant schema defaults apply; Admin owns these settings after approval.
         ...(restaurantImages.length ? { image: restaurantImages[0], images: restaurantImages } : {}),
         deliveryRadiusKm: 10,
         codEnabled: false,
@@ -526,4 +453,22 @@ exports.rejectVendorApplication = asyncHandler(async (req, res) => {
     message: 'Vendor application rejected.',
     data: publicApplication(application),
   });
+});
+
+
+exports.requestVendorApplicationChanges = asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({ success: false, message: 'Invalid application id.' });
+  }
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ success: false, message: 'A change request message is required.' });
+  if (message.length > 1000) return res.status(400).json({ success: false, message: 'Change request cannot exceed 1000 characters.' });
+
+  const application = await VendorApplication.findOneAndUpdate(
+    { _id: req.params.id, status: 'pending' },
+    { $set: { status: 'needs_changes', changeRequest: message, reviewedBy: req.user._id, reviewedAt: new Date() } },
+    { new: true, runValidators: true }
+  );
+  if (!application) return res.status(409).json({ success: false, message: 'Application not found or is no longer pending.' });
+  res.json({ success: true, message: 'Changes requested from applicant.', data: publicApplication(application) });
 });

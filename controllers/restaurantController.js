@@ -706,7 +706,7 @@ const getRestaurantReviews = asyncHandler(async (req, res) => {
     const filter = { restaurant: restaurantObjectId, isVisible: true };
     return Promise.all([
       Review.find(filter)
-        .select('score riderScore comment createdAt user')
+        .select('score riderScore comment createdAt user vendorReply')
         .populate('user', 'name avatar')
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -745,6 +745,7 @@ const getRestaurantReviews = asyncHandler(async (req, res) => {
     data: reviews.map(r => ({
       id: r._id, score: r.score, riderScore: r.riderScore, comment: r.comment,
       createdAt: r.createdAt,
+      vendorReply: r.vendorReply?.message ? { message: r.vendorReply.message, repliedAt: r.vendorReply.repliedAt } : null,
       customer: { name: r.user?.name || 'Customer', avatar: r.user?.avatar || '' },
       verified: true,
     }))
@@ -764,7 +765,9 @@ const createRestaurant = asyncHandler(async (req, res) => {
 });
 
 const updateRestaurant = asyncHandler(async (req, res) => {
-  const existing = await Restaurant.findById(req.params.id);
+  const restaurantId = req.params.id || (req.user?.role === 'vendor' ? req.user.restaurantId : null);
+  if (!restaurantId) return res.status(400).json({ success: false, message: 'Restaurant id is required.' });
+  const existing = await Restaurant.findById(restaurantId);
   if (!existing) return res.status(404).json({ success: false, message: 'Restaurant not found' });
 
   // PERMISSIONS: CEO can edit any restaurant; vendor only their own.
@@ -806,7 +809,7 @@ const updateRestaurant = asyncHandler(async (req, res) => {
   }
 
   normalizeRestaurantImages(update);
-  const restaurant = await Restaurant.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
+  const restaurant = await Restaurant.findByIdAndUpdate(restaurantId, { $set: update }, { new: true, runValidators: true });
   invalidateUnder99Cache();
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   res.json({ success: true, data: restaurant });

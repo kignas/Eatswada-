@@ -11,6 +11,7 @@ const Coupon     = require('../models/Coupon');
 const Review     = require('../models/Review');
 const IdempotencyKey = require('../models/IdempotencyKey');
 const asyncHandler = require('express-async-handler');
+const { releaseOrderInventory } = require('../services/inventoryReservationService');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 const {
   getMenuRefId,
@@ -733,6 +734,7 @@ const cancelOrder = asyncHandler(async (req, res) => {
   // order a moment earlier, this save fails with VersionError (409) and no
   // refund is sent for an order that is actually going ahead.
   await order.save();
+  await releaseOrderInventory(order, req.user._id);
 
   // Then refund online payments that were actually captured. The refund
   // service claims the refund atomically, so it can never run twice, and it

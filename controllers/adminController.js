@@ -3,6 +3,7 @@ const { initiateOrderRefund } = require('../services/refundService');
 
 const PlatformRating = require('../models/PlatformRating');
 const asyncHandler = require('express-async-handler');
+const { releaseOrderInventory } = require('../services/inventoryReservationService');
 const bcrypt       = require('bcryptjs');
 const User         = require('../models/User');
 const Order        = require('../models/Order');
@@ -169,6 +170,7 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   order.cancelReason = reason;
   // Launch-fix: persist the cancellation first, then refund (atomic claim).
   await order.save();
+  await releaseOrderInventory(order, req.user._id);
   await initiateOrderRefund(order, reason);
   await logAdminAction(req, {
     action: 'order.cancel',
