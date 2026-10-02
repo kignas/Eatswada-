@@ -82,11 +82,12 @@ const vendorApplicationSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'approved', 'rejected'],
+    enum: ['pending', 'needs_changes', 'approved', 'rejected'],
     default: 'pending',
     index: true,
   },
   rejectionReason: { type: String, trim: true, maxlength: 1000, default: '' },
+  changeRequest: { type: String, trim: true, maxlength: 1000, default: '' },
   adminNotes: { type: String, trim: true, maxlength: 2000, default: '' },
   vendorAgreementVersion: { type: String, trim: true, maxlength: 100, default: '' },
   vendorAgreementAcceptedAt: { type: Date, default: null },

@@ -11,6 +11,11 @@ const reviewSchema = new mongoose.Schema({
   comment: { type: String, trim: true, maxlength: 500, default: '' },
   isVisible: { type: Boolean, default: true, index: true },
   adminNote: { type: String, trim: true, maxlength: 300, default: '' },
+  vendorReply: {
+    message: { type: String, trim: true, maxlength: 500, default: '' },
+    repliedAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: null },
+  },
 }, { timestamps: true });
 
 reviewSchema.index({ restaurant: 1, isVisible: 1, createdAt: -1 });

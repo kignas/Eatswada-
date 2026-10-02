@@ -238,6 +238,8 @@ const orderSchema = new mongoose.Schema(
     // `prepMinutes` is captured when the restaurant accepts the order.
     // The start/ready timestamps are anchored when the order actually
     // enters `preparing`, so the customer countdown never starts early.
+    inventoryReservedAt: { type: Date, default: null },
+    inventoryReleasedAt: { type: Date, default: null },
     prepMinutes: {
       type: Number,
       min: 1,

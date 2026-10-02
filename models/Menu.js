@@ -78,6 +78,7 @@ const menuItemSchema = new mongoose.Schema(
     trackStock: { type: Boolean, default: false },
     stockQuantity: { type: Number, min: 0, default: 0 },
     lowStockThreshold: { type: Number, min: 0, default: 5 },
+    pausedUntil: { type: Date, default: null },
     customizations: [
       {
         title: String,
