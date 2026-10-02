@@ -11,6 +11,7 @@ const {
   getVendorApplicationById,
   approveVendorApplication,
   rejectVendorApplication,
+  requestVendorApplicationChanges,
   getVendorApplicationConfig,
 } = require('../controllers/vendorApplicationController');
 
@@ -32,5 +33,6 @@ router.get('/', protect, authorize('admin'), getVendorApplications);
 router.get('/:id', protect, authorize('admin'), getVendorApplicationById);
 router.patch('/:id/approve', protect, authorize('admin'), approveVendorApplication);
 router.patch('/:id/reject', protect, authorize('admin'), rejectVendorApplication);
+router.patch('/:id/request-changes', protect, authorize('admin'), requestVendorApplicationChanges);
 
 module.exports = router;

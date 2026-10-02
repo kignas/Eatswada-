@@ -16,7 +16,7 @@ const {
 } = require('../controllers/adminController');
 const {
   getVendorApplications, getVendorApplicationById,
-  approveVendorApplication, rejectVendorApplication,
+  approveVendorApplication, rejectVendorApplication, requestVendorApplicationChanges,
 } = require('../controllers/vendorApplicationController');
 
 // server.js applies authLimiter to /api/users and /api/auth but not to
@@ -70,6 +70,7 @@ router.get('/vendor-applications', protect, authorize('admin'), getVendorApplica
 router.get('/vendor-applications/:id', protect, authorize('admin'), getVendorApplicationById);
 router.patch('/vendor-applications/:id/approve', protect, authorize('admin'), approveVendorApplication);
 router.patch('/vendor-applications/:id/reject', protect, authorize('admin'), rejectVendorApplication);
+router.patch('/vendor-applications/:id/request-changes', protect, authorize('admin'), requestVendorApplicationChanges);
 
 router.get('/vendors/:id', protect, authorize('admin'), getVendorById);
 router.put('/vendors/:id', protect, authorize('admin'), updateVendor);

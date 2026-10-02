@@ -52,7 +52,7 @@ router.post('/', protect, authorize('admin'), createRestaurant);
 // updateRestaurant/deleteRestaurant/updateRestaurantAvailability now also allow
 // 'vendor' — the controller enforces that a vendor can only touch their own
 // restaurant (canManageRestaurant), so admin-or-owner is the real gate.
-router.put('/:id', protect, authorize('admin'), updateRestaurant);
+router.put('/:id', protect, authorize('admin', 'vendor'), updateRestaurant);
 router.delete('/:id', protect, authorize('admin'), requirePermission('restaurants.delete'), deleteRestaurant);
 router.patch('/:id/availability', protect, authorize('admin'), updateRestaurantAvailability);
 

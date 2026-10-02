@@ -5,6 +5,16 @@ const { protect } = require('../middleware/authMiddleware');
 const role         = require('../middleware/roleMiddleware');
 
 const marketplace = require('../controllers/vendorMarketplaceController');
+const { updateRestaurant } = require('../controllers/restaurantController');
+const { uploadVendorMenuImage } = require('../controllers/uploadController');
+const upload = require('../middleware/uploadMiddleware');
+const multer = require('multer');
+
+const handleMenuImageUpload = (req, res, next) => upload.single('image')(req, res, (err) => {
+  if (!err) return next();
+  const message = err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE' ? 'Image must be 5MB or smaller.' : err.message;
+  return res.status(400).json({ success: false, message });
+});
 
 const {
   getVendorOrders,
@@ -19,6 +29,8 @@ const {
   updateBusinessHours,
   getVendorEarningsSummary,
   getVendorEarningsOrders,
+  getVendorAnalytics,
+  replyToVendorReview,
 } = require('../controllers/vendorController');
 
 /* ─────────────────────────────────────────────────────────────
@@ -27,9 +39,19 @@ const {
 
 // GET  /api/vendor/restaurant  — header profile + isActive flag
 router.get('/restaurant', protect, role('vendor'), getRestaurantProfile);
+router.get('/profile', protect, role('vendor'), marketplace.getVendorProfile);
+router.get('/dashboard', protect, role('vendor'), marketplace.getVendorDashboard);
+router.get('/alerts', protect, role('vendor'), marketplace.getVendorAlerts);
+router.get('/activity', protect, role('vendor'), marketplace.getVendorActivity);
+router.put('/menu/availability/bulk', protect, role('vendor'), marketplace.bulkSetVendorAvailability);
+router.put('/menu/reorder', protect, role('vendor'), marketplace.reorderVendorMenu);
+router.get('/inventory/history', protect, role('vendor'), marketplace.getVendorStockHistory);
+router.put('/restaurant/profile', protect, role('vendor'), updateRestaurant);
 router.put('/restaurant/availability', protect, role('vendor'), updateVendorAvailability);
 router.put('/restaurant/hours', protect, role('vendor'), updateBusinessHours);
 router.get('/reviews', protect, role('vendor'), getVendorReviews);
+router.post('/reviews/:id/reply', protect, role('vendor'), replyToVendorReview);
+router.get('/analytics', protect, role('vendor'), getVendorAnalytics);
 router.get('/earnings/summary', protect, role('vendor'), getVendorEarningsSummary);
 router.get('/earnings/orders', protect, role('vendor'), getVendorEarningsOrders);
 router.get('/onboarding/config', protect, role('vendor'), marketplace.getVendorOnboardingConfig);
@@ -72,6 +94,7 @@ router.post('/orders/:id/verify-delivery-otp', protect, role('vendor'), marketpl
 
 // GET  /api/vendor/menu                   — grouped-by-category menu
 router.get('/menu', protect, role('vendor'), getVendorMenu);
+router.post('/menu/upload-image', protect, role('vendor'), handleMenuImageUpload, uploadVendorMenuImage);
 router.post('/menu', protect, role('vendor'), marketplace.createVendorMenuItem);
 router.put('/menu/:id', protect, role('vendor'), marketplace.updateVendorMenuItem);
 router.delete('/menu/:id', protect, role('vendor'), marketplace.deleteVendorMenuItem);
