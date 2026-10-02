@@ -50,6 +50,8 @@ const CUSTOMER_LIST_PROJECTION = {
   address: 1,
   location: 1,
   categories: 1,
+  businessType: 1,
+  deliveryMode: 1,
   createdAt: 1,
   updatedAt: 1
 };
@@ -274,6 +276,8 @@ const getMenu = asyncHandler(async (req, res) => {
   // grouping; out-of-stock items are still returned.
   const items = await MenuItem.find({
     restaurantId: req.params.id,
+    isActive: { $ne: false },
+    $or: [{ approvalStatus: 'approved' }, { approvalStatus: { $exists: false } }],
   }).sort({ category: 1, name: 1 }).lean();
   for (const item of items) applyMenuItemDefaults(item);
 
@@ -335,6 +339,8 @@ async function buildUnder99Payload() {
   const qualifyingRestaurantIds = await MenuItem.distinct('restaurantId', {
     price: { $lte: 99 },
     inStock: true,
+    isActive: { $ne: false },
+    $or: [{ approvalStatus: 'approved' }, { approvalStatus: { $exists: false } }],
   });
 
   const restaurantIds = [...new Set(
@@ -386,6 +392,8 @@ async function buildUnder99Payload() {
   // can disable the ADD control for unavailable items.
   const menuItems = await MenuItem.find({
     restaurantId: { $in: visibleRestaurantIds },
+    isActive: { $ne: false },
+    $or: [{ approvalStatus: 'approved' }, { approvalStatus: { $exists: false } }],
   })
     .select([
       'restaurantId',
@@ -452,6 +460,8 @@ async function buildUnder99Payload() {
           deliveryTime: restaurant.time || `${restaurant.estimatedDeliveryMin}-${restaurant.estimatedDeliveryMax} mins`,
           estimatedDeliveryMin: restaurant.estimatedDeliveryMin,
           estimatedDeliveryMax: restaurant.estimatedDeliveryMax,
+          businessType: restaurant.businessType || 'restaurant',
+          deliveryMode: restaurant.deliveryMode || 'eatswada_rider',
           distance: restaurant.distance || '',
           cuisine: restaurant.cuisineDisplay || (restaurant.cuisine || []).join(', '),
           offer: restaurant.offer || '',
@@ -538,10 +548,10 @@ const searchRestaurants = asyncHandler(async (req, res) => {
   try {
     const menuFilter = {
       inStock: true,
-      $or: [
-        { name: regex },
-        { category: regex },
-        { description: regex },
+      isActive: { $ne: false },
+      $and: [
+        { $or: [{ approvalStatus: 'approved' }, { approvalStatus: { $exists: false } }] },
+        { $or: [{ name: regex }, { category: regex }, { description: regex }] },
       ],
     };
 
@@ -593,7 +603,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
         .limit(30)
         .lean(),
       Restaurant.find(visibleRestaurantFilter)
-        .select('_id name image images rating ratingCount estimatedDeliveryMin estimatedDeliveryMax time cuisine cuisineDisplay')
+        .select('_id name image images rating ratingCount estimatedDeliveryMin estimatedDeliveryMax time cuisine cuisineDisplay businessType deliveryMode')
         .lean(),
     ]);
 

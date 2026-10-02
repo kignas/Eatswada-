@@ -7,6 +7,7 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
 const VendorApplication = require('../models/VendorApplication');
+const { commissionRateForDeliveryMode, commissionPlanForDeliveryMode } = require('../services/commissionService');
 
 const APPLICATION_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STAFF_MIN_PASSWORD = 10;
@@ -67,6 +68,11 @@ function publicApplication(application, includeToken = false, token = null) {
     status: application.status,
     restaurantName: application.restaurantName,
     ownerName: application.ownerName,
+    businessType: application.businessType || 'restaurant',
+    deliveryMode: application.deliveryMode || 'eatswada_rider',
+    requestedCommissionRate: Number(application.requestedCommissionRate) || commissionRateForDeliveryMode(application.deliveryMode || 'eatswada_rider'),
+    maxActiveOrders: application.maxActiveOrders || 20,
+    settlementSchedule: application.settlementSchedule || 'weekly',
     createdAt: application.createdAt,
     reviewedAt: application.reviewedAt,
     rejectionReason: application.status === 'rejected' ? application.rejectionReason : '',
@@ -92,6 +98,14 @@ async function createRestaurantForApplication(application, vendorUser) {
     phone: application.phone || '',
     address: application.address || '',
     fssaiLicenseNumber: application.fssaiLicenseNumber || '',
+    fssaiCertificateUrl: application.fssaiCertificateUrl || '',
+    fssaiExpiryDate: application.fssaiExpiryDate || null,
+    businessType: application.businessType || 'restaurant',
+    deliveryMode: application.deliveryMode || 'eatswada_rider',
+    commissionPlan: application.deliveryMode ? commissionPlanForDeliveryMode(application.deliveryMode) : 'legacy',
+    commissionRate: Number.isFinite(Number(application.requestedCommissionRate)) ? Number(application.requestedCommissionRate) : commissionRateForDeliveryMode(application.deliveryMode || 'eatswada_rider'),
+    maxActiveOrders: application.maxActiveOrders || 20,
+    settlementSchedule: application.settlementSchedule || 'weekly',
     openingHours: application.openingHours,
     minOrder: application.minOrder ?? 0,
     deliveryFee: application.deliveryFee ?? 40,
@@ -123,6 +137,26 @@ async function createRestaurantForApplication(application, vendorUser) {
  * securely hashed by the existing User model. No restaurant is created until
  * an admin approves the application.
  */
+exports.getVendorApplicationConfig = asyncHandler(async (req, res) => {
+  res.json({ success:true, data:{
+    businessTypes:[
+      { key:'restaurant', label:'Restaurant' },
+      { key:'cloud_kitchen', label:'Cloud kitchen' },
+    ],
+    deliveryModes:[
+      { key:'self_delivery', label:'Restaurant delivery', commissionRate:commissionRateForDeliveryMode('self_delivery') },
+      { key:'eatswada_rider', label:'Eatswada rider delivery', commissionRate:commissionRateForDeliveryMode('eatswada_rider') },
+    ],
+    settlementSchedules:['weekly','monthly'],
+    maxActiveOrders:{min:1,max:500,default:20},
+    fssai:{ required:true, certificateRecommended:true },
+    policies:{
+      vendorAgreementVersion:String(process.env.VENDOR_AGREEMENT_VERSION || '2026-10-01'),
+      vendorPrivacyPolicyVersion:String(process.env.VENDOR_PRIVACY_POLICY_VERSION || '2026-10-01'),
+    },
+  }});
+});
+
 exports.submitVendorApplication = asyncHandler(async (req, res) => {
   const {
     ownerName, email, phone, password, restaurantName, cuisine,
@@ -156,6 +190,20 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
   }
   if (!String(fssaiLicenseNumber || '').trim()) {
     return res.status(400).json({ success: false, message: 'FSSAI license / registration number is required.' });
+  }
+  const normalizedBusinessType = ['restaurant', 'cloud_kitchen'].includes(String(businessType)) ? String(businessType) : null;
+  const normalizedDeliveryMode = ['self_delivery', 'eatswada_rider'].includes(String(deliveryMode)) ? String(deliveryMode) : null;
+  const normalizedMaxActiveOrders = maxActiveOrders === '' || maxActiveOrders === undefined ? 20 : Number(maxActiveOrders);
+  const normalizedSettlementSchedule = ['weekly', 'monthly'].includes(String(settlementSchedule)) ? String(settlementSchedule) : null;
+  if (!normalizedBusinessType) return res.status(400).json({ success:false, message:'businessType must be restaurant or cloud_kitchen.' });
+  if (!normalizedDeliveryMode) return res.status(400).json({ success:false, message:'deliveryMode must be self_delivery or eatswada_rider.' });
+  if (!Number.isInteger(normalizedMaxActiveOrders) || normalizedMaxActiveOrders < 1 || normalizedMaxActiveOrders > 500) return res.status(400).json({ success:false, message:'maxActiveOrders must be an integer between 1 and 500.' });
+  if (!normalizedSettlementSchedule) return res.status(400).json({ success:false, message:'settlementSchedule must be weekly or monthly.' });
+  const requiredAgreement = String(process.env.VENDOR_AGREEMENT_VERSION || '').trim();
+  const requiredPrivacy = String(process.env.VENDOR_PRIVACY_POLICY_VERSION || '').trim();
+  if (process.env.REQUIRE_VENDOR_POLICY_ACCEPTANCE === 'true') {
+    if (!requiredAgreement || vendorAgreementVersion !== requiredAgreement || !vendorAgreementAcceptedAt) return res.status(400).json({success:false,message:'Current vendor agreement must be accepted before submitting this application.'});
+    if (!requiredPrivacy || privacyPolicyVersion !== requiredPrivacy || !privacyPolicyAcceptedAt) return res.status(400).json({success:false,message:'Current vendor privacy policy must be accepted before submitting this application.'});
   }
   const normalizedMinOrder = minOrder === undefined || minOrder === '' ? 0 : Number(minOrder);
   const normalizedDeliveryFee = deliveryFee === undefined || deliveryFee === '' ? 40 : Number(deliveryFee);
@@ -209,8 +257,19 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
       phone: normalizedPhone,
       cuisine: cuisineArray,
       description: description || '',
+      businessType: normalizedBusinessType,
+      deliveryMode: normalizedDeliveryMode,
+      requestedCommissionRate: commissionRateForDeliveryMode(normalizedDeliveryMode),
+      maxActiveOrders: normalizedMaxActiveOrders,
+      settlementSchedule: normalizedSettlementSchedule,
+      vendorAgreementVersion: String(vendorAgreementVersion || '').trim().slice(0, 100),
+      vendorAgreementAcceptedAt: vendorAgreementAcceptedAt ? new Date(vendorAgreementAcceptedAt) : null,
+      privacyPolicyVersion: String(privacyPolicyVersion || '').trim().slice(0, 100),
+      privacyPolicyAcceptedAt: privacyPolicyAcceptedAt ? new Date(privacyPolicyAcceptedAt) : null,
       address: address || '',
       fssaiLicenseNumber: String(fssaiLicenseNumber || '').trim(),
+      fssaiCertificateUrl: String(fssaiCertificateUrl || '').trim().slice(0, 2000),
+      fssaiExpiryDate: fssaiExpiryDate ? new Date(fssaiExpiryDate) : null,
       openingHours: normalizedOpeningHours,
       minOrder: normalizedMinOrder,
       deliveryFee: normalizedDeliveryFee,
@@ -232,8 +291,19 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
     application.phone = normalizedPhone;
     application.cuisine = cuisineArray;
     application.description = description || '';
+    application.businessType = normalizedBusinessType;
+    application.deliveryMode = normalizedDeliveryMode;
+    application.requestedCommissionRate = commissionRateForDeliveryMode(normalizedDeliveryMode);
+    application.maxActiveOrders = normalizedMaxActiveOrders;
+    application.settlementSchedule = normalizedSettlementSchedule;
+    application.vendorAgreementVersion = String(vendorAgreementVersion || '').trim().slice(0, 100);
+    application.vendorAgreementAcceptedAt = vendorAgreementAcceptedAt ? new Date(vendorAgreementAcceptedAt) : null;
+    application.privacyPolicyVersion = String(privacyPolicyVersion || '').trim().slice(0, 100);
+    application.privacyPolicyAcceptedAt = privacyPolicyAcceptedAt ? new Date(privacyPolicyAcceptedAt) : null;
     application.address = address || '';
     application.fssaiLicenseNumber = String(fssaiLicenseNumber || '').trim();
+    application.fssaiCertificateUrl = String(fssaiCertificateUrl || '').trim().slice(0, 2000);
+    application.fssaiExpiryDate = fssaiExpiryDate ? new Date(fssaiExpiryDate) : null;
     application.openingHours = normalizedOpeningHours;
     application.minOrder = normalizedMinOrder;
     application.deliveryFee = normalizedDeliveryFee;
@@ -365,6 +435,15 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
         phone: current.phone || '',
         address: current.address || '',
         fssaiLicenseNumber: current.fssaiLicenseNumber || '',
+        fssaiCertificateUrl: current.fssaiCertificateUrl || '',
+        fssaiExpiryDate: current.fssaiExpiryDate || null,
+        fssaiVerificationStatus: 'pending',
+        businessType: current.businessType || 'restaurant',
+        deliveryMode: current.deliveryMode || 'eatswada_rider',
+        commissionPlan: commissionPlanForDeliveryMode(current.deliveryMode || 'eatswada_rider'),
+        commissionRate: commissionRateForDeliveryMode(current.deliveryMode || 'eatswada_rider'),
+        maxActiveOrders: current.maxActiveOrders || 20,
+        settlementSchedule: current.settlementSchedule || 'weekly',
         openingHours: current.openingHours,
         minOrder: current.minOrder ?? 0,
         deliveryFee: current.deliveryFee ?? 40,

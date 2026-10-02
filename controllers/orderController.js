@@ -36,7 +36,7 @@ const { ensureOrderLedger } = require('../services/settlementService');
 const ORDER_POPULATE_PATHS = [
   {
     path: 'restaurant',
-    select: 'name image address owner',
+    select: 'name image address owner phone deliveryMode businessType',
     populate: {
       path: 'owner',
       select: 'name phone',
@@ -74,6 +74,8 @@ function withLiveDisplayData(orderDoc) {
     order.restaurantAddress = liveRestaurant.address || '';
     order.restaurantPhone = liveRestaurant.owner?.phone || liveRestaurant.phone || '';
     order.restaurantOwnerName = liveRestaurant.owner?.name || '';
+    order.deliveryMode = order.deliveryModeSnapshot || liveRestaurant.deliveryMode || 'eatswada_rider';
+    order.businessType = order.businessTypeSnapshot || liveRestaurant.businessType || 'restaurant';
 
     order.restaurant = liveRestaurant._id;
   }
@@ -241,7 +243,7 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     isActive: true,
     approvalStatus: 'approved',
   })
-    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate');
+    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate commissionPlan deliveryMode businessType');
   if (!restaurant) { const e = new Error('Restaurant not found or unavailable'); e.statusCode = 404; throw e; }
 
   const operational = operationalStatus(restaurant);
@@ -270,7 +272,12 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     const e = new Error('One or more cart items are invalid or outdated. Please refresh your cart.'); e.statusCode = 400; throw e;
   }
   const uniqueIds = [...new Set(menuIds.map(String))];
-  const menuDocs = await Menu.find({ _id: { $in: uniqueIds }, restaurantId: restaurant._id }).lean();
+  const menuDocs = await Menu.find({
+    _id: { $in: uniqueIds },
+    restaurantId: restaurant._id,
+    isActive: { $ne: false },
+    $or: [{ approvalStatus: 'approved' }, { approvalStatus: { $exists: false } }],
+  }).lean();
   const menuMap = new Map(menuDocs.map(m => [String(m._id), m]));
 
   const serverItems = [];
@@ -279,9 +286,11 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     const rawId = requested?.menuItem || requested?.menuId || requested?.id || requested?._id;
     const menuItem = menuMap.get(String(rawId));
     if (!menuItem) { const e = new Error('A cart item no longer belongs to this restaurant. Please refresh your cart.'); e.statusCode = 409; throw e; }
+    if (menuItem.isActive === false || (menuItem.approvalStatus && menuItem.approvalStatus !== 'approved')) { const e = new Error(`${menuItem.name || 'This item'} is not currently approved for ordering.`); e.statusCode = 409; throw e; }
     if (menuItem.inStock === false) { const e = new Error(`${menuItem.name} is currently out of stock.`); e.statusCode = 409; throw e; }
     const quantity = Number(requested.quantity);
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) { const e = new Error(`Invalid quantity for ${menuItem.name}.`); e.statusCode = 400; throw e; }
+    if (menuItem.trackStock && Number(menuItem.stockQuantity) < quantity) { const e = new Error(`${menuItem.name} has only ${Math.max(0, Number(menuItem.stockQuantity)||0)} unit(s) remaining.`); e.statusCode = 409; throw e; }
     const unitPrice = calculateItemServerPrice(menuItem, requested.customizations);
     subtotal += unitPrice * quantity;
     serverItems.push({
@@ -555,6 +564,8 @@ const createOrder = asyncHandler(async (req, res) => {
         restaurant: p.restaurant._id,
         restaurantName: p.restaurant.name,
         restaurantImage: p.restaurant.image || '',
+        deliveryModeSnapshot: p.restaurant.deliveryMode || 'eatswada_rider',
+        businessTypeSnapshot: p.restaurant.businessType || 'restaurant',
         checkoutGroupId,
         customerName: customer?.name || '',
         customerPhone: customer?.phone || '',

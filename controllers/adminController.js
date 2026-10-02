@@ -11,6 +11,7 @@ const Review       = require('../models/Review');
 const generateToken = require('../utils/generateToken');
 const { uploadToCloudinary } = require('../utils/riderUpload');
 const { logAdminAction } = require('../services/auditService');
+const { commissionRateForDeliveryMode, commissionPlanForDeliveryMode } = require('../services/commissionService');
 
 const ADMIN_ROLES = ['admin'];
 const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
@@ -180,6 +181,22 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order });
 });
 
+exports.updateRestaurantFssai = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const status = req.body?.status;
+  if (!['pending','verified','expired','rejected'].includes(status)) return res.status(400).json({success:false,message:'FSSAI status must be pending, verified, expired, or rejected.'});
+  const restaurant = await Restaurant.findById(req.params.id).select('_id name fssaiLicenseNumber fssaiCertificateUrl fssaiExpiryDate fssaiVerificationStatus');
+  if (!restaurant) return res.status(404).json({success:false,message:'Restaurant not found.'});
+  const previous={status:restaurant.fssaiVerificationStatus||'pending',verifiedAt:restaurant.fssaiVerifiedAt||null};
+  restaurant.fssaiVerificationStatus=status;
+  restaurant.fssaiVerifiedAt=status==='verified'?new Date():null;
+  if (req.body?.certificateUrl !== undefined) restaurant.fssaiCertificateUrl=String(req.body.certificateUrl||'').trim().slice(0,2000);
+  if (req.body?.expiryDate !== undefined) restaurant.fssaiExpiryDate=req.body.expiryDate ? new Date(req.body.expiryDate) : null;
+  await restaurant.save();
+  await logAdminAction(req,{action:'restaurant.fssai.verify',targetType:'restaurant',targetId:restaurant._id,targetLabel:restaurant.name,oldValue:previous,newValue:{status:restaurant.fssaiVerificationStatus,verifiedAt:restaurant.fssaiVerifiedAt}});
+  res.json({success:true,data:restaurant});
+});
+
 exports.getRestaurantCommission = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const restaurant = await Restaurant.findById(req.params.id).select('_id name commissionRate isActive approvalStatus');
@@ -235,6 +252,55 @@ exports.updateRestaurantCommission = asyncHandler(async (req, res) => {
       commissionRate: restaurant.commissionRate,
     },
   });
+});
+
+
+exports.getRestaurantDeliverySettings = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const restaurant = await Restaurant.findById(req.params.id).select('_id name businessType deliveryMode commissionPlan commissionRate maxActiveOrders settlementSchedule fssaiLicenseNumber fssaiCertificateUrl fssaiExpiryDate fssaiVerificationStatus');
+  if (!restaurant) return res.status(404).json({success:false,message:'Restaurant not found.'});
+  res.json({success:true,data:restaurant});
+});
+
+exports.updateRestaurantDeliverySettings = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const restaurant = await Restaurant.findById(req.params.id);
+  if (!restaurant) return res.status(404).json({success:false,message:'Restaurant not found.'});
+
+  const body=req.body||{};
+  const before={ businessType:restaurant.businessType||'restaurant', deliveryMode:restaurant.deliveryMode||'eatswada_rider', commissionPlan:restaurant.commissionPlan||'legacy', commissionRate:Number(restaurant.commissionRate)||15, maxActiveOrders:restaurant.maxActiveOrders||20, settlementSchedule:restaurant.settlementSchedule||'weekly' };
+
+  if (body.businessType!==undefined) {
+    if(!['restaurant','cloud_kitchen'].includes(body.businessType)) return res.status(400).json({success:false,message:'businessType must be restaurant or cloud_kitchen.'});
+    restaurant.businessType=body.businessType;
+  }
+  if (body.deliveryMode!==undefined) {
+    if(!['self_delivery','eatswada_rider'].includes(body.deliveryMode)) return res.status(400).json({success:false,message:'deliveryMode must be self_delivery or eatswada_rider.'});
+    restaurant.deliveryMode=body.deliveryMode;
+  }
+  if (body.maxActiveOrders!==undefined) {
+    const cap=Number(body.maxActiveOrders); if(!Number.isInteger(cap)||cap<1||cap>500)return res.status(400).json({success:false,message:'maxActiveOrders must be an integer between 1 and 500.'});
+    restaurant.maxActiveOrders=cap;
+  }
+  if (body.settlementSchedule!==undefined) {
+    if(!['weekly','monthly'].includes(body.settlementSchedule))return res.status(400).json({success:false,message:'settlementSchedule must be weekly or monthly.'});
+    restaurant.settlementSchedule=body.settlementSchedule;
+  }
+
+  // Delivery mode determines the standard commercial plan. An explicit
+  // commissionRate is allowed only when the admin chooses the custom plan.
+  if (body.commissionRate!==undefined) {
+    const rate=Number(body.commissionRate); if(!Number.isFinite(rate)||rate<0||rate>100)return res.status(400).json({success:false,message:'commissionRate must be between 0 and 100.'});
+    restaurant.commissionRate=Math.round(rate*100)/100;
+    restaurant.commissionPlan='custom';
+  } else if (body.deliveryMode!==undefined) {
+    restaurant.commissionRate=commissionRateForDeliveryMode(restaurant.deliveryMode);
+    restaurant.commissionPlan=commissionPlanForDeliveryMode(restaurant.deliveryMode);
+  }
+
+  await restaurant.save();
+  await logAdminAction(req,{action:'restaurant.delivery-settings.update',targetType:'restaurant',targetId:restaurant._id,targetLabel:restaurant.name,oldValue:before,newValue:{businessType:restaurant.businessType,deliveryMode:restaurant.deliveryMode,commissionPlan:restaurant.commissionPlan,commissionRate:restaurant.commissionRate,maxActiveOrders:restaurant.maxActiveOrders,settlementSchedule:restaurant.settlementSchedule}});
+  res.json({success:true,message:'Restaurant delivery and operational settings updated. Existing orders retain their snapshots.',data:restaurant});
 });
 
 exports.getRestaurants = asyncHandler(async (req, res) => {

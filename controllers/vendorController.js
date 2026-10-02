@@ -9,6 +9,7 @@ const Review          = require('../models/Review');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService'); 
 const { initiateOrderRefund } = require('../services/refundService');
 const { stopRing } = require('../services/pushService');
+const { getRestaurantCapacity } = require('../services/vendorMarketplaceService');
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -61,9 +62,13 @@ function serializeVendorOrder(orderDoc) {
 const QUEUE_STATUSES   = ['placed', 'confirmed', 'preparing', 'waiting_for_rider', 'assigned', 'out_for_delivery'];
 const HISTORY_STATUSES = ['delivered', 'cancelled'];
 
+// `preparing` branches by the restaurant's approved delivery mode.
+// Self-delivery skips the Eatswada rider queue; Eatswada-rider restaurants
+// continue through waiting_for_rider -> assigned -> out_for_delivery.
 const VENDOR_STATUS_TRANSITIONS = {
   confirmed: 'preparing',
   preparing: 'waiting_for_rider',
+  otp_verified: 'delivered',
 };
 
 /* ─────────────────────────────────────────────────────────────
@@ -152,6 +157,17 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
     });
   }
 
+  const capacity = await getRestaurantCapacity(req.user.restaurantId);
+  if (!capacity) return res.status(404).json({ success:false, message:'Restaurant not found.' });
+  if (capacity.activeOrders >= capacity.maxActiveOrders) {
+    return res.status(409).json({
+      success:false,
+      code:'RESTAURANT_ORDER_CAPACITY_REACHED',
+      message:`Restaurant is at its maximum active-order capacity (${capacity.maxActiveOrders}). Please wait for an active order to finish before accepting another.`,
+      data:{ activeOrders:capacity.activeOrders, maxActiveOrders:capacity.maxActiveOrders, availableSlots:capacity.availableSlots },
+    });
+  }
+
   const prep = Number(req.body && req.body.prepMinutes);
   if (Number.isFinite(prep) && prep > 0 && prep <= 240) order.prepMinutes = Math.round(prep);
 
@@ -205,7 +221,18 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
     return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
   }
 
-  const nextStatus = VENDOR_STATUS_TRANSITIONS[order.status];
+  let nextStatus = VENDOR_STATUS_TRANSITIONS[order.status];
+  if (order.status === 'preparing') {
+    const restaurant = await Restaurant.findById(order.restaurant).select('deliveryMode');
+    const deliveryMode = restaurant?.deliveryMode || 'eatswada_rider';
+    nextStatus = deliveryMode === 'self_delivery' ? 'out_for_delivery' : 'waiting_for_rider';
+  }
+  if (order.status === 'otp_verified' && order.deliveryModeSnapshot !== 'self_delivery') {
+    return res.status(409).json({ success:false, message:'Only self-delivery orders can be marked delivered by the vendor.' });
+  }
+  if (nextStatus === 'delivered' && !order.deliveryOtpVerified) {
+    return res.status(409).json({ success:false, message:'Verify the customer delivery PIN before marking this self-delivery order delivered.' });
+  }
   if (!nextStatus) {
     return res.status(409).json({
       success: false,

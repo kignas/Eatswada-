@@ -306,8 +306,8 @@ const getCart = asyncHandler(async (req, res) => {
 const addToCart = asyncHandler(async (req, res) => {
   const { menuItemId, quantity = 1, customizations = {} } = req.body;
 
-  const menuItem = await MenuItem.findById(menuItemId).select('restaurantId name price originalPrice image isVeg inStock customizations');
-  if (!menuItem || menuItem.inStock === false)
+  const menuItem = await MenuItem.findById(menuItemId).select('restaurantId name price originalPrice image isVeg inStock customizations approvalStatus isActive trackStock stockQuantity');
+  if (!menuItem || menuItem.isActive === false || menuItem.inStock === false || (menuItem.approvalStatus && menuItem.approvalStatus !== 'approved'))
     return res.status(404).json({ success: false, message: 'Item not available' });
 
   // PERFORMANCE: the user's cart does not depend on the restaurant lookup, so
@@ -327,6 +327,8 @@ const addToCart = asyncHandler(async (req, res) => {
   const requestedQuantity = Number(quantity);
   if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 99)
     return res.status(400).json({ success: false, message: 'Quantity must be an integer between 1 and 99.' });
+  if (menuItem.trackStock && Number(menuItem.stockQuantity) < requestedQuantity)
+    return res.status(409).json({ success:false, message:`Only ${Math.max(0, Number(menuItem.stockQuantity)||0)} unit(s) of ${menuItem.name} are currently available.` });
 
   let cart = await cartPromise;
   if (!cart) cart = new Cart({ user: req.user._id });
@@ -347,7 +349,9 @@ const addToCart = asyncHandler(async (req, res) => {
     JSON.stringify(Array.isArray(i.customizations) ? i.customizations : []) === sig
   );
   if (existing) {
-    existing.quantity = Math.min(99, existing.quantity + requestedQuantity);
+    const desiredQuantity = Math.min(99, existing.quantity + requestedQuantity);
+    if (menuItem.trackStock && Number(menuItem.stockQuantity) < desiredQuantity) return res.status(409).json({success:false,message:`Only ${Math.max(0, Number(menuItem.stockQuantity)||0)} unit(s) of ${menuItem.name} are currently available.`});
+    existing.quantity = desiredQuantity;
     // Ensure legacy items gain authoritative ownership too.
     if (!existing.restaurant) existing.restaurant = ownerRestaurant._id;
     if (!existing.restaurantName) existing.restaurantName = ownerRestaurant.name;
