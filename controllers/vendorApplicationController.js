@@ -94,6 +94,61 @@ function adminApplication(application) {
  * securely hashed by the existing User model. No restaurant is created until
  * an admin approves the application.
  */
+
+// Customer-owned onboarding: the customer account owns the application only.
+// No vendor User, password, or status token is created at application time.
+function customerApplicationView(a) {
+  return {
+    id: a._id, status: a.status, restaurantName: a.restaurantName,
+    ownerName: a.ownerName, email: a.email, phone: a.phone,
+    cuisine: a.cuisine, description: a.description, businessType: a.businessType,
+    deliveryMode: a.deliveryMode, address: a.address, location: a.location,
+    fssaiLicenseNumber: a.fssaiLicenseNumber, openingHours: a.openingHours,
+    createdAt: a.createdAt, updatedAt: a.updatedAt, reviewedAt: a.reviewedAt,
+    changeRequest: a.status === 'needs_changes' ? a.changeRequest : '',
+    rejectionReason: a.status === 'rejected' ? a.rejectionReason : '',
+  };
+}
+function validateCustomerApplication(body) {
+  const b = body || {};
+  const ownerName = String(b.ownerName || '').trim();
+  const restaurantName = String(b.restaurantName || '').trim();
+  const email = String(b.email || '').trim().toLowerCase();
+  const phone = normalizePhone(b.phone);
+  const cuisine = Array.isArray(b.cuisine) ? b.cuisine.map(x => String(x).trim()).filter(Boolean).slice(0,10) : String(b.cuisine || '').split(',').map(x=>x.trim()).filter(Boolean).slice(0,10);
+  const businessType = ['restaurant','cloud_kitchen'].includes(b.businessType) ? b.businessType : null;
+  const deliveryMode = ['self_delivery','eatswada_rider'].includes(b.deliveryMode) ? b.deliveryMode : null;
+  if (!ownerName || ownerName.length > 60 || !restaurantName || restaurantName.length > 100 || !email || !/^\S+@\S+\.\S+$/.test(email) || email.length > 254 || !validPhone(phone) || !cuisine.length || !businessType || !deliveryMode) throw Object.assign(new Error('Please complete the required business and contact fields.'), { status: 400 });
+  if (!String(b.address || '').trim() || String(b.address).length > 500 || !String(b.fssaiLicenseNumber || '').trim() || String(b.fssaiLicenseNumber).trim().length > 100 || !validLocation(b.location) || !b.location?.coordinates) throw Object.assign(new Error('A valid business address, map location, and FSSAI number are required.'), { status: 400 });
+  let openingHours;
+  try { openingHours = normalizeHours(b.openingHours); } catch (e) { throw Object.assign(e,{status:400}); }
+  return { ownerName, restaurantName, email, phone, cuisine, description: String(b.description || '').trim().slice(0,1000), businessType, deliveryMode, address: String(b.address).trim(), fssaiLicenseNumber: String(b.fssaiLicenseNumber).trim(), location: b.location, openingHours };
+}
+exports.createCustomerVendorApplication = asyncHandler(async (req,res) => {
+  if (!req.user || req.user.role !== 'user') return res.status(403).json({success:false,message:'A customer account is required.'});
+  let data; try { data = validateCustomerApplication(req.body); } catch(e) { return res.status(e.status || 400).json({success:false,message:e.message}); }
+  const existing = await VendorApplication.findOne({ applicant: req.user._id });
+  if (existing) return res.status(409).json({success:false,message:'You already have an application. Open your application status to continue.',data:{id:existing._id,status:existing.status}});
+  const app = await VendorApplication.create({ ...data, applicant:req.user._id, status:'pending', requestedCommissionRate:commissionRateForDeliveryMode(data.deliveryMode), statusTokenHash:undefined, statusTokenExpiresAt:undefined });
+  return res.status(201).json({success:true,message:'Application submitted for review.',data:customerApplicationView(app)});
+});
+exports.getMyVendorApplication = asyncHandler(async (req,res) => {
+  if (!req.user || req.user.role !== 'user') return res.status(403).json({success:false,message:'A customer account is required.'});
+  const app = await VendorApplication.findOne({applicant:req.user._id});
+  if (!app) return res.status(404).json({success:false,message:'No restaurant application found.'});
+  res.json({success:true,data:customerApplicationView(app)});
+});
+exports.updateMyVendorApplication = asyncHandler(async (req,res) => {
+  if (!req.user || req.user.role !== 'user') return res.status(403).json({success:false,message:'A customer account is required.'});
+  let data; try { data = validateCustomerApplication(req.body); } catch(e) { return res.status(e.status || 400).json({success:false,message:e.message}); }
+  const app = await VendorApplication.findOne({applicant:req.user._id});
+  if (!app) return res.status(404).json({success:false,message:'No restaurant application found.'});
+  if (app.status !== 'needs_changes') return res.status(409).json({success:false,message:'Your application can only be edited when Admin requests changes.'});
+  Object.assign(app,data,{status:'pending',changeRequest:'',rejectionReason:'',adminNotes:'',reviewedBy:null,reviewedAt:null});
+  await app.save();
+  res.json({success:true,message:'Updated application resubmitted for review.',data:customerApplicationView(app)});
+});
+
 exports.getVendorApplicationConfig = asyncHandler(async (req, res) => {
   res.json({ success:true, data:{
     businessTypes:[
@@ -327,6 +382,20 @@ exports.approveVendorApplication = asyncHandler(async (req, res) => {
   }
   if (application.status !== 'pending') {
     return res.status(409).json({ success: false, message: 'Only pending applications can be approved.' });
+  }
+
+  // New customer-owned applications are approved for onboarding contact only.
+  // Vendor credentials and Restaurant creation happen in a separate, explicit
+  // post-contact provisioning step; approval must never grant Vendor access.
+  const applicantUser = await User.findById(application.applicant).select('_id role');
+  if (applicantUser && applicantUser.role === 'user') {
+    const approved = await VendorApplication.findOneAndUpdate(
+      { _id: application._id, status: 'pending' },
+      { $set: { status: 'approved', reviewedBy: req.user._id, reviewedAt: new Date(), rejectionReason: '', restaurantId: null } },
+      { new: true, runValidators: true }
+    );
+    if (!approved) return res.status(409).json({success:false,message:'Application was already processed by another admin.'});
+    return res.json({success:true,message:'Application approved. Contact the applicant using the submitted business contact details before creating a separate Vendor account.',data:{applicationId:approved._id,status:approved.status,contact:{ownerName:approved.ownerName,email:approved.email,phone:approved.phone}}});
   }
 
   const vendorUser = await User.findOne({ _id: application.applicant, role: 'vendor' });
