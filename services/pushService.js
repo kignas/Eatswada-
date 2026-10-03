@@ -267,6 +267,44 @@ async function notifyAdminsNewOrder(order) {
   return { recipients, sent };
 }
 
+
+/* ── New restaurant application alert for every admin ───────── */
+async function notifyAdminsNewApplication(application) {
+  const id = String(application._id);
+  const admins = await User.find({ role: 'admin' }).select('_id').lean();
+  if (!admins.length) return { recipients: 0, sent: 0 };
+  const title = 'New restaurant application';
+  const message = `${application.restaurantName || 'A restaurant'} · ${application.ownerName || 'Applicant'} submitted an application.`;
+  let sent = 0;
+  for (const admin of admins) {
+    const adminId = String(admin._id);
+    const eventVersion = application.updatedAt ? new Date(application.updatedAt).getTime() : Date.now();
+    const dedupeKey = `admin_new_application:${adminId}:${id}:${eventVersion}`;
+    let notification;
+    try {
+      notification = await Notification.findOneAndUpdate(
+        { dedupeKey },
+        { $setOnInsert: { user: admin._id, type: 'vendor_application', title, message,
+          data: { kind: 'admin_new_application', applicationId: id, restaurantName: application.restaurantName || '' },
+          dedupeKey, readAt: null } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      ).lean();
+    } catch (err) {
+      if (err?.code === 11000) notification = await Notification.findOne({ dedupeKey }).lean();
+      else throw err;
+    }
+    // Persisted notification is the source of truth; push is a best-effort alert.
+    if (notification && !notification.readAt) {
+      const result = await pushToUser(admin._id, {
+        type: 'admin_new_application', title, body: message, applicationId: id,
+        restaurantName: application.restaurantName || ''
+      });
+      sent += result.sent || 0;
+    }
+  }
+  return { recipients: admins.length, sent };
+}
+
 /*
  * Kept for backwards compatibility with callers that used the old in-memory
  * timer API. Ring state is now durable, so stopping means deactivating the
@@ -301,6 +339,7 @@ module.exports = {
   pushToUser,
   notifyRestaurantNewOrder,
   notifyAdminsNewOrder,
+  notifyAdminsNewApplication,
   stopRing,
   stopAdminRing,
 };
