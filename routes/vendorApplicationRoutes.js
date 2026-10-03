@@ -13,6 +13,9 @@ const {
   rejectVendorApplication,
   requestVendorApplicationChanges,
   getVendorApplicationConfig,
+  createCustomerVendorApplication,
+  getMyVendorApplication,
+  updateMyVendorApplication,
 } = require('../controllers/vendorApplicationController');
 
 const applicationLimiter = rateLimit({
@@ -23,9 +26,12 @@ const applicationLimiter = rateLimit({
   message: { success: false, message: 'Too many application attempts. Please try again later.' },
 });
 
-// Public seller onboarding.
+// Public configuration only. Customer application operations require a valid JWT.
 router.get('/config', getVendorApplicationConfig);
-router.post('/', applicationLimiter, submitVendorApplication);
+router.post('/', protect, authorize('user'), applicationLimiter, createCustomerVendorApplication);
+router.get('/mine', protect, authorize('user'), getMyVendorApplication);
+router.patch('/mine', protect, authorize('user'), applicationLimiter, updateMyVendorApplication);
+// Legacy token-status endpoint remains for existing applications only.
 router.get('/:id/status', applicationLimiter, getVendorApplicationStatus);
 
 // Admin review workflow.
