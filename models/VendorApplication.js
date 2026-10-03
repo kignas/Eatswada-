@@ -96,8 +96,10 @@ const vendorApplicationSchema = new mongoose.Schema({
   restaurantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Restaurant', default: null },
   reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   reviewedAt: { type: Date, default: null },
-  statusTokenHash: { type: String, required: true, select: false },
-  statusTokenExpiresAt: { type: Date, required: true, select: false },
+  // Legacy public-status token fields remain optional for old applications.
+  // New customer-owned applications use authenticated ownership instead.
+  statusTokenHash: { type: String, required: false, select: false },
+  statusTokenExpiresAt: { type: Date, required: false, select: false },
 }, { timestamps: true });
 
 vendorApplicationSchema.index({ status: 1, createdAt: -1 });
