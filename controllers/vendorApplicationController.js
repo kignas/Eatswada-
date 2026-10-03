@@ -127,6 +127,13 @@ function validateCustomerApplication(body) {
 exports.createCustomerVendorApplication = asyncHandler(async (req,res) => {
   if (!req.user || req.user.role !== 'user') return res.status(403).json({success:false,message:'A customer account is required.'});
   let data; try { data = validateCustomerApplication(req.body); } catch(e) { return res.status(e.status || 400).json({success:false,message:e.message}); }
+  const accountEmail = String(req.user.email || '').trim().toLowerCase();
+  const accountPhone = normalizePhone(req.user.phone);
+  if ((accountEmail && data.email === accountEmail) || (accountPhone && data.phone === accountPhone)) {
+    return res.status(400).json({success:false,message:'Use a separate business email and phone number, not the contact details on your customer account.'});
+  }
+  const existingVendorContact = await User.findOne({ role:'vendor', $or:[{email:data.email},{phone:data.phone}] }).select('_id');
+  if (existingVendorContact) return res.status(409).json({success:false,message:'These business contact details are already linked to a Vendor account. Please use different business contact details.'});
   const existing = await VendorApplication.findOne({ applicant: req.user._id });
   if (existing) return res.status(409).json({success:false,message:'You already have an application. Open your application status to continue.',data:{id:existing._id,status:existing.status}});
   const app = await VendorApplication.create({ ...data, applicant:req.user._id, status:'pending', requestedCommissionRate:commissionRateForDeliveryMode(data.deliveryMode), statusTokenHash:undefined, statusTokenExpiresAt:undefined });
@@ -141,6 +148,11 @@ exports.getMyVendorApplication = asyncHandler(async (req,res) => {
 exports.updateMyVendorApplication = asyncHandler(async (req,res) => {
   if (!req.user || req.user.role !== 'user') return res.status(403).json({success:false,message:'A customer account is required.'});
   let data; try { data = validateCustomerApplication(req.body); } catch(e) { return res.status(e.status || 400).json({success:false,message:e.message}); }
+  const accountEmail = String(req.user.email || '').trim().toLowerCase();
+  const accountPhone = normalizePhone(req.user.phone);
+  if ((accountEmail && data.email === accountEmail) || (accountPhone && data.phone === accountPhone)) return res.status(400).json({success:false,message:'Use a separate business email and phone number, not the contact details on your customer account.'});
+  const existingVendorContact = await User.findOne({ role:'vendor', $or:[{email:data.email},{phone:data.phone}] }).select('_id');
+  if (existingVendorContact) return res.status(409).json({success:false,message:'These business contact details are already linked to a Vendor account. Please use different business contact details.'});
   const app = await VendorApplication.findOne({applicant:req.user._id});
   if (!app) return res.status(404).json({success:false,message:'No restaurant application found.'});
   if (app.status !== 'needs_changes') return res.status(409).json({success:false,message:'Your application can only be edited when Admin requests changes.'});
