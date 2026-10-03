@@ -7,6 +7,7 @@ const User = require('../models/User');
 const Restaurant = require('../models/Restaurant');
 const VendorApplication = require('../models/VendorApplication');
 const { commissionRateForDeliveryMode, commissionPlanForDeliveryMode } = require('../services/commissionService');
+const pushService = require('../services/pushService');
 
 const APPLICATION_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STAFF_MIN_PASSWORD = 10;
@@ -137,6 +138,8 @@ exports.createCustomerVendorApplication = asyncHandler(async (req,res) => {
   const existing = await VendorApplication.findOne({ applicant: req.user._id });
   if (existing) return res.status(409).json({success:false,message:'You already have an application. Open your application status to continue.',data:{id:existing._id,status:existing.status}});
   const app = await VendorApplication.create({ ...data, applicant:req.user._id, status:'pending', requestedCommissionRate:commissionRateForDeliveryMode(data.deliveryMode), statusTokenHash:undefined, statusTokenExpiresAt:undefined });
+  // Do not fail a valid customer submission if an admin push provider is unavailable.
+  pushService.notifyAdminsNewApplication(app).catch(err => console.error('[PUSH] admin-new-application:', err.message));
   return res.status(201).json({success:true,message:'Application submitted for review.',data:customerApplicationView(app)});
 });
 exports.getMyVendorApplication = asyncHandler(async (req,res) => {
@@ -158,6 +161,7 @@ exports.updateMyVendorApplication = asyncHandler(async (req,res) => {
   if (app.status !== 'needs_changes') return res.status(409).json({success:false,message:'Your application can only be edited when Admin requests changes.'});
   Object.assign(app,data,{status:'pending',changeRequest:'',rejectionReason:'',adminNotes:'',reviewedBy:null,reviewedAt:null});
   await app.save();
+  pushService.notifyAdminsNewApplication(app).catch(err => console.error('[PUSH] admin-application-resubmission:', err.message));
   res.json({success:true,message:'Updated application resubmitted for review.',data:customerApplicationView(app)});
 });
 
@@ -319,6 +323,7 @@ exports.submitVendorApplication = asyncHandler(async (req, res) => {
     await application.save();
   }
 
+  pushService.notifyAdminsNewApplication(application).catch(err => console.error('[PUSH] admin-legacy-application:', err.message));
   res.status(201).json({
     success: true,
     message: 'Vendor application submitted successfully. It is now pending admin review.',
