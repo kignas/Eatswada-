@@ -70,6 +70,11 @@ const errorHandler = (err, req, res, next) => {
   else if (err.name === 'JsonWebTokenError') { message = 'Invalid token'; statusCode = 401; }
   else if (err.name === 'TokenExpiredError') { message = 'Token expired'; statusCode = 401; }
 
+  // Firebase ID token rejected (expired/revoked/malformed). This is an
+  // authentication failure, never a server fault — force a clean 401 with a
+  // safe message and never leak the Firebase code or the token.
+  else if (err.isFirebaseAuthError) { message = err.message || 'Session expired or invalid. Please log in again.'; statusCode = 401; }
+
   // Multer upload errors.
   else if (err.name === 'MulterError') {
     message = err.code === 'LIMIT_FILE_SIZE' ? 'Uploaded file is too large.' : 'File upload failed.';
