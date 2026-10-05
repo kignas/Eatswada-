@@ -91,7 +91,11 @@ const register = asyncHandler(async (req, res) => {
   if (!name || name.length < 2) return res.status(400).json({ success:false, message:'Name is required.' });
   if (email && !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ success:false, message:'Enter a valid email address.' });
 
-  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +password');
+  // otp.attempts / otp.lockedUntil are select:false and MUST be requested, or
+  // checkOTP() cannot see the running failed-attempt count and the per-account
+  // lockout below never triggers (an attacker could keep guessing the OTP here
+  // even after /verify-otp locked the account). Same projection as verify-otp.
+  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt +password');
   if (!user) return res.status(400).json({ success:false, message:'Please verify your mobile number first.' });
   if (user.isPhoneVerified && user.password) return res.status(409).json({ success:false, message:'This account already exists. Please log in.' });
   const otpResult = user.checkOTP(otp, 'login');
