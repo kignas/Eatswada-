@@ -21,11 +21,43 @@ function getFirebaseAdmin() {
   return firebaseApp;
 }
 
+// firebase-admin rejects an expired, revoked, malformed or otherwise invalid
+// ID token with a FirebaseAuthError whose `code` is namespaced `auth/*`. That
+// is an authentication failure, not a server fault, so it must map to 401.
+// Server-side/transient codes (internal-error, network-request-failed,
+// certificate-fetch-error, project-not-found) are intentionally NOT listed —
+// those stay as server errors so a Google outage is not reported to the
+// customer as "please log in again".
+const FIREBASE_AUTH_FAILURE_CODES = new Set([
+  'auth/id-token-expired',
+  'auth/id-token-revoked',
+  'auth/argument-error',
+  'auth/invalid-id-token',
+  'auth/invalid-argument',
+  'auth/invalid-user-token',
+  'auth/user-token-expired',
+  'auth/user-disabled',
+  'auth/user-not-found',
+]);
+
 async function verifyFirebaseIdToken(idToken) {
   if (typeof idToken !== 'string' || idToken.length < 100 || idToken.length > 8192) {
     const err = new Error('Valid Firebase ID token is required'); err.statusCode = 400; throw err;
   }
-  return getFirebaseAdmin().auth().verifyIdToken(idToken, true);
+  try {
+    return await getFirebaseAdmin().auth().verifyIdToken(idToken, true);
+  } catch (err) {
+    const code = err && typeof err.code === 'string' ? err.code : '';
+    if (FIREBASE_AUTH_FAILURE_CODES.has(code)) {
+      // Log the Firebase code only — never the token or Firebase's raw message.
+      console.warn(`[firebaseAuth] ID token rejected: ${code}`);
+      const authErr = new Error('Session expired or invalid. Please log in again.');
+      authErr.statusCode = 401;
+      authErr.isFirebaseAuthError = true;
+      throw authErr;
+    }
+    throw err;
+  }
 }
 
 /**
