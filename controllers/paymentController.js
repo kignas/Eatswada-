@@ -15,7 +15,6 @@ const {
   assertConfigured,
   toPaise,
 } = require('../services/paymentService');
-const { RESTAURANT_RESPONSE_WINDOW_MS, deadlinesFrom } = require('../services/orderCancellationPolicy');
 
 function publicPayment(order) {
   return {
@@ -133,10 +132,9 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
   }
 
   const unpaid = { $nin: ['paid', 'refunded'] };
-  const responseDeadline = new Date(Date.now() + RESTAURANT_RESPONSE_WINDOW_MS);
   await Order.updateMany(
     { _id: { $in: ids }, paymentStatus: unpaid, status: { $ne: 'cancelled' } },
-    { $set: { paymentStatus: 'paid', razorpayPaymentId: pid, restaurantResponseDeadline: responseDeadline } }
+    { $set: { paymentStatus: 'paid', razorpayPaymentId: pid } }
   );
   // Cancelled before payment captured: record the money against the order so
   // the refund service can return it.
