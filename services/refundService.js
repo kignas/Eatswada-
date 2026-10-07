@@ -1,5 +1,6 @@
 const Order = require('../models/Order');
-const { refundPayment } = require('./paymentService');
+const { refundPayment, fetchPayment } = require('./paymentService');
+const { recordRestaurantPaymentFeeCharge } = require('./settlementService');
 
 /**
  * Initiate a Razorpay refund for a CANCELLED, PAID order and record the refund
@@ -78,6 +79,37 @@ async function initiateOrderRefund(order, reason = '') {
   await Order.updateOne({ _id: claimed._id }, { $set: { 'refund.amount': amount } });
 
   try {
+    // Razorpay's payment entity exposes the actual gateway fee + tax. For a
+    // restaurant-caused cancellation, allocate only the portion attributable
+    // to this refunded order. This prevents a multi-restaurant checkout from
+    // charging one restaurant for another restaurant's payment cost.
+    let paymentProcessingCost = 0;
+    if (claimed.cancellationResponsibility === 'restaurant') {
+      try {
+        const payment = await fetchPayment(claimed.razorpayPaymentId);
+        const gatewayCostPaise = Math.max(0, Number(payment?.fee || 0) + Number(payment?.tax || 0));
+        const capturedPaise = Math.max(0, Number(payment?.amount || 0));
+        const refundPaise = Math.max(0, Math.round(amount * 100));
+        if (gatewayCostPaise > 0 && capturedPaise > 0 && refundPaise > 0) {
+          paymentProcessingCost = Math.round((gatewayCostPaise * Math.min(refundPaise, capturedPaise) / capturedPaise)) / 100;
+        }
+      } catch (feeErr) {
+        console.error(`[REFUND] could not read Razorpay processing cost for order=${claimed._id}: ${feeErr.message}`);
+      }
+      if (paymentProcessingCost > 0) {
+        await recordRestaurantPaymentFeeCharge(claimed, paymentProcessingCost);
+      }
+      await Order.updateOne({ _id: claimed._id }, {
+        $set: {
+          'refund.paymentProcessingCost': paymentProcessingCost,
+          'refund.restaurantChargeAmount': paymentProcessingCost,
+          'refund.restaurantChargeRecordedAt': paymentProcessingCost > 0 ? new Date() : null,
+          restaurantChargeAmount: paymentProcessingCost,
+          restaurantChargeReason: paymentProcessingCost > 0 ? 'Actual Razorpay payment-processing cost allocated to restaurant-caused cancellation' : '',
+        },
+      });
+    }
+
     const refund = await refundPayment(claimed.razorpayPaymentId, amount, {
       orderId: String(claimed._id),
       reason: cleanReason,

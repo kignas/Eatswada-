@@ -95,4 +95,34 @@ async function applyRefundAdjustment(order, session = null) {
   }
 }
 
-module.exports = { ensureOrderLedger, applyRefundAdjustment, snapshot };
+
+async function recordRestaurantPaymentFeeCharge(order, amount, reason = 'Restaurant non-response caused order cancellation') {
+  const fee = roundCurrency(Math.max(0, Number(amount) || 0));
+  if (!order?._id || !order.restaurant || fee <= 0) return null;
+  const existing = await SettlementLedger.findOne({ order: order._id, source: 'restaurant_charge' }).lean();
+  if (existing) return existing;
+  const restaurant = await Restaurant.findById(order.restaurant).select('owner').lean();
+  if (!restaurant?.owner) return null;
+  try {
+    const docs = await SettlementLedger.create([{
+      restaurant: order.restaurant,
+      vendor: restaurant.owner,
+      order: order._id,
+      orderNumber: order.orderNumber || '',
+      foodSales: 0,
+      commissionRate: Number(order.commission?.rate) || 0,
+      commissionAmount: 0,
+      restaurantNetAmount: 0,
+      adjustmentAmount: -fee,
+      netSettlementAmount: -fee,
+      source: 'restaurant_charge',
+      eligibleAt: new Date(),
+    }]);
+    return docs[0];
+  } catch (err) {
+    if (err?.code === 11000) return SettlementLedger.findOne({ order: order._id, source: 'restaurant_charge' }).lean();
+    throw err;
+  }
+}
+
+module.exports = { ensureOrderLedger, applyRefundAdjustment, recordRestaurantPaymentFeeCharge, snapshot };

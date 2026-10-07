@@ -67,12 +67,13 @@ async function fetchOrderPayments(razorpayOrderId) {
  * Returns the Razorpay refund object; its `status` is 'processed' (instant) or
  * 'pending' (confirmed later via the refund.processed webhook).
  */
-async function refundPayment(paymentId, amountRupees, notes = {}) {
+async function refundPayment(paymentId, amountRupees, notes = {}, speed = 'normal') {
   const instance = getRazorpay();
   const amount = toPaise(amountRupees);
+  const normalizedSpeed = speed === 'optimum' ? 'optimum' : 'normal';
   return instance.payments.refund(String(paymentId), {
     amount,
-    speed: 'normal',
+    speed: normalizedSpeed,
     notes,
   });
 }
