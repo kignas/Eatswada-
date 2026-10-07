@@ -17,7 +17,7 @@ const settlementLedgerSchema = new mongoose.Schema({
   settlementBatch: { type: mongoose.Schema.Types.ObjectId, ref: 'SettlementBatch', default: null, index: true },
   eligibleAt: { type: Date, default: Date.now },
   settledAt: { type: Date, default: null },
-  source: { type: String, enum: ['order_delivery', 'refund_adjustment'], default: 'order_delivery' },
+  source: { type: String, enum: ['order_delivery', 'refund_adjustment', 'restaurant_charge'], default: 'order_delivery' },
   payoutRequest: { type: mongoose.Schema.Types.ObjectId, ref: 'PayoutRequest', default: null, index: true },
 }, { timestamps: true });
 settlementLedgerSchema.index({ order: 1, source: 1 }, { unique: true });

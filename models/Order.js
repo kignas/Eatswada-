@@ -257,6 +257,16 @@ const orderSchema = new mongoose.Schema(
 
     deliveredAt:       { type: Date },
     cancelReason:      { type: String, default: '' },
+    // Server-authoritative cancellation/restaurant-response windows.
+    customerCancellationDeadline: { type: Date, default: null, index: true },
+    restaurantResponseDeadline: { type: Date, default: null, index: true },
+    cancellationResponsibility: {
+      type: String,
+      enum: ['none', 'customer', 'restaurant', 'eatswada'],
+      default: 'none',
+    },
+    restaurantChargeAmount: { type: Number, min: 0, default: 0 },
+    restaurantChargeReason: { type: String, maxlength: 250, default: '' },
     isCancellable: {
       type: Boolean,
       default: true,   // becomes false once 'preparing' or beyond
@@ -279,6 +289,12 @@ const orderSchema = new mongoose.Schema(
       reason:           { type: String, default: '' },
       initiatedAt:      { type: Date, default: null },
       completedAt:      { type: Date, default: null },
+      // Actual Razorpay payment-processing cost allocated to this refunded order.
+      // Includes the gateway fee + tax reported by Razorpay, allocated
+      // proportionally for partial/multi-order refunds.
+      paymentProcessingCost: { type: Number, min: 0, default: 0 },
+      restaurantChargeAmount: { type: Number, min: 0, default: 0 },
+      restaurantChargeRecordedAt: { type: Date, default: null },
     },
 
     rating: {
@@ -391,6 +407,7 @@ orderSchema.index({ user: 1, idempotencyKey: 1 });
 // id. Without these indexes every payment event scanned the whole collection.
 orderSchema.index({ razorpayOrderId: 1 });
 orderSchema.index({ razorpayOrderIdHistory: 1 });
+orderSchema.index({ status: 1, restaurantResponseDeadline: 1 });
 
 /* ── Pre-save: generate order number ── */
 orderSchema.pre('save', async function (next) {
