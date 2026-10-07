@@ -39,7 +39,7 @@ function money(value) {
 
 async function eligibleLedgerSummary(restaurantId, vendorId) {
   const rows = await Ledger.find({ restaurant: restaurantId, vendor: vendorId, status: 'eligible' }).select('netSettlementAmount').lean();
-  return money(rows.reduce((sum, row) => sum + Math.max(0, Number(row.netSettlementAmount) || 0), 0));
+  return Math.max(0, money(rows.reduce((sum, row) => sum + (Number(row.netSettlementAmount) || 0), 0)));
 }
 
 exports.getVendorOnboardingConfig = asyncHandler(async (req, res) => {
@@ -347,10 +347,10 @@ exports.requestVendorWithdrawal = asyncHandler(async (req, res) => {
   if (pending) return res.status(409).json({success:false,message:'A payout request is already in progress.'});
 
   const eligibleRows = await Ledger.find({restaurant:restaurant._id,vendor:req.user._id,status:'eligible'})
-    .select('_id netSettlementAmount')
+    .select('_id netSettlementAmount source')
     .sort({ eligibleAt:1, createdAt:1 })
     .lean();
-  const eligible = money(eligibleRows.reduce((sum,r)=>sum+Math.max(0,Number(r.netSettlementAmount)||0),0));
+  const eligible = Math.max(0, money(eligibleRows.reduce((sum,r)=>sum+(Number(r.netSettlementAmount)||0),0)));
   if (eligible <= 0) return res.status(409).json({success:false,message:'There is no eligible balance available for withdrawal.'});
   if (amount > eligible) return res.status(400).json({success:false,message:`Withdrawal exceeds eligible balance of ₹${eligible}.`});
 
@@ -359,8 +359,13 @@ exports.requestVendorWithdrawal = asyncHandler(async (req, res) => {
   // amount; omitting amount requests the full eligible balance.
   const requestedAmount = hasRequestedAmount ? amount : eligible;
   let running=0; const selected=[];
+  // Negative restaurant-charge adjustments must travel with the payout request;
+  // otherwise the vendor could withdraw positive earnings while leaving the
+  // charge behind indefinitely.
+  const adjustments = eligibleRows.filter(r => Number(r.netSettlementAmount) < 0);
+  for (const row of adjustments) { selected.push(row._id); running=money(running + Number(row.netSettlementAmount)); }
   for (const row of eligibleRows) {
-    const rowAmount=Math.max(0,Number(row.netSettlementAmount)||0);
+    const rowAmount=Number(row.netSettlementAmount)||0;
     if (rowAmount<=0) continue;
     if (running + rowAmount <= requestedAmount + 0.009) { selected.push(row._id); running=money(running+rowAmount); }
     if (Math.abs(running-requestedAmount)<0.01) break;

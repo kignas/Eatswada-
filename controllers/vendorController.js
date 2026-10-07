@@ -13,6 +13,7 @@ const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssi
 const { initiateOrderRefund } = require('../services/refundService');
 const { stopRing } = require('../services/pushService');
 const { getRestaurantCapacity } = require('../services/vendorMarketplaceService');
+const { isRestaurantResponseOverdue } = require('../services/orderCancellationPolicy');
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -159,6 +160,13 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
       message: `Order cannot be accepted from its current status ("${order.status}").`,
     });
   }
+  if (isRestaurantResponseOverdue(order)) {
+    return res.status(409).json({
+      success: false,
+      code: 'RESTAURANT_RESPONSE_WINDOW_EXPIRED',
+      message: 'The 5-minute restaurant response window has expired. This order is being cancelled automatically.',
+    });
+  }
 
   const capacity = await getRestaurantCapacity(req.user.restaurantId);
   if (!capacity) return res.status(404).json({ success:false, message:'Restaurant not found.' });
@@ -235,6 +243,7 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
   }
 
   order.cancelReason = reason;
+  order.cancellationResponsibility = 'none';
   order.advanceStatus('cancelled', `Rejected by restaurant: ${reason}`);
 
   // Launch-fix: persist the rejection FIRST (VersionError → 409 if the

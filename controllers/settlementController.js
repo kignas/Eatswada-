@@ -19,6 +19,16 @@ exports.settle=async(req,res)=>{
       // ledger entries.
       const rows=await Ledger.find({_id:{$in:ids},status:'eligible'}).session(session);
       if(!rows.length){const e=new Error('No eligible ledger entries found.');e.statusCode=409;throw e;}
+      // Never settle a vendor's positive earnings while leaving an eligible
+      // restaurant-caused cancellation charge behind.
+      const groupsRequested=new Set(rows.map(r=>String(r.vendor)+'|'+String(r.restaurant)));
+      const requiredAdjustments=await Ledger.find({status:'eligible',source:'restaurant_charge'}).session(session);
+      for(const adj of requiredAdjustments){
+        const key=String(adj.vendor)+'|'+String(adj.restaurant);
+        if(groupsRequested.has(key) && !ids.some(id=>String(id)===String(adj._id))){
+          const e=new Error('This vendor has an eligible restaurant cancellation charge. Include the charge adjustment in the settlement before paying out positive earnings.');e.statusCode=409;throw e;
+        }
+      }
       const byVendor=new Map();
       for(const r of rows){const k=String(r.vendor)+'|'+String(r.restaurant);if(!byVendor.has(k))byVendor.set(k,[]);byVendor.get(k).push(r)}
       const batches=[];

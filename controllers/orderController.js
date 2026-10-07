@@ -26,6 +26,7 @@ const { notifyOrderStatus } = require('../services/notificationService');
 const { initiateOrderRefund } = require('../services/refundService');
 const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE } = require('../services/commissionService');
 const { ensureOrderLedger } = require('../services/settlementService');
+const { deadlinesFrom, isWithinCustomerCancellationWindow } = require('../services/orderCancellationPolicy');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -588,6 +589,8 @@ const createOrder = asyncHandler(async (req, res) => {
         deliveryInstructions: sharedDeliveryInstructions,
         tipAmount: tip,
         total: Math.max(0, p.subtotal - Number(p.discount || 0)) + p.deliveryFee + tip,
+        customerCancellationDeadline: deadlinesFrom(new Date()).customerCancellationDeadline,
+        restaurantResponseDeadline: null,
         paymentMethod,
         paymentStatus: 'pending',
         ...(idempotencyKey ? { idempotencyKey } : {}),
@@ -712,23 +715,23 @@ const cancelOrder = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id });
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-  // A customer may cancel any time BEFORE the kitchen starts preparing. The
-  // model's isCancellable flag is the single source of truth — advanceStatus
-  // flips it false at 'preparing' and beyond — so the allowed window is
-  // 'placed' and 'confirmed' (restaurant accepted but not yet cooking).
+  // Customer cancellation is deliberately limited to the first 30 seconds
+  // after order creation. This is server-authoritative; the frontend timer is
+  // only a convenience and cannot extend the window.
   if (order.status === 'cancelled') {
     return res.status(409).json({ success: false, message: 'This order is already cancelled.' });
   }
-  if (!order.isCancellable) {
+  if (!order.isCancellable || !isWithinCustomerCancellationWindow(order)) {
     return res.status(409).json({
       success: false,
-      message: 'This order is already being prepared and can no longer be cancelled. Please contact support if you need help.',
+      message: 'The 30-second cancellation window has expired or this order is already being prepared.',
     });
   }
 
   const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'Cancelled by customer';
   order.advanceStatus('cancelled', reason);
   order.cancelReason = reason;
+  order.cancellationResponsibility = 'customer';
 
   // Launch-fix: persist the cancellation FIRST. If the restaurant accepted the
   // order a moment earlier, this save fails with VersionError (409) and no
