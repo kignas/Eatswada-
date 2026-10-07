@@ -15,6 +15,7 @@ const {
   assertConfigured,
   toPaise,
 } = require('../services/paymentService');
+const { RESTAURANT_RESPONSE_WINDOW_MS, deadlinesFrom } = require('../services/orderCancellationPolicy');
 
 function publicPayment(order) {
   return {
@@ -132,9 +133,10 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
   }
 
   const unpaid = { $nin: ['paid', 'refunded'] };
+  const responseDeadline = new Date(Date.now() + RESTAURANT_RESPONSE_WINDOW_MS);
   await Order.updateMany(
     { _id: { $in: ids }, paymentStatus: unpaid, status: { $ne: 'cancelled' } },
-    { $set: { paymentStatus: 'paid', razorpayPaymentId: pid } }
+    { $set: { paymentStatus: 'paid', razorpayPaymentId: pid, restaurantResponseDeadline: responseDeadline } }
   );
   // Cancelled before payment captured: record the money against the order so
   // the refund service can return it.
@@ -228,6 +230,41 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Payment amount or currency does not match the server total.' });
   }
   if (payment.status !== 'captured') {
+    // A terminal Razorpay failure must never leave a customer-facing order
+    // looking live/placed. The order is cancelled here as a second line of
+    // defence in case the Razorpay payment.failed webhook is delayed/missed.
+    if (payment.status === 'failed') {
+      await Order.updateMany(
+        {
+          _id: { $in: orders.map(o => o._id) },
+          razorpayOrderId: storedRazorpayOrderId,
+          paymentStatus: { $nin: ['paid', 'refunded'] },
+          status: { $ne: 'cancelled' },
+        },
+        {
+          $set: {
+            paymentStatus: 'failed',
+            razorpayPaymentId: String(razorpayPaymentId),
+            status: 'cancelled',
+            cancelReason: 'Payment failed',
+            isCancellable: false,
+          },
+          $push: {
+            statusHistory: {
+              status: 'cancelled',
+              note: 'Payment failed; order cancelled automatically',
+              at: new Date(),
+            },
+          },
+        }
+      );
+      return res.status(409).json({
+        success: false,
+        message: 'Payment failed. The order has been cancelled.',
+        paymentStatus: 'failed',
+        orderStatus: 'cancelled',
+      });
+    }
     return res.status(409).json({ success: false, message: `Payment is ${payment.status || 'not captured yet'}.`, paymentStatus: payment.status || 'pending' });
   }
 
@@ -349,9 +386,64 @@ exports.retryPayment = asyncHandler(async (req, res) => {
 });
 
 exports.paymentStatus = asyncHandler(async (req, res) => {
-  const order = await Order.findOne({ _id: req.params.id, user: req.user._id }).select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total');
+  const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
+    .select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
-  res.json({ success: true, data: { ...publicPayment(order), orderId: order._id, paymentId: order.razorpayPaymentId || null } });
+
+  // Reconcile terminal Razorpay failures even if the webhook arrived late or
+  // was missed. This prevents an unpaid online order from remaining visibly
+  // `placed` on My Orders / tracking. A still-open Razorpay order is left alone.
+  if (order.paymentMethod !== 'cod' && order.paymentStatus === 'pending' && order.razorpayOrderId && order.status !== 'cancelled') {
+    try {
+      const attempts = await fetchOrderPayments(order.razorpayOrderId);
+      const captured = attempts.find(p => p.status === 'captured');
+      if (captured) {
+        const expectedAmount = Math.round(Number(order.total || 0) * 100);
+        if (Number(captured.amount) === expectedAmount && String(captured.currency || '') === 'INR') {
+          await markCheckoutPaid([order], captured.id, captured.amount);
+          const fresh = await Order.findById(order._id).select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason');
+          return res.json({ success: true, data: { ...publicPayment(fresh), orderId: fresh._id, paymentId: fresh.razorpayPaymentId || null, orderStatus: fresh.status, cancelReason: fresh.cancelReason || '' } });
+        }
+      }
+
+      const failed = attempts.find(p => p.status === 'failed');
+      if (failed && attempts.length > 0 && attempts.every(p => p.status === 'failed')) {
+        await Order.updateOne(
+          { _id: order._id, razorpayOrderId: order.razorpayOrderId, paymentStatus: 'pending', status: { $ne: 'cancelled' } },
+          {
+            $set: {
+              paymentStatus: 'failed',
+              razorpayPaymentId: String(failed.id || ''),
+              status: 'cancelled',
+              cancelReason: 'Payment failed',
+              isCancellable: false,
+            },
+            $push: {
+              statusHistory: {
+                status: 'cancelled',
+                note: 'Payment failed; order cancelled automatically',
+                at: new Date(),
+              },
+            },
+          }
+        );
+      }
+    } catch (err) {
+      console.warn(`[PAYMENT] status reconciliation failed for ${order.razorpayOrderId}: ${err.message}`);
+    }
+  }
+
+  const fresh = await Order.findById(order._id).select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason');
+  res.json({
+    success: true,
+    data: {
+      ...publicPayment(fresh),
+      orderId: fresh._id,
+      paymentId: fresh.razorpayPaymentId || null,
+      orderStatus: fresh.status,
+      cancelReason: fresh.cancelReason || '',
+    },
+  });
 });
 
 exports.handleWebhook = asyncHandler(async (req, res) => {
