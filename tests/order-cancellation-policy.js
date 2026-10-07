@@ -1,0 +1,13 @@
+'use strict';
+const assert = require('node:assert/strict');
+const fs = require('fs'); const path = require('path');
+const root = path.join(__dirname, '..');
+const read = p => fs.readFileSync(path.join(root,p),'utf8');
+assert.match(read('services/orderCancellationPolicy.js'), /30 \* 1000/);
+assert.match(read('services/orderCancellationPolicy.js'), /5 \* 60 \* 1000/);
+assert.match(read('controllers/orderController.js'), /isWithinCustomerCancellationWindow/);
+assert.match(read('controllers/vendorController.js'), /isRestaurantResponseOverdue/);
+assert.match(read('services/restaurantOrderTimeoutService.js'), /restaurant did not respond/i);
+assert.match(read('models/SettlementLedger.js'), /restaurant_charge/);
+assert.match(read('services/refundService.js'), /payment\?\.fee/);
+console.log('Order cancellation policy checks: PASS');
