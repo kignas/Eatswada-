@@ -264,14 +264,22 @@ exports.retryPayment = asyncHandler(async (req, res) => {
   if (orders[0].paymentMethod === 'cod') return res.status(400).json({ success: false, message: 'COD orders do not need online payment.' });
   if (orders.some(o => isSettledPayment(o))) return res.status(409).json({ success: false, message: 'This checkout is already paid.' });
 
-  // Cancelled orders are not charged again.
+  // A payment-failed order is intentionally stored as `cancelled` so it can
+  // never enter the restaurant's live queue. It is still retryable by the
+  // same customer. Other cancelled orders remain permanently cancelled.
+  const retryableCancelled = orders.filter(o =>
+    o.status === 'cancelled' &&
+    o.paymentStatus === 'failed' &&
+    String(o.cancelReason || '') === 'Payment failed'
+  );
   const live = orders.filter(o => o.status !== 'cancelled');
-  if (!live.length) return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
+  const retryable = [...live, ...retryableCancelled];
+  if (!retryable.length) return res.status(409).json({ success: false, message: 'This order has been cancelled.' });
 
   // Launch-fix: before opening a NEW Razorpay order, check whether the current
   // one was actually paid (UPI can confirm late). If so, record that payment
   // instead of asking the customer to pay twice.
-  const previousRazorpayOrderId = live[0].razorpayOrderId || '';
+  const previousRazorpayOrderId = retryable[0].razorpayOrderId || '';
   if (previousRazorpayOrderId) {
     let captured = null;
     try {
@@ -290,11 +298,30 @@ exports.retryPayment = asyncHandler(async (req, res) => {
     }
   }
 
-  const amount = live.reduce((sum, o) => sum + Number(o.total || 0), 0);
-  const rpOrder = await createRazorpayOrder(amount, live[0].orderNumber || live[0]._id, {
+  const amount = retryable.reduce((sum, o) => sum + Number(o.total || 0), 0);
+  const rpOrder = await createRazorpayOrder(amount, retryable[0].orderNumber || retryable[0]._id, {
     userId: String(req.user._id),
-    orderIds: live.map(o => String(o._id)).join(',').slice(0, 240),
+    orderIds: retryable.map(o => String(o._id)).join(',').slice(0, 240),
   });
+
+  // Revive only orders that were cancelled specifically because the previous
+  // payment failed. They become `placed`/`pending` for the NEW Razorpay order.
+  // Genuine customer/restaurant cancellations stay cancelled.
+  const retryableIds = retryableCancelled.map(o => o._id);
+  if (retryableIds.length) {
+    await Order.updateMany(
+      {
+        _id: { $in: retryableIds },
+        status: 'cancelled',
+        paymentStatus: 'failed',
+        cancelReason: 'Payment failed',
+      },
+      {
+        $set: { status: 'placed', paymentStatus: 'pending', cancelReason: '', isCancellable: true, razorpayPaymentId: '' },
+        $push: { statusHistory: { status: 'placed', note: 'Payment retry started', at: new Date() } },
+      }
+    );
+  }
 
   // Keep the old Razorpay order id in history so a late capture on it is
   // still matched (and refunded if this new payment also succeeds).
@@ -304,14 +331,14 @@ exports.retryPayment = asyncHandler(async (req, res) => {
   };
   const result = await Order.updateMany(
     {
-      _id: { $in: live.map(o => o._id) },
+      _id: { $in: retryable.map(o => o._id) },
       razorpayOrderId: previousRazorpayOrderId,
       paymentStatus: { $nin: ['paid', 'refunded'] },
       status: { $ne: 'cancelled' },
     },
     update
   );
-  if (result.modifiedCount !== live.length) {
+  if (result.modifiedCount !== retryable.length) {
     return res.status(409).json({ success: false, message: 'Payment status changed while retrying. Please refresh My Orders.' });
   }
 
@@ -399,11 +426,32 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
   if (event.event === 'payment.captured' || paymentEntity.status === 'captured') {
     await markCheckoutPaid(orders, paymentId, actualAmount);
   } else if (event.event === 'payment.failed') {
-    // Only the orders whose CURRENT Razorpay order failed. A failure on an old
-    // (retried) Razorpay order must not mark the new attempt as failed.
+    // A failed online payment must NEVER remain a live `placed` order.
+    // Mark only the orders belonging to this CURRENT Razorpay attempt as
+    // payment-failed/cancelled. Old attempts are kept in history so a late
+    // event cannot cancel a newer retry.
     await Order.updateMany(
-      { _id: { $in: orders.map(o => o._id) }, razorpayOrderId, paymentStatus: { $nin: ['paid', 'refunded'] } },
-      { $set: { paymentStatus: 'failed', razorpayPaymentId: paymentId } }
+      {
+        _id: { $in: orders.map(o => o._id) },
+        razorpayOrderId,
+        paymentStatus: { $nin: ['paid', 'refunded'] },
+      },
+      {
+        $set: {
+          paymentStatus: 'failed',
+          razorpayPaymentId: paymentId,
+          status: 'cancelled',
+          cancelReason: 'Payment failed',
+          isCancellable: false,
+        },
+        $push: {
+          statusHistory: {
+            status: 'cancelled',
+            note: 'Payment failed; order cancelled automatically',
+            at: new Date(),
+          },
+        },
+      }
     );
   }
 
