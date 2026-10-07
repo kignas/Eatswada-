@@ -250,12 +250,15 @@ const PORT = process.env.PORT || 5000;
 let server;
 
 const { startAssignmentRecovery } = require('./services/riderAssignmentService');
+const { startRestaurantResponseRecovery } = require('./services/restaurantOrderTimeoutService');
 
 connectDB().then(() => {
   // Durable safety net for rider auto-assignment: an in-process setTimeout is
   // lost on restart/sleep, so on boot (and periodically) sweep for orders left
   // in 'assigned' past the accept window and reassign them.
   startAssignmentRecovery();
+  // Durable safety net for the restaurant's 5-minute response window.
+  startRestaurantResponseRecovery();
 
   if (perfDiagnostics.enabled) perfDiagnostics.start(mongoose.connection);
 

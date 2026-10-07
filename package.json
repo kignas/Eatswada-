@@ -23,6 +23,7 @@
     "loadtest": "node loadtest/lunch-rush.js",
     "loadtest:cleanup": "node loadtest/prepare-staging.js cleanup",
     "test:payment-fixes": "node tests/payment-fixes.js",
+    "test:order-cancellation-policy": "node tests/order-cancellation-policy.js",
     "test:error-handling": "node tests/error-middleware-security.js",
     "test:otp-lockout": "node tests/otp-lockout.js",
     "test:firebase-auth": "node tests/firebase-auth-error.js",
