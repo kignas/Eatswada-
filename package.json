@@ -27,7 +27,8 @@
     "test:error-handling": "node tests/error-middleware-security.js",
     "test:otp-lockout": "node tests/otp-lockout.js",
     "test:firebase-auth": "node tests/firebase-auth-error.js",
-    "test:vendor-ecosystem": "node tests/vendor-ecosystem-contract.js"
+    "test:vendor-ecosystem": "node tests/vendor-ecosystem-contract.js",
+    "test:restaurant-hours": "node tests/restaurant-hours-schedule.js && node tests/restaurant-hours-api-contract.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
