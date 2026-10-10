@@ -147,6 +147,10 @@ function calculateItemServerPrice(menuItem, requestedCustomizations) {
   let extraTotal = 0;
   let portionPrice = null;
   const selectedByGroup = {};
+  // Backward compatibility: older clients submitted customization selections
+  // as a flat array of labels (for example, ["Extra cheese"]). Keep accepting
+  // that format, while newer clients can send group-aware selections.
+  const legacySelectedLabels = new Set();
   const entries = Array.isArray(requestedCustomizations)
     ? requestedCustomizations
     : (requestedCustomizations && typeof requestedCustomizations === 'object'
@@ -154,6 +158,11 @@ function calculateItemServerPrice(menuItem, requestedCustomizations) {
       : []);
 
   for (const entry of entries) {
+    if (typeof entry === 'string' || typeof entry === 'number') {
+      const label = String(entry).trim();
+      if (label) legacySelectedLabels.add(label);
+      continue;
+    }
     if (!entry || typeof entry !== 'object') continue;
     const title = String(entry.title || '');
     if (!title) continue;
@@ -167,8 +176,13 @@ function calculateItemServerPrice(menuItem, requestedCustomizations) {
   // Prices always come from the saved menu document, never from client-supplied prices.
   for (const group of (Array.isArray(menuItem.customizations) ? menuItem.customizations : [])) {
     const title = String(group.title || '');
-    const labels = selectedByGroup[title] || [];
     const options = Array.isArray(group.options) ? group.options : [];
+    // Merge flat legacy labels into each matching group, matching the old
+    // server behavior. Prices still come exclusively from the saved menu.
+    const legacyLabelsForGroup = options
+      .filter(option => legacySelectedLabels.has(String(option.label)))
+      .map(option => String(option.label));
+    const labels = [...(selectedByGroup[title] || []), ...legacyLabelsForGroup];
     if (group.pricingMode === 'portion' && labels.length > 1) {
       const err = new Error(`Please choose only one portion for "${title}".`);
       err.statusCode = 400;
