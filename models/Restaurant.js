@@ -12,8 +12,10 @@ const mongoose = require('mongoose');
  *  - ratingCount is now a Number (was String "100+" which violated Rule #4).
  *  - owner is required — a restaurant without an owner breaks vendor queries.
  *  - isActive is the soft-delete flag. Hard deletes are banned.
- *  - availability.isOpen is the source of truth for open/closed; the legacy
- *    top-level isOpen mirrors it (kept for existing queries elsewhere).
+ *  - availability.isOpen is the stored manual availability flag; when
+ *    availability.autoHours is enabled, services/restaurantHours computes the
+ *    effective schedule state at request/order time without periodic DB writes.
+ *    The legacy top-level isOpen mirrors the stored manual flag for old queries.
  */
 const restaurantSchema = new mongoose.Schema(
   {
@@ -307,7 +309,8 @@ const restaurantSchema = new mongoose.Schema(
     // ── Restaurant Availability ──
     // Scalable structure: supports Open / Closed Today / Temporarily Closed now,
     // Auto-hours uses the weekly schedule in the platform business timezone
-    // (Asia/Kolkata). Manual status still takes precedence when autoHours is off.
+    // (Asia/Kolkata). Explicit temporary/closed-today overrides always take
+    // precedence; otherwise autoHours determines availability from this schedule.
     availability: {
       // Manual real-time toggle. This is the source of truth for open/closed.
       isOpen: {
@@ -321,12 +324,14 @@ const restaurantSchema = new mongoose.Schema(
         enum: ['open', 'closed_today', 'temporarily_closed', 'busy'],
         default: 'open',
       },
-      // When true, customer-facing operational status is computed from openingHours.
+      // When true, customer-facing and ordering status is computed from openingHours,
+      // except explicit closed_today / temporarily_closed manual overrides.
       autoHours: {
         type: Boolean,
         default: false,
       },
-      // "HH:MM" 24-hour format, e.g. "09:00". Reserved for future auto-hours use.
+      // Legacy single-window fields kept for API compatibility. The weekly
+      // openingHours map is authoritative when autoHours is enabled.
       opensAt: {
         type: String,
         default: '',
