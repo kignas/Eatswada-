@@ -85,6 +85,7 @@ const menuItemSchema = new mongoose.Schema(
         required: { type: Boolean, default: false },
         minSelect: { type: Number, default: 0 },   // 0 = optional
         maxSelect: { type: Number, default: 1 },   // 1 = single-select; N = "select up to N"
+        pricingMode: { type: String, enum: ['extra', 'portion'], default: 'extra' }, // extra adds to base; portion option price replaces base
         options: [
           {
             label: String,
