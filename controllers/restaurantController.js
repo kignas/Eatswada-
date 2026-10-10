@@ -113,7 +113,7 @@ const MENU_ITEM_DEFAULTS = schemaDefaults(MenuItem.schema, {
   inStock: true,
   sortOrder: 0,
 });
-const MENU_GROUP_DEFAULTS = schemaDefaults(MENU_CUSTOMIZATION_SCHEMA, { required: false, minSelect: 0, maxSelect: 1 });
+const MENU_GROUP_DEFAULTS = schemaDefaults(MENU_CUSTOMIZATION_SCHEMA, { required: false, minSelect: 0, maxSelect: 1, pricingMode: 'extra' });
 const MENU_OPTION_DEFAULTS = schemaDefaults(childSchema(MENU_CUSTOMIZATION_SCHEMA, 'options'), { extraPrice: 0, isVeg: true });
 
 function fillMissing(target, defaults) {

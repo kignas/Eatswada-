@@ -50,20 +50,22 @@ function round2(value) {
  */
 function resolveCustomizations(menuItem, raw) {
   const groups = Array.isArray(menuItem.customizations) ? menuItem.customizations : [];
-  if (!groups.length) return { resolved: [], extra: 0, error: null };
+  if (!groups.length) return { resolved: [], extra: 0, basePriceOverride: null, error: null };
 
   const picked = {};
-  const arr = Array.isArray(raw) ? raw : [];
+  const arr = Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? Object.entries(raw).map(([title, value]) => ({ title, selected: Array.isArray(value) ? value : [value] })) : []);
   for (const entry of arr) {
     if (!entry || typeof entry !== 'object') continue;
     const title = String(entry.title || '');
     let labels = [];
     if (Array.isArray(entry.selected)) labels = entry.selected.map(String);
     else if (Array.isArray(entry.options)) labels = entry.options.map(o => String(o && o.label != null ? o.label : o));
-    picked[title] = labels;
+    else if (entry.label != null) labels = [String(entry.label)];
+    if (title) picked[title] = [...(picked[title] || []), ...labels];
   }
 
   let extra = 0;
+  let basePriceOverride = null;
   const resolved = [];
   for (const g of groups) {
     const title = String(g.title || '');
@@ -71,23 +73,24 @@ function resolveCustomizations(menuItem, raw) {
     const min = g.required ? Math.max(1, Number(g.minSelect || 1)) : Number(g.minSelect || 0);
     const max = Number(g.maxSelect || 1) || 1;
     const chosenLabels = picked[title] || [];
+    const pricingMode = g.pricingMode === 'portion' ? 'portion' : 'extra';
 
-    if (chosenLabels.length < min)
-      return { error: `Please choose ${min > 1 ? min + ' options' : 'an option'} for "${title}".` };
-    if (chosenLabels.length > max)
-      return { error: `You can select up to ${max} for "${title}".` };
+    if (chosenLabels.length < min) return { error: `Please choose ${min > 1 ? min + ' options' : 'an option'} for "${title}".` };
+    if (chosenLabels.length > max) return { error: `You can select up to ${max} for "${title}".` };
+    if (pricingMode === 'portion' && chosenLabels.length > 1) return { error: `Please choose only one portion for "${title}".` };
 
     const chosen = [];
     for (const lbl of chosenLabels) {
       const opt = opts.find(o => String(o.label) === String(lbl));
       if (!opt) return { error: `"${lbl}" isn't a valid choice for "${title}".` };
-      const p = Number(opt.extraPrice || 0);
-      extra += p;
+      const p = Math.max(0, Number(opt.extraPrice || 0));
+      if (pricingMode === 'portion') basePriceOverride = p;
+      else extra += p;
       chosen.push({ label: opt.label, extraPrice: p, isVeg: opt.isVeg !== false });
     }
-    if (chosen.length) resolved.push({ title, options: chosen });
+    if (chosen.length) resolved.push({ title, pricingMode, options: chosen });
   }
-  return { resolved, extra: round2(extra), error: null };
+  return { resolved, extra: round2(extra), basePriceOverride: basePriceOverride == null ? null : round2(basePriceOverride), error: null };
 }
 
 /**
@@ -337,9 +340,9 @@ const addToCart = asyncHandler(async (req, res) => {
 
   // Multi-restaurant carts are now ALLOWED. Items from a different restaurant
   // simply form a new group — no rejection.
-  const { resolved, extra, error } = resolveCustomizations(menuItem, customizations);
+  const { resolved, extra, basePriceOverride, error } = resolveCustomizations(menuItem, customizations);
   if (error) return res.status(400).json({ success: false, message: error });
-  const unitPrice = round2(Number(menuItem.price) + extra);
+  const unitPrice = round2((basePriceOverride == null ? Number(menuItem.price) : basePriceOverride) + extra);
   const sig = JSON.stringify(resolved);
 
   // Same item + same customizations merges; a differently-customized item
@@ -361,8 +364,8 @@ const addToCart = asyncHandler(async (req, res) => {
       restaurant: ownerRestaurant._id,          // authoritative
       restaurantName: ownerRestaurant.name,     // snapshot (display only)
       name:     menuItem.name,
-      price:    unitPrice,                       // base + priced customizations
-      originalPrice: (Number(menuItem.originalPrice) > Number(menuItem.price)) ? round2(Number(menuItem.originalPrice) + extra) : null,
+      price:    unitPrice,                       // portion price (when selected) + priced add-ons
+      originalPrice: (basePriceOverride == null && Number(menuItem.originalPrice) > Number(menuItem.price)) ? round2(Number(menuItem.originalPrice) + extra) : null,
       image:    menuItem.image,
       isVeg:    menuItem.isVeg,
       quantity: requestedQuantity,
