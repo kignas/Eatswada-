@@ -3,6 +3,7 @@ const Cart       = require('../models/Cart');
 const MenuItem   = require('../models/Menu');
 const Restaurant = require('../models/Restaurant');
 const asyncHandler = require('express-async-handler');
+const { operationalStatus } = require('../services/restaurantHours');
 const {
   DELIVERY_RULES,
   calculateDeliveryFee,
@@ -322,10 +323,19 @@ const addToCart = asyncHandler(async (req, res) => {
 
   // AUTHORITATIVE restaurant resolution — from the Menu document, never the client.
   const ownerRestaurant = menuItem.restaurantId
-    ? await Restaurant.findById(menuItem.restaurantId).select('name image isActive availability isOpen')
+    ? await Restaurant.findById(menuItem.restaurantId).select('name image isActive availability isOpen openingHours')
     : null;
-  if (!ownerRestaurant || !ownerRestaurant.isActive || ownerRestaurant.availability?.isOpen === false)
-    return res.status(409).json({ success: false, message: 'This restaurant is currently closed.' });
+  const restaurantOperational = ownerRestaurant ? operationalStatus(ownerRestaurant) : null;
+  if (!ownerRestaurant || !ownerRestaurant.isActive || !restaurantOperational.open) {
+    const openingMessage = restaurantOperational?.nextOpening?.message;
+    return res.status(409).json({
+      success: false,
+      message: ownerRestaurant && !restaurantOperational?.open && openingMessage
+        ? `This restaurant is currently closed. ${openingMessage}.`
+        : 'This restaurant is currently closed.',
+      ...(restaurantOperational ? { operational: restaurantOperational } : {}),
+    });
+  }
 
   const requestedQuantity = Number(quantity);
   if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > 99)

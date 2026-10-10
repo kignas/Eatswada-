@@ -14,6 +14,7 @@ const { initiateOrderRefund } = require('../services/refundService');
 const { stopRing } = require('../services/pushService');
 const { getRestaurantCapacity } = require('../services/vendorMarketplaceService');
 const { isRestaurantResponseOverdue } = require('../services/orderCancellationPolicy');
+const { buildOpeningHoursUpdate, operationalStatus, getLocalContext } = require('../services/restaurantHours');
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -441,7 +442,10 @@ exports.getRestaurantProfile = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
   const restaurant = await Restaurant.findById(req.user.restaurantId);
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant profile not found.' });
-  res.status(200).json({ success: true, data: restaurant });
+  const now = new Date();
+  const plain = restaurant.toObject({ virtuals: true });
+  plain.operational = operationalStatus(plain, now, getLocalContext(now));
+  res.status(200).json({ success: true, data: plain });
 });
 
 
@@ -450,47 +454,49 @@ exports.updateVendorAvailability = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
   const restaurant = await Restaurant.findOne({ _id: req.user.restaurantId, owner: req.user._id });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant profile not found.' });
+
   const status = String(req.body?.status || '').trim();
-  const allowed = ['open','closed_today','temporarily_closed','busy'];
-  if (!allowed.includes(status)) return res.status(400).json({ success:false, message:`status must be one of: ${allowed.join(', ')}` });
+  const allowed = ['open', 'closed_today', 'temporarily_closed', 'busy'];
+  if (!allowed.includes(status)) return res.status(400).json({ success: false, message: `status must be one of: ${allowed.join(', ')}` });
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'autoHours') && typeof req.body.autoHours !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'autoHours must be a boolean.' });
+  }
+
   const open = status === 'open' || status === 'busy';
   const update = { isOpen: open, 'availability.isOpen': open, 'availability.status': status, 'availability.closedReason': open ? '' : status };
   if (typeof req.body?.autoHours === 'boolean') update['availability.autoHours'] = req.body.autoHours;
-  const updated = await Restaurant.findByIdAndUpdate(restaurant._id, { $set:update }, {new:true,runValidators:true});
-  res.json({success:true,data:updated});
+  const updated = await Restaurant.findByIdAndUpdate(restaurant._id, { $set: update }, { new: true, runValidators: true });
+  const now = new Date();
+  res.json({ success: true, data: updated, operational: operationalStatus(updated, now, getLocalContext(now)) });
 });
+
 exports.updateBusinessHours = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;
   const restaurant = await Restaurant.findOne({ _id: req.user.restaurantId, owner: req.user._id });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant profile not found.' });
 
-  const days = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday'];
-  const hours = (req.body && req.body.openingHours) || {};
-  const timeRe = /^([01]\d|2[0-3]):[0-5]\d$/;
-  const set = {};
-
-  for (const d of days) {
-    const day = hours[d];
-    if (!day) continue;
-    const closed = !!day.closed;
-    set[`openingHours.${d}.closed`] = closed;
-    if (!closed) {
-      if (!timeRe.test(String(day.opensAt || '')) || !timeRe.test(String(day.closesAt || ''))) {
-        return res.status(400).json({ success: false, message: `Invalid time for ${d} — use 24h HH:MM.` });
-      }
-      set[`openingHours.${d}.opensAt`] = day.opensAt;
-      set[`openingHours.${d}.closesAt`] = day.closesAt;
-    }
+  const body = req.body || {};
+  const update = {};
+  if (Object.prototype.hasOwnProperty.call(body, 'openingHours')) {
+    const hoursCheck = buildOpeningHoursUpdate(body.openingHours);
+    if (hoursCheck.error) return res.status(400).json({ success: false, message: hoursCheck.error });
+    Object.assign(update, hoursCheck.set);
   }
-
-  if (!Object.keys(set).length) {
-    return res.status(400).json({ success: false, message: 'No opening hours provided.' });
+  if (Object.prototype.hasOwnProperty.call(body, 'autoHours')) {
+    if (typeof body.autoHours !== 'boolean') return res.status(400).json({ success: false, message: 'autoHours must be a boolean.' });
+    update['availability.autoHours'] = body.autoHours;
+  }
+  if (!Object.keys(update).length) {
+    return res.status(400).json({ success: false, message: 'Provide openingHours and/or autoHours.' });
   }
 
   const updated = await Restaurant.findByIdAndUpdate(
-    restaurant._id, { $set: set }, { new: true, runValidators: true }
+    restaurant._id, { $set: update }, { new: true, runValidators: true }
   );
-  res.json({ success: true, data: updated });
+  const now = new Date();
+  const plain = updated.toObject({ virtuals: true });
+  plain.operational = operationalStatus(plain, now, getLocalContext(now));
+  res.json({ success: true, data: plain });
 });
 exports.getVendorReviews = asyncHandler(async (req, res) => {
   if (!assertVendorPayload(req, res)) return;

@@ -7,6 +7,13 @@ const Order = require('../models/Order');
 const Cart = require('../models/Cart');
 const User = require('../models/User');
 const RestaurantDeletionAudit = require('../models/RestaurantDeletionAudit');
+const {
+  operationalStatus,
+  getLocalContext,
+  buildOpeningHoursUpdate,
+  validTime,
+  withOperationalAvailability,
+} = require('../services/restaurantHours');
 
 const clampPage = (value, fallback = 1) => Math.max(1, Number(value) || fallback);
 const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
@@ -39,6 +46,7 @@ const CUSTOMER_LIST_PROJECTION = {
   isVeg: 1,
   isOpen: 1,
   availability: 1,
+  openingHours: 1,
   isActive: 1,
   isFeatured: 1,
   isBestSeller: 1,
@@ -201,12 +209,16 @@ const getRestaurants = asyncHandler(async (req, res) => {
   const total = (result && result.total && result.total[0] && result.total[0].n) || 0;
   const restaurants = (result && result.data) || [];
 
+  const now = new Date();
+  const hoursContext = getLocalContext(now);
   res.json({
     success: true,
     page: Number(page),
     pages: Math.ceil(total / limit),
     total,
-    data: restaurants
+    // Effective status is computed at request time, without writes or timers.
+    // The indexed aggregation/sort and pagination remain unchanged.
+    data: restaurants.map(restaurant => withOperationalAvailability(restaurant, now, hoursContext))
   });
 });
 
@@ -260,7 +272,8 @@ const getRestaurantById = asyncHandler(async (req, res) => {
   // restaurants are excluded now.
   const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true, approvalStatus: 'approved' });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
-  res.json({ success: true, data: restaurant });
+  const now = new Date();
+  res.json({ success: true, data: withOperationalAvailability(restaurant, now, getLocalContext(now)) });
 });
 
 const getMenu = asyncHandler(async (req, res) => {
@@ -359,7 +372,10 @@ async function buildUnder99Payload() {
     approvalStatus: 'approved',
     $or: [
       { 'availability.isOpen': true },
-      { isOpen: true }
+      { isOpen: true },
+      // Automatic-hours restaurants are evaluated in application code below;
+      // persisted isOpen can be stale because schedules never write on a timer.
+      { 'availability.autoHours': true }
     ],
   })
     .select([
@@ -378,8 +394,18 @@ async function buildUnder99Payload() {
       'freeDeliveryAbove',
       'freeDeliveryEnabled',
       'deliveryFee',
+      'isOpen',
+      'availability',
+      'openingHours',
     ].join(' '))
     .lean();
+
+  const under99Now = new Date();
+  const under99Context = getLocalContext(under99Now);
+  const orderableVisibleRestaurants = visibleRestaurants.filter(restaurant =>
+    operationalStatus(restaurant, under99Now, under99Context).open
+  );
+  visibleRestaurants.splice(0, visibleRestaurants.length, ...orderableVisibleRestaurants);
 
   if (!visibleRestaurants.length) {
     return { success: true, count: 0, data: [] };
@@ -449,10 +475,15 @@ async function buildUnder99Payload() {
       const menu = menusByRestaurant.get(key) || [];
       if (!menu.length) return null;
 
+      const restaurantView = withOperationalAvailability(restaurant, under99Now, under99Context);
       return {
         restaurant: {
           id: restaurant._id,
           name: restaurant.name,
+          isOpen: restaurantView.isOpen,
+          availability: restaurantView.availability,
+          openingHours: restaurantView.openingHours,
+          operational: restaurantView.operational,
           image: restaurant.image || restaurant.images?.[0] || '',
           images: restaurant.images || [],
           rating: restaurant.rating,
@@ -579,6 +610,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
       $or: [
         { 'availability.isOpen': true },
         { isOpen: true },
+        { 'availability.autoHours': true },
       ],
     };
     if (scope === 'restaurant') visibleRestaurantFilter._id = restaurantId;
@@ -603,7 +635,7 @@ const searchRestaurants = asyncHandler(async (req, res) => {
         .limit(30)
         .lean(),
       Restaurant.find(visibleRestaurantFilter)
-        .select('_id name image images rating ratingCount estimatedDeliveryMin estimatedDeliveryMax time cuisine cuisineDisplay businessType deliveryMode')
+        .select('_id name image images rating ratingCount estimatedDeliveryMin estimatedDeliveryMax time cuisine cuisineDisplay businessType deliveryMode isOpen availability openingHours')
         .lean(),
     ]);
 
@@ -617,7 +649,11 @@ const searchRestaurants = asyncHandler(async (req, res) => {
       });
     }
 
-    const restaurantMap = new Map(restaurants.map(r => [String(r._id), r]));
+    const searchNow = new Date();
+    const searchContext = getLocalContext(searchNow);
+    const restaurantMap = new Map(restaurants
+      .filter(r => operationalStatus(r, searchNow, searchContext).open)
+      .map(r => [String(r._id), withOperationalAvailability(r, searchNow, searchContext)]));
 
     // Only return items whose restaurant is currently customer-visible/orderable.
     const data = menuItems
@@ -647,6 +683,10 @@ const searchRestaurants = asyncHandler(async (req, res) => {
             ratingCount: restaurant.ratingCount,
             deliveryTime: restaurant.time || `${restaurant.estimatedDeliveryMin}-${restaurant.estimatedDeliveryMax} mins`,
             cuisine: restaurant.cuisineDisplay || (restaurant.cuisine || []).join(', '),
+            isOpen: restaurant.isOpen,
+            availability: restaurant.availability,
+            openingHours: restaurant.openingHours,
+            operational: restaurant.operational,
           },
         };
       })
@@ -760,6 +800,17 @@ const createRestaurant = asyncHandler(async (req, res) => {
   // Platform-wide policy: every newly created restaurant is online-payment only.
   // Ignore any legacy/forged codEnabled value supplied by the client.
   req.body.codEnabled = false;
+  if (Object.prototype.hasOwnProperty.call(req.body, 'openingHours')) {
+    const hoursCheck = buildOpeningHoursUpdate(req.body.openingHours);
+    if (hoursCheck.error) return res.status(400).json({ success: false, message: hoursCheck.error });
+    // Build a normalized schedule for creation without dot-path updates.
+    const normalizedHours = { ...(req.body.openingHours || {}) };
+    for (const [path, value] of Object.entries(hoursCheck.set)) {
+      const [, day, field] = path.split('.');
+      normalizedHours[day] = { ...(normalizedHours[day] || {}), [field]: value };
+    }
+    req.body.openingHours = normalizedHours;
+  }
   const restaurant = await Restaurant.create(req.body);
   res.status(201).json({ success: true, data: restaurant });
 });
@@ -806,6 +857,15 @@ const updateRestaurant = asyncHandler(async (req, res) => {
     if (Object.prototype.hasOwnProperty.call(req.body, 'isNearFast')) {
       update.isNearFast = req.body.isNearFast === true || req.body.isNearFast === 'true';
     }
+  }
+
+  // Weekly hours are validated and translated to safe dotted paths so partial
+  // updates do not erase the other six days. Vendor ownership was checked above.
+  if (Object.prototype.hasOwnProperty.call(update, 'openingHours')) {
+    const hoursCheck = buildOpeningHoursUpdate(update.openingHours);
+    if (hoursCheck.error) return res.status(400).json({ success: false, message: hoursCheck.error });
+    delete update.openingHours;
+    Object.assign(update, hoursCheck.set);
   }
 
   normalizeRestaurantImages(update);
@@ -943,11 +1003,8 @@ const deleteRestaurant = asyncHandler(async (req, res) => {
 
 /**
  * PATCH /api/restaurants/:id/availability
- * Body: { status: 'open' | 'closed_today' | 'temporarily_closed', opensAt?, closesAt?, autoHours? }
- *
- * PERMISSIONS: CEO can open/close any restaurant; vendor only their own.
- * opensAt/closesAt/autoHours are accepted and stored now (for the future
- * auto-hours feature) but are not evaluated yet — see Restaurant.js.
+ * Admin-only. Backward-compatible manual status updates also accept a weekly
+ * `openingHours` schedule and `autoHours` flag for automatic hours management.
  */
 const updateRestaurantAvailability = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findById(req.params.id);
@@ -957,30 +1014,62 @@ const updateRestaurantAvailability = asyncHandler(async (req, res) => {
     return res.status(403).json({ success: false, message: 'Not authorized to manage this restaurant' });
   }
 
-  const { status, opensAt, closesAt, autoHours } = req.body;
-  const validStatuses = ['open', 'closed_today', 'temporarily_closed'];
-  if (!validStatuses.includes(status)) {
-    return res.status(400).json({ success: false, message: `status must be one of: ${validStatuses.join(', ')}` });
+  const body = req.body || {};
+  const hasStatus = Object.prototype.hasOwnProperty.call(body, 'status');
+  const hasHours = Object.prototype.hasOwnProperty.call(body, 'openingHours');
+  const hasAutoHours = Object.prototype.hasOwnProperty.call(body, 'autoHours');
+  const hasLegacyTimes = Object.prototype.hasOwnProperty.call(body, 'opensAt') || Object.prototype.hasOwnProperty.call(body, 'closesAt');
+  if (!hasStatus && !hasHours && !hasAutoHours && !hasLegacyTimes) {
+    return res.status(400).json({ success: false, message: 'Provide status, openingHours, autoHours, or legacy opening-time fields.' });
   }
 
-  const isOpen = status === 'open';
+  const allowedStatuses = ['open', 'closed_today', 'temporarily_closed', 'busy'];
+  if (hasStatus && !allowedStatuses.includes(body.status)) {
+    return res.status(400).json({ success: false, message: `status must be one of: ${allowedStatuses.join(', ')}` });
+  }
+  if (hasAutoHours && typeof body.autoHours !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'autoHours must be a boolean.' });
+  }
 
-  // isOpen is set both at the top level (legacy — read by getRestaurantById,
-  // getCategories, searchRestaurants, sort, etc.) and inside availability
-  // (new source of truth). findByIdAndUpdate skips the model's pre-validate
-  // hook, so both must be set explicitly here — see Restaurant.js comments.
-  const update = {
-    isOpen,
-    'availability.isOpen': isOpen,
-    'availability.closedReason': isOpen ? '' : status,
-  };
-  if (typeof opensAt === 'string') update['availability.opensAt'] = opensAt;
-  if (typeof closesAt === 'string') update['availability.closesAt'] = closesAt;
-  if (typeof autoHours === 'boolean') update['availability.autoHours'] = autoHours;
+  const update = {};
+  if (hasStatus) {
+    const status = body.status;
+    const isOpen = status === 'open' || status === 'busy';
+    update.isOpen = isOpen;
+    update['availability.isOpen'] = isOpen;
+    update['availability.status'] = status;
+    update['availability.closedReason'] = isOpen ? '' : status;
+  }
 
-  const updated = await Restaurant.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true });
+  if (hasAutoHours) update['availability.autoHours'] = body.autoHours;
+
+  if (Object.prototype.hasOwnProperty.call(body, 'opensAt')) {
+    if (body.opensAt !== '' && !validTime(body.opensAt)) {
+      return res.status(400).json({ success: false, message: 'opensAt must use 24-hour HH:MM.' });
+    }
+    update['availability.opensAt'] = body.opensAt;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'closesAt')) {
+    if (body.closesAt !== '' && !validTime(body.closesAt)) {
+      return res.status(400).json({ success: false, message: 'closesAt must use 24-hour HH:MM.' });
+    }
+    update['availability.closesAt'] = body.closesAt;
+  }
+
+  if (hasHours) {
+    const hoursCheck = buildOpeningHoursUpdate(body.openingHours);
+    if (hoursCheck.error) return res.status(400).json({ success: false, message: hoursCheck.error });
+    Object.assign(update, hoursCheck.set);
+  }
+
+  const updated = await Restaurant.findByIdAndUpdate(req.params.id, { $set: update }, { new: true, runValidators: true });
   invalidateUnder99Cache();
-  res.json({ success: true, data: updated });
+  const now = new Date();
+  res.json({
+    success: true,
+    data: updated,
+    operational: operationalStatus(updated, now, getLocalContext(now)),
+  });
 });
 
 const addMenuItem = asyncHandler(async (req, res) => {

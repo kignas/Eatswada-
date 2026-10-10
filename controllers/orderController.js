@@ -277,7 +277,7 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     isActive: true,
     approvalStatus: 'approved',
   })
-    .select('name image owner location availability isOpen deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate commissionPlan deliveryMode businessType');
+    .select('name image owner location availability isOpen openingHours deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate commissionPlan deliveryMode businessType');
   if (!restaurant) { const e = new Error('Restaurant not found or unavailable'); e.statusCode = 404; throw e; }
 
   const operational = operationalStatus(restaurant);

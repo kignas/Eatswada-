@@ -13,6 +13,7 @@ const generateToken = require('../utils/generateToken');
 const { uploadToCloudinary } = require('../utils/riderUpload');
 const { logAdminAction } = require('../services/auditService');
 const { commissionRateForDeliveryMode, commissionPlanForDeliveryMode } = require('../services/commissionService');
+const { operationalStatus, getLocalContext } = require('../services/restaurantHours');
 
 const ADMIN_ROLES = ['admin'];
 const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
@@ -315,12 +316,18 @@ exports.getRestaurants = asyncHandler(async (req, res) => {
   else filter.isActive = false;
   if (search) filter.name = { $regex: search, $options: 'i' };
   const restaurants = await Restaurant.find(filter).populate('owner', 'name phone email').sort({ homeOrder: 1, isFeatured: -1, displayPriority: -1, createdAt: -1 });
+  const now = new Date();
+  const hoursContext = getLocalContext(now);
   res.json({ success: true, data: restaurants.map(r => ({
     id: r._id, name: r.name, ownerName: r.owner?.name ?? '',
     phone: r.owner?.phone ?? '', address: r.address ?? '',
     cuisine: r.cuisineDisplay || (r.cuisine || []).join(', '),
     rating: r.rating, ratingCount: r.ratingCount, reviewCount: r.reviewCount || 0, displayPriority: r.displayPriority || 0, homeOrder: r.homeOrder ?? 999999, isFeatured: !!r.isFeatured, isBestSeller: !!r.isBestSeller, isNearFast: !!r.isNearFast, avgPrepTime: r.estimatedDeliveryMin ?? 20,
     isOpen: r.isOpen, isActive: r.isActive, approvalStatus: r.approvalStatus, rejectionReason: r.rejectionReason, commissionRate: Number.isFinite(Number(r.commissionRate)) ? Number(r.commissionRate) : 15, totalOrders: r.totalOrders, image: r.image, createdAt: r.createdAt,
+    openingHours: r.openingHours, availability: r.availability,
+    // Expose computed state separately; keep isOpen/availability as persisted
+    // manual settings for backward-compatible admin actions.
+    operational: operationalStatus(r, now, hoursContext),
   }))});
 });
 
@@ -331,9 +338,19 @@ exports.toggleRestaurant = asyncHandler(async (req, res) => {
   if (!restaurant.isActive) {
     return res.status(409).json({ success: false, message: 'This restaurant is deactivated. Restore it before changing its open/closed status.' });
   }
-  restaurant.isOpen = !restaurant.isOpen;
+  // This legacy toggle is an explicit manual override. Mirror both fields and
+  // persist a reason so auto-hours cannot immediately undo a manual closure.
+  const isCurrentlyManuallyClosed = restaurant.availability?.status === 'temporarily_closed'
+    || restaurant.availability?.status === 'closed_today'
+    || restaurant.availability?.isOpen === false;
+  const nextOpen = isCurrentlyManuallyClosed;
+  restaurant.isOpen = nextOpen;
+  restaurant.availability.isOpen = nextOpen;
+  restaurant.availability.status = nextOpen ? 'open' : 'temporarily_closed';
+  restaurant.availability.closedReason = nextOpen ? '' : 'temporarily_closed';
   await restaurant.save();
-  res.json({ success: true, data: { isOpen: restaurant.isOpen } });
+  const now = new Date();
+  res.json({ success: true, data: { isOpen: restaurant.isOpen, operational: operationalStatus(restaurant, now, getLocalContext(now)) } });
 });
 
 exports.getRecentOrders = asyncHandler(async (req, res) => {
