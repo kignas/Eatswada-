@@ -74,6 +74,9 @@ const corsOrigins = [
   'https://eatswada.com',
   'https://www.eatswada.com',
   'https://kignas.github.io',
+  // Capacitor Android/iOS WebView origins for packaged apps.
+  'https://localhost',
+  'capacitor://localhost',
   ...configuredCorsOrigins
 ].filter((origin, index, list) => list.indexOf(origin) === index);
 
