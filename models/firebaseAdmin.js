@@ -79,7 +79,17 @@ async function sendPushToTokens(tokens, data) {
   const resp = await messaging.sendEachForMulticast({
     tokens,
     data: stringData,
-    android: { priority: 'high' },
+    android: {
+      priority: 'high',
+      notification: {
+        title: stringData.title || stringData.body || 'Eatswada alert',
+        body: stringData.body || 'You have a new update.',
+        channelId: 'eatswada_orders',
+        sound: 'default',
+        defaultVibrateTimings: true,
+        visibility: 'public'
+      }
+    },
     webpush: { headers: { Urgency: 'high', TTL: '120' } },
   });
 
