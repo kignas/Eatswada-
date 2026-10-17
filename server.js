@@ -30,6 +30,7 @@ const categoryRoutes   = require('./routes/categoryRoutes');
 const menuRoutes       = require('./routes/menuRoutes');
 const riderRoutes      = require('./routes/riderRoutes');
 const adminRiderRoutes = require('./routes/adminRiderRoutes');
+const riderApplicationRoutes = require('./routes/riderApplicationRoutes');
 const platformRatingRoutes = require('./routes/platformRatingRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const settlementRoutes = require('./routes/settlementRoutes');
@@ -228,6 +229,7 @@ const apiMounts = [
   ['/categories',           categoryRoutes],
   ['/menu',                 menuRoutes],
   ['/riders',               riderRoutes],
+  ['/rider-applications',   riderApplicationRoutes],
   ['/admin/riders',         adminRiderRoutes],
   ['/ratings',              platformRatingRoutes],
   ['/payments',             paymentRoutes],
