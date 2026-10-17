@@ -1,0 +1,10 @@
+'use strict';
+const express = require('express');
+const rateLimit = require('express-rate-limit');
+const router = express.Router();
+const { submitApplication, getApplicationStatus } = require('../controllers/riderApplicationController');
+const submitLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false, message:{success:false,message:'Too many application attempts. Try again later.'} });
+const statusLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false, message:{success:false,message:'Too many status checks. Try again later.'} });
+router.post('/', submitLimiter, submitApplication);
+router.get('/:id/status', statusLimiter, getApplicationStatus);
+module.exports = router;

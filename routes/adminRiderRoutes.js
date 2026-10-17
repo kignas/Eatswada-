@@ -14,9 +14,12 @@ const {
 
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { upload } = require('../utils/riderUpload');
+const { listApplications, reviewApplication } = require('../controllers/riderApplicationController');
 
 router.use(protect, authorize('admin'));
 
+router.get('/applications', listApplications);
+router.patch('/applications/:id/review', reviewApplication);
 router.post('/', upload.single('photo'), createRider);
 router.get('/', getRiders);
 router.get('/:id', getRiderById);
