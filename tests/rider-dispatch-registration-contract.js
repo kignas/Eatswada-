@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const root = path.resolve(__dirname, '..');
+const read = p => fs.readFileSync(path.join(root, p), 'utf8');
+const checks = [];
+function check(name, condition) { checks.push({ name, ok: Boolean(condition) }); }
+const service = read('services/riderAssignmentService.js');
+const vendor = read('controllers/vendorController.js');
+const rider = read('controllers/riderController.js');
+const appController = read('controllers/riderApplicationController.js');
+const appRoutes = read('routes/riderApplicationRoutes.js');
+const adminRoutes = read('routes/adminRiderRoutes.js');
+const server = read('server.js');
+const order = read('models/Order.js');
+check('dispatch uses fresh rider GPS', service.includes("'riderDetails.currentLocation.updatedAt': { $gte: cutoff }"));
+check('dispatch ranks candidates by pickup distance', service.includes('haversineKm(coords, restaurantCoords)') && service.includes('a.distanceKm - b.distanceKm'));
+check('initial rider claim uses conditional atomic findOneAndUpdate', service.includes('Order.findOneAndUpdate(') && service.includes("rider: null, status: { $in: DISPATCHABLE_ORDER_STATUSES }"));
+check('restaurant acceptance starts dispatch before food is ready', vendor.includes('Start rider dispatch as soon as the restaurant accepts the order') && vendor.includes('riderAssignment = await autoAssignRider(order)'));
+check('kitchen status remains separate from early rider acceptance', rider.includes("['confirmed', 'preparing', 'waiting_for_rider']") && rider.includes('Do not overwrite the kitchen state when a rider accepts early'));
+check('pickup is blocked until food is ready', rider.includes("code: 'FOOD_NOT_READY'") && rider.includes("!['waiting_for_rider', 'assigned'].includes(order.status)"));
+check('unassigned dispatch recovery exists', service.includes('async function recoverUnassignedOrders') && service.includes('recoverUnassignedOrders().catch'));
+check('dispatch state is persisted on orders', order.includes("enum: ['not_started', 'searching', 'offer_pending', 'assigned', 'no_rider']"));
+check('public rider application submission and status routes exist', appRoutes.includes("router.post('/', submitLimiter, submitApplication)") && appRoutes.includes('getApplicationStatus'));
+check('admin-only rider application review routes exist', adminRoutes.includes("router.get('/applications', listApplications)") && adminRoutes.includes("router.patch('/applications/:id/review', reviewApplication)"));
+check('application passwords are hashed and not returned publicly', appController.includes('bcrypt.hash(password, 12)') && appController.includes('select(\'-passwordHash\')') && !appController.includes('passwordHash:application.passwordHash } }'));
+check('application approval creates rider account only after admin action', appController.includes("if (action === 'approve')") && appController.includes("role:'rider', isActive:true"));
+check('application endpoints are mounted in API versioned router list', server.includes("['/rider-applications',   riderApplicationRoutes]"));
+const failed = checks.filter(c => !c.ok);
+for (const c of checks) console.log(`${c.ok ? 'PASS' : 'FAIL'} ${c.name}`);
+console.log(`Rider dispatch/registration contract: ${checks.length - failed.length} passed, ${failed.length} failed`);
+if (failed.length) process.exit(1);
