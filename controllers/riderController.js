@@ -160,20 +160,45 @@ exports.getAssignedOrderById = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order });
 });
 
-/* GET /api/riders/earnings — earnings summary (all time / today / week / month). */
+/* GET /api/riders/earnings — earnings summary (all time / today / week / month).
+ * Weekly incentive: ₹50 per completed 10-delivery milestone, reset Monday
+ * midnight in India. Base pay fallback also covers legacy completed orders
+ * whose riderEarning was saved as zero. */
 exports.getEarningsSummary = asyncHandler(async (req, res) => {
   const riderId = req.user._id;
   const now = new Date();
-  const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
-  const weekStart = new Date(todayStart); weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+  // Calendar boundaries are calculated in Asia/Kolkata, independent of the
+  // timezone configured on the server.
+  const indiaDateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now).reduce((acc, part) => {
+    if (part.type !== 'literal') acc[part.type] = part.value;
+    return acc;
+  }, {});
+  const indiaToday = `${indiaDateParts.year}-${indiaDateParts.month}-${indiaDateParts.day}`;
+  const todayStart = new Date(`${indiaToday}T00:00:00+05:30`);
+  const dayOfWeek = new Date(`${indiaToday}T12:00:00+05:30`).getUTCDay();
+  const weekStart = new Date(todayStart.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
+  const monthStart = new Date(`${indiaDateParts.year}-${indiaDateParts.month}-01T00:00:00+05:30`);
 
   const baseMatch = { rider: riderId, riderStatus: 'delivered' };
+  const earningExpression = {
+    $cond: [
+      { $gt: [{ $ifNull: ['$riderEarning', 0] }, 0] },
+      '$riderEarning',
+      { $add: [35, { $max: [0, { $ifNull: ['$tipAmount', 0] }] }] },
+    ],
+  };
 
   const summarize = async (extraMatch) => {
     const result = await Order.aggregate([
       { $match: { ...baseMatch, ...extraMatch } },
-      { $group: { _id: null, earnings: { $sum: '$riderEarning' }, deliveries: { $sum: 1 } } },
+      { $group: {
+        _id: null,
+        earnings: { $sum: earningExpression },
+        deliveries: { $sum: 1 },
+      } },
     ]);
     return { earnings: result[0]?.earnings ?? 0, deliveries: result[0]?.deliveries ?? 0 };
   };
@@ -185,7 +210,18 @@ exports.getEarningsSummary = asyncHandler(async (req, res) => {
     summarize({ updatedAt: { $gte: monthStart } }),
   ]);
 
-  res.json({ success: true, data: { allTime, today, thisWeek, thisMonth } });
+  // ₹50 for every completed block of 10 deliveries in the current week:
+  // 0–9 = ₹0, 10–19 = ₹50, 20–29 = ₹100, 30–39 = ₹150, etc.
+  const weeklyIncentive = Math.floor(thisWeek.deliveries / 10) * 50;
+  res.json({
+    success: true,
+    data: {
+      allTime, today,
+      thisWeek: { ...thisWeek, incentive: weeklyIncentive, totalEarnings: thisWeek.earnings + weeklyIncentive },
+      thisMonth,
+      weeklyIncentive,
+    },
+  });
 });
 
 /* PUT /api/riders/orders/:id/status
