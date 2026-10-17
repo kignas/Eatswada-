@@ -254,6 +254,18 @@ const orderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Delivery dispatch is intentionally separate from kitchen/order status.
+    // Riders may be sourced and assigned while the restaurant is preparing,
+    // without falsely marking the food ready or changing the customer lifecycle.
+    dispatchStatus: {
+      type: String,
+      enum: ['not_started', 'searching', 'offer_pending', 'assigned', 'no_rider'],
+      default: 'not_started',
+      index: true,
+    },
+    dispatchStartedAt: { type: Date, default: null },
+    dispatchLastAttemptAt: { type: Date, default: null },
+    dispatchAttemptCount: { type: Number, default: 0, min: 0 },
 
     deliveredAt:       { type: Date },
     cancelReason:      { type: String, default: '' },
