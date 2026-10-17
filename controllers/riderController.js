@@ -96,8 +96,12 @@ exports.toggleOnline = asyncHandler(async (req, res) => {
   const rider = await User.findById(req.user._id);
   rider.riderDetails = rider.riderDetails || {};
 
-  rider.riderDetails.isOnline =
-    typeof req.body.isOnline === 'boolean' ? req.body.isOnline : !rider.riderDetails.isOnline;
+  const requestedOnline = typeof req.body.isOnline === 'boolean' ? req.body.isOnline : !rider.riderDetails.isOnline;
+  if (!requestedOnline) {
+    const active = await Order.findOne({ rider: rider._id, riderStatus: { $in: ACTIVE_RIDER_STATUSES } }).select('_id riderStatus');
+    if (active) return res.status(409).json({ success:false, code:'ACTIVE_DELIVERY', message:'Complete or resolve your active delivery before going offline.' });
+  }
+  rider.riderDetails.isOnline = requestedOnline;
 
   await rider.save();
   res.json({ success: true, data: { isOnline: rider.riderDetails.isOnline } });
@@ -231,10 +235,17 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
   }
 
-  if (status === 'accepted' && order.status !== 'waiting_for_rider') {
+  if (status === 'accepted' && !['confirmed', 'preparing', 'waiting_for_rider'].includes(order.status)) {
     return res.status(409).json({
       success: false,
-      message: `Cannot accept — order is currently "${order.status}", but must be "waiting_for_rider" first.`,
+      message: `Cannot accept — order is currently "${order.status}" and is not in a dispatchable kitchen state.`,
+    });
+  }
+  if (status === 'picked_up' && !['waiting_for_rider', 'assigned'].includes(order.status)) {
+    return res.status(409).json({
+      success: false,
+      code: 'FOOD_NOT_READY',
+      message: 'The restaurant has not marked this order ready yet. You can wait at the restaurant, but pickup is not available.',
     });
   }
 
@@ -258,10 +269,12 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
 
   // FIX: Using advanceStatus ensures deliveredAt is set so the vendor active tab clears it
   if (status === 'accepted') {
-    // Rider has accepted the job — order leaves 'waiting_for_rider' and
-    // moves to 'assigned' at the order level. riderStatus itself still
-    // records the finer-grained 'accepted' step below.
-    order.advanceStatus('assigned', `Accepted by rider (${req.user.name})`);
+    // Do not overwrite the kitchen state when a rider accepts early. The
+    // vendor promotes waiting_for_rider -> assigned once food is ready.
+    if (order.status === 'waiting_for_rider') {
+      order.advanceStatus('assigned', `Accepted by rider (${req.user.name})`);
+    }
+    order.dispatchStatus = 'assigned';
   } else if (status === 'out_for_delivery' || status === 'delivered') {
     order.advanceStatus(status, `Updated by rider (${req.user.name})`);
     // COD is collected at the door. Once the rider completes delivery,

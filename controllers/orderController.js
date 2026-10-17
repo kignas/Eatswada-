@@ -899,8 +899,13 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   order.advanceStatus(status, note || '');
 
   let riderAssignment = null;
-  if (status === 'waiting_for_rider' && !order.rider) {
-    riderAssignment = await autoAssignRider(order); 
+  if (status === 'waiting_for_rider') {
+    if (order.rider && ['accepted', 'reached_restaurant'].includes(order.riderStatus)) {
+      order.advanceStatus('assigned', 'Rider already accepted; restaurant marked food ready');
+      order.dispatchStatus = 'assigned';
+    } else if (!order.rider && order.deliveryModeSnapshot !== 'self_delivery') {
+      riderAssignment = await autoAssignRider(order);
+    }
   }
 
   await order.save();
@@ -993,6 +998,8 @@ const assignRider = asyncHandler(async (req, res) => {
   order.rider = rider._id;
   order.riderAssignedAt = new Date();
   order.riderStatus = 'assigned';
+  order.dispatchStatus = 'assigned';
+  order.dispatchStartedAt = order.dispatchStartedAt || new Date();
   // Tip belongs to the rider. Set the earning once at assignment so
   // reassignment cannot double-count the same tip.
   const baseRiderFee = Number(order.deliveryFee) || 0;

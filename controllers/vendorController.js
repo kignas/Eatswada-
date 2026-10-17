@@ -222,7 +222,19 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
   stopRing(order._id);
   await notifyOrderStatus(order.user, order);
 
-  res.status(200).json({ success: true, data: order });
+  // Start rider dispatch as soon as the restaurant accepts the order. The
+  // kitchen status remains `confirmed` until preparation actually starts;
+  // dispatch is tracked independently and does not block the kitchen workflow.
+  let riderAssignment = null;
+  if (order.deliveryModeSnapshot !== 'self_delivery') {
+    order.dispatchStatus = 'searching';
+    order.dispatchStartedAt = order.dispatchStartedAt || new Date();
+    await order.save();
+    riderAssignment = await autoAssignRider(order);
+    if (riderAssignment && riderAssignment.assigned) scheduleRiderTimeout(order._id, order.rider);
+  }
+
+  res.status(200).json({ success: true, data: order, ...(riderAssignment ? { riderAssignment } : {}) });
 });
 
 exports.rejectOrder = asyncHandler(async (req, res) => {
@@ -290,10 +302,16 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
   const note = (typeof req.body.note === 'string' && req.body.note.trim()) || `Marked ${nextStatus} by restaurant`;
   order.advanceStatus(nextStatus, note);
 
-  // FIX: Trigger rider assignment when the vendor transitions the order to out_for_delivery
   let riderAssignment = null;
-  if (nextStatus === 'waiting_for_rider' && !order.rider) {
-    riderAssignment = await autoAssignRider(order);
+  if (nextStatus === 'waiting_for_rider') {
+    // If the rider accepted/arrived while the kitchen was preparing, promote
+    // the customer-facing order only now, when the restaurant marks it ready.
+    if (order.rider && ['accepted', 'reached_restaurant'].includes(order.riderStatus)) {
+      order.advanceStatus('assigned', 'Rider already accepted; food marked ready by restaurant');
+      order.dispatchStatus = 'assigned';
+    } else if (!order.rider && order.deliveryModeSnapshot !== 'self_delivery') {
+      riderAssignment = await autoAssignRider(order);
+    }
   }
 
   await order.save();
