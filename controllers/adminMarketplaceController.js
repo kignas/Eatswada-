@@ -4,6 +4,7 @@ const asyncHandler = require('express-async-handler');
 const PayoutRequest = require('../models/PayoutRequest');
 const Ledger = require('../models/SettlementLedger');
 const SupportTicket = require('../models/SupportTicket');
+const { createNotification } = require('../services/notificationService');
 
 function assertAdmin(req,res){
   if(req.user?.role!=='admin'){res.status(403).json({success:false,message:'Admin credentials required.'});return false;}
@@ -49,10 +50,10 @@ exports.updatePayoutRequest=asyncHandler(async(req,res)=>{
 
 exports.listSupportTickets=asyncHandler(async(req,res)=>{
   if(!assertAdmin(req,res))return;
-  const filter={}; if(['open','waiting_vendor','waiting_admin','resolved','closed'].includes(req.query.status))filter.status=req.query.status;
+  const filter={}; if(['open','waiting_vendor','waiting_admin','waiting_customer','resolved','closed'].includes(req.query.status))filter.status=req.query.status;
   if(req.query.priority&&['low','normal','high','urgent'].includes(req.query.priority))filter.priority=req.query.priority;
   const page=Math.max(1,Number(req.query.page)||1),limit=Math.min(100,Math.max(1,Number(req.query.limit)||25));
-  const [rows,total]=await Promise.all([SupportTicket.find(filter).populate('vendor','name email phone').populate('restaurant','name').populate('order','orderNumber status').sort({createdAt:-1}).skip((page-1)*limit).limit(limit).lean(),SupportTicket.countDocuments(filter)]);
+  const [rows,total]=await Promise.all([SupportTicket.find(filter).populate('vendor','name email phone').populate('customer','name email phone').populate('restaurant','name').populate('order','orderNumber status').sort({createdAt:-1}).skip((page-1)*limit).limit(limit).lean(),SupportTicket.countDocuments(filter)]);
   res.json({success:true,data:rows,pagination:{page,limit,total,pages:Math.ceil(total/limit)}});
 });
 
@@ -61,6 +62,7 @@ exports.replySupportTicket=asyncHandler(async(req,res)=>{
   const message=String(req.body?.message||'').trim(); if(!message)return res.status(400).json({success:false,message:'message is required.'});
   const ticket=await SupportTicket.findById(req.params.id); if(!ticket)return res.status(404).json({success:false,message:'Support ticket not found.'});
   if(ticket.status==='closed')return res.status(409).json({success:false,message:'Ticket is closed.'});
-  ticket.messages.push({senderRole:'admin',sender:req.user._id,message}); ticket.status=req.body?.resolve===true?'resolved':'waiting_vendor'; if(ticket.status==='resolved')ticket.closedAt=new Date(); await ticket.save();
+  ticket.messages.push({senderRole:'admin',sender:req.user._id,message}); ticket.status=req.body?.resolve===true?'resolved':(ticket.customer?'waiting_customer':'waiting_vendor'); if(ticket.status==='resolved')ticket.closedAt=new Date(); await ticket.save();
+  if(ticket.customer){ try { await createNotification({user:ticket.customer,type:'support',title:'Support replied',message:message.slice(0,180),data:{ticketId:String(ticket._id),ticketNumber:ticket.ticketNumber,orderId:ticket.order?String(ticket.order):''}}); } catch (_) {} }
   res.json({success:true,data:ticket});
 });
