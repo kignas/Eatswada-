@@ -173,6 +173,7 @@ exports.createVendor = asyncHandler(async (req, res) => {
     // ...or create a new one
     restaurantName,
     cuisine,
+    fssaiLicenseNumber,
     description,
     phone,
     address,
@@ -323,6 +324,9 @@ exports.createVendor = asyncHandler(async (req, res) => {
         name: restaurantName.trim(),
         owner: vendorUser._id,
         cuisine: cuisineArray,
+        // Preserve the FSSAI number entered in Admin → Create Restaurant.
+        // This is a reference field only; it is not automatically verified.
+        fssaiLicenseNumber: String(fssaiLicenseNumber || "").trim().slice(0, 100),
         description: description || "",
         phone: phone || vendorPhone || "",
         address: address || "",
