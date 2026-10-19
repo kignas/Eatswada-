@@ -193,10 +193,15 @@ exports.updateRestaurantFssai = asyncHandler(async (req, res) => {
   const previous={status:restaurant.fssaiVerificationStatus||'pending',verifiedAt:restaurant.fssaiVerifiedAt||null};
   restaurant.fssaiVerificationStatus=status;
   restaurant.fssaiVerifiedAt=status==='verified'?new Date():null;
+  // Persist the license number when an admin edits an existing restaurant.
+  // Saving a number does not itself verify that the license is genuine.
+  if (req.body?.fssaiLicenseNumber !== undefined) {
+    restaurant.fssaiLicenseNumber = String(req.body.fssaiLicenseNumber || '').trim().slice(0, 100);
+  }
   if (req.body?.certificateUrl !== undefined) restaurant.fssaiCertificateUrl=String(req.body.certificateUrl||'').trim().slice(0,2000);
   if (req.body?.expiryDate !== undefined) restaurant.fssaiExpiryDate=req.body.expiryDate ? new Date(req.body.expiryDate) : null;
   await restaurant.save();
-  await logAdminAction(req,{action:'restaurant.fssai.verify',targetType:'restaurant',targetId:restaurant._id,targetLabel:restaurant.name,oldValue:previous,newValue:{status:restaurant.fssaiVerificationStatus,verifiedAt:restaurant.fssaiVerifiedAt}});
+  await logAdminAction(req,{action:'restaurant.fssai.verify',targetType:'restaurant',targetId:restaurant._id,targetLabel:restaurant.name,oldValue:previous,newValue:{status:restaurant.fssaiVerificationStatus,verifiedAt:restaurant.fssaiVerifiedAt,licenseNumberUpdated:req.body?.fssaiLicenseNumber!==undefined}});
   res.json({success:true,data:restaurant});
 });
 
