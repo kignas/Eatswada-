@@ -264,6 +264,9 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
     dispatchStartedAt: { type: Date, default: null },
+    // Persistent earliest time for automatic rider assignment. Recovery sweeps
+    // honor this field after process restarts; null preserves legacy behavior.
+    dispatchNotBefore: { type: Date, default: null, index: true },
     dispatchLastAttemptAt: { type: Date, default: null },
     dispatchAttemptCount: { type: Number, default: 0, min: 0 },
 
@@ -485,6 +488,10 @@ orderSchema.methods.advanceStatus = function (newStatus, note = '') {
     const minutes = Number(this.prepMinutes);
     if (Number.isFinite(minutes) && minutes > 0) {
       this.prepReadyAt = new Date(startedAt.getTime() + minutes * 60000);
+      // Dispatch just early enough for the rider to travel while food finishes.
+      // The 12-minute buffer is intentionally local and does not call a maps API.
+      const dispatchDelayMs = Math.max(0, minutes - 12) * 60 * 1000;
+      this.dispatchNotBefore = new Date(startedAt.getTime() + dispatchDelayMs);
     }
   }
 
