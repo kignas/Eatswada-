@@ -34,9 +34,14 @@ exports.updatePayoutRequest=asyncHandler(async(req,res)=>{
   if(next==='paid'){
     if(request.status==='paid')return res.json({success:true,data:request});
     if(!['requested','processing'].includes(request.status))return res.status(409).json({success:false,message:'Only requested/processing payouts can be marked paid.'});
+    const bankUtr=String(req.body?.bankUtr||req.body?.reference||'').trim().slice(0,120);
+    if(!bankUtr)return res.status(400).json({success:false,message:'Bank UTR/reference is required before marking a payout paid.'});
+    const entries=await Ledger.find({_id:{$in:request.ledgerEntries},payoutRequest:request._id,status:'reserved'}).select('_id netSettlementAmount').lean();
+    const reconciledAmount=Math.round(entries.reduce((sum,row)=>sum+(Number(row.netSettlementAmount)||0),0)*100)/100;
+    if(entries.length!==request.ledgerEntries.length || Math.abs(reconciledAmount-Number(request.amount))>=0.01)return res.status(409).json({success:false,message:'Payout ledger does not reconcile to the requested amount. No payout state was changed.',data:{expectedAmount:request.amount,ledgerAmount:reconciledAmount,expectedEntries:request.ledgerEntries.length,foundEntries:entries.length}});
     const updated=await Ledger.updateMany({_id:{$in:request.ledgerEntries},payoutRequest:request._id,status:'reserved'},{$set:{status:'settled',settledAt:new Date()}});
     if(updated.modifiedCount!==request.ledgerEntries.length)return res.status(409).json({success:false,message:'Not all reserved settlement entries are available. Reconcile the ledger before marking this payout paid.'});
-    request.status='paid'; request.paidAt=new Date(); request.processedAt=new Date(); request.reference=String(req.body?.reference||'').trim().slice(0,120);
+    request.status='paid'; request.paidAt=new Date(); request.processedAt=new Date(); request.bankUtr=bankUtr; request.reference=request.bankUtr;
   } else if(next==='rejected' || next==='cancelled'){
     if(!['requested','processing'].includes(request.status))return res.status(409).json({success:false,message:'Only requested/processing payouts can be rejected or cancelled.'});
     await Ledger.updateMany({_id:{$in:request.ledgerEntries},payoutRequest:request._id,status:'reserved'},{$set:{status:'eligible'},$unset:{payoutRequest:''}});
@@ -47,6 +52,16 @@ exports.updatePayoutRequest=asyncHandler(async(req,res)=>{
   }
   await request.save();
   res.json({success:true,data:request});
+});
+
+exports.getPayoutReconciliation=asyncHandler(async(req,res)=>{
+  if(!assertAdmin(req,res))return;
+  const request=await PayoutRequest.findById(req.params.id).populate('vendor','name email phone').populate('restaurant','name').lean();
+  if(!request)return res.status(404).json({success:false,message:'Payout request not found.'});
+  const entries=await Ledger.find({_id:{$in:request.ledgerEntries}}).sort({createdAt:1}).lean();
+  const ledgerAmount=Math.round(entries.reduce((sum,row)=>sum+(Number(row.netSettlementAmount)||0),0)*100)/100;
+  const allLinked=entries.length===request.ledgerEntries.length && entries.every(row=>String(row.payoutRequest||'')===String(request._id));
+  res.json({success:true,data:{request,entries,reconciliation:{requestAmount:Number(request.amount),ledgerAmount,difference:Math.round((Number(request.amount)-ledgerAmount)*100)/100,entryCountExpected:request.ledgerEntries.length,entryCountFound:entries.length,allEntriesLinked:allLinked,amountMatches:Math.abs(Number(request.amount)-ledgerAmount)<0.01,canMarkPaid:allLinked&&Math.abs(Number(request.amount)-ledgerAmount)<0.01&&['requested','processing'].includes(request.status)}}});
 });
 
 exports.listSupportTickets=asyncHandler(async(req,res)=>{

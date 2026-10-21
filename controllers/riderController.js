@@ -29,6 +29,14 @@ const STATUS_LABELS = {
   delivered: 'Delivered',
 };
 
+const haversineMeters = (a, b) => {
+  const rad = v => v * Math.PI / 180;
+  const [lng1, lat1] = a; const [lng2, lat2] = b;
+  const dLat = rad(lat2-lat1), dLng = rad(lng2-lng1);
+  const h = Math.sin(dLat/2)**2 + Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dLng/2)**2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1-h)));
+};
+
 /* GET /api/riders/profile */
 exports.getMyProfile = asyncHandler(async (req, res) => {
   // Launch-fix: `protect` now attaches only a small lean auth object (id, role,
@@ -271,11 +279,32 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
   }
 
+  if (status === 'reached_restaurant') {
+    const live = await User.findById(req.user._id).select('riderDetails.currentLocation').lean();
+    const location = live?.riderDetails?.currentLocation;
+    const riderCoords = location?.coordinates;
+    const restaurantCoords = order.restaurant?.location?.coordinates;
+    const capturedAt = location?.updatedAt ? new Date(location.updatedAt) : null;
+    const fresh = capturedAt && Number.isFinite(capturedAt.getTime()) && Date.now() - capturedAt.getTime() <= 2 * 60 * 1000 && Date.now() >= capturedAt.getTime();
+    const validRider = Array.isArray(riderCoords) && riderCoords.length >= 2 && riderCoords.every(Number.isFinite) && riderCoords[0] >= -180 && riderCoords[0] <= 180 && riderCoords[1] >= -90 && riderCoords[1] <= 90;
+    const validRestaurant = Array.isArray(restaurantCoords) && restaurantCoords.length >= 2 && restaurantCoords.every(Number.isFinite) && restaurantCoords[0] >= -180 && restaurantCoords[0] <= 180 && restaurantCoords[1] >= -90 && restaurantCoords[1] <= 90;
+    // Kolkata's schema default is a placeholder; do not treat it as a real restaurant pin.
+    const placeholder = validRestaurant && Math.abs(restaurantCoords[0] - 88.3832) < 0.00001 && Math.abs(restaurantCoords[1] - 22.5726) < 0.00001;
+    if (!fresh || !validRider || !validRestaurant || placeholder) return res.status(409).json({ success:false, code:'ARRIVAL_LOCATION_UNAVAILABLE', message:'Fresh rider GPS and a verified restaurant location are required to confirm arrival.' });
+    const distanceMeters = haversineMeters(riderCoords, restaurantCoords);
+    if (distanceMeters > 200) return res.status(409).json({ success:false, code:'OUTSIDE_RESTAURANT_GEOFENCE', message:'You must be within 200 metres of the restaurant to confirm arrival.', data:{ distanceMeters:Math.round(distanceMeters) } });
+    order.riderReachedRestaurantAt = new Date();
+    order.riderArrivalLocation = { coordinates:[Number(riderCoords[0]), Number(riderCoords[1])], capturedAt, distanceMeters:Math.round(distanceMeters) };
+  }
+
   if (status === 'accepted' && !['confirmed', 'preparing', 'waiting_for_rider'].includes(order.status)) {
     return res.status(409).json({
       success: false,
       message: `Cannot accept — order is currently "${order.status}" and is not in a dispatchable kitchen state.`,
     });
+  }
+  if (status === 'picked_up' && order.pickupCodeRequired && !order.pickupCodeVerifiedAt) {
+    return res.status(409).json({ success:false, code:'PICKUP_CODE_REQUIRED', message:'Verify the restaurant pickup code before collecting the order.' });
   }
   if (status === 'picked_up' && !['waiting_for_rider', 'assigned'].includes(order.status)) {
     return res.status(409).json({
@@ -420,6 +449,28 @@ exports.updateLocation = asyncHandler(async (req, res) => {
     { $set: { 'riderDetails.currentLocation': { coordinates: [lng, lat], updatedAt: new Date() } } }
   );
   res.json({ success: true });
+});
+
+exports.verifyPickupCode = asyncHandler(async (req, res) => {
+  const code = String(req.body?.pickupCode ?? req.body?.code ?? '').trim();
+  if (!/^\d{4}$/.test(code)) return res.status(400).json({ success:false, message:'A 4-digit restaurant pickup code is required.' });
+  const order = await Order.findOne({ _id:req.params.id, rider:req.user._id })
+    .select('+pickupCodeHash +pickupCodeSalt +pickupCodeAttempts +pickupCodeLockedUntil');
+  if (!order) return res.status(404).json({ success:false, message:'Order not found or not assigned to you.' });
+  if (order.status === 'cancelled' || ['delivered','cancelled'].includes(order.status)) return res.status(409).json({ success:false, message:'This order is no longer active.' });
+  if (!order.pickupCodeRequired) return res.status(409).json({ success:false, message:'Pickup code verification is not enabled for this order.' });
+  if (order.riderStatus !== 'reached_restaurant' || !order.riderReachedRestaurantAt) return res.status(409).json({ success:false, message:'Confirm arrival inside the restaurant geofence before verifying the pickup code.' });
+  if (!order.isFoodReady) return res.status(409).json({ success:false, message:'The restaurant has not marked the food ready yet.' });
+  if (order.pickupCodeVerifiedAt) return res.json({ success:true, message:'Pickup code already verified.', data:{ verifiedAt:order.pickupCodeVerifiedAt } });
+  const result = order.verifyPickupCode(code);
+  if (!result.ok) {
+    await order.save();
+    if (result.reason === 'locked' || result.reason === 'locked_now') return res.status(429).json({ success:false, message:'Too many incorrect pickup code attempts. Try again after the temporary lockout.', lockedUntil:result.lockedUntil });
+    if (result.reason === 'not_set') return res.status(409).json({ success:false, message:'No pickup code is configured for this order. Ask the restaurant to contact support.' });
+    return res.status(400).json({ success:false, message:'Incorrect pickup code.', attemptsRemaining:result.attemptsRemaining });
+  }
+  await order.save();
+  return res.json({ success:true, message:'Pickup code verified. You can collect the order.', data:{ verifiedAt:order.pickupCodeVerifiedAt } });
 });
 
 exports.verifyDeliveryOtp = asyncHandler(async (req, res) => {

@@ -75,6 +75,27 @@ const uploadImage = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: { url: result.secure_url } });
 });
 
+const uploadCustomerMedia = asyncHandler(async (req, res) => {
+  if (req.user?.role !== 'user') return res.status(403).json({ success: false, message: 'Customer account required.' });
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!files.length) return res.status(400).json({ success: false, message: 'Select at least one image.' });
+  if (files.length > 4) return res.status(400).json({ success: false, message: 'Upload up to 4 images at a time.' });
+  const urls = [];
+  for (const file of files) {
+    const validation = validateImageBuffer(file.buffer, file.mimetype);
+    if (!validation.valid) return res.status(400).json({ success: false, message: validation.message });
+  }
+  // Upload only validated images; never trust client-supplied URLs as uploaded evidence.
+  for (const file of files) {
+    const result = await streamUpload(file.buffer, `Eatswada/customer-media/${String(req.user._id)}`);
+    if (!result?.secure_url || !/^https:\/\/res\.cloudinary\.com\//i.test(result.secure_url)) {
+      const error = new Error('Image storage returned an invalid URL.'); error.statusCode = 502; throw error;
+    }
+    urls.push(result.secure_url);
+  }
+  return res.status(201).json({ success: true, data: { urls } });
+});
+
 const uploadVendorMenuImage = asyncHandler(async (req, res) => {
   if (req.user?.role !== 'vendor' || !req.user.restaurantId) {
     return res.status(403).json({ success: false, message: 'Vendor restaurant access required.' });
@@ -87,4 +108,4 @@ const uploadVendorMenuImage = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: { url: result.secure_url } });
 });
 
-module.exports = { uploadImage, uploadVendorMenuImage };
+module.exports = { uploadImage, uploadVendorMenuImage, uploadCustomerMedia };

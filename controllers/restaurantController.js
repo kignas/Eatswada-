@@ -746,7 +746,7 @@ const getRestaurantReviews = asyncHandler(async (req, res) => {
     const filter = { restaurant: restaurantObjectId, isVisible: true };
     return Promise.all([
       Review.find(filter)
-        .select('score riderScore comment createdAt user vendorReply')
+        .select('score riderScore comment photos itemRatings createdAt user vendorReply')
         .populate('user', 'name avatar')
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -783,7 +783,7 @@ const getRestaurantReviews = asyncHandler(async (req, res) => {
     summary: { rating: total ? restaurant.rating : null, ratingCount: total, reviewCount: total, breakdown: counts },
     page, pages: Math.ceil(total / limit), total,
     data: reviews.map(r => ({
-      id: r._id, score: r.score, riderScore: r.riderScore, comment: r.comment,
+      id: r._id, score: r.score, riderScore: r.riderScore, comment: r.comment, photos: r.photos || [], itemRatings: r.itemRatings || [],
       createdAt: r.createdAt,
       vendorReply: r.vendorReply?.message ? { message: r.vendorReply.message, repliedAt: r.vendorReply.repliedAt } : null,
       customer: { name: r.user?.name || 'Customer', avatar: r.user?.avatar || '' },

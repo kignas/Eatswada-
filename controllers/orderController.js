@@ -803,6 +803,14 @@ const getOrderReview = asyncHandler(async (req, res) => {
 
 const submitReview = asyncHandler(async (req, res) => {
   const { score, riderScore, comment = '' } = req.body;
+  const requestedItemRatings = Array.isArray(req.body?.itemRatings) ? req.body.itemRatings : [];
+  if (requestedItemRatings.length > 100) return res.status(400).json({ success:false, message:'Too many item ratings.' });
+  const requestedPhotos = Array.isArray(req.body?.photos) ? req.body.photos : [];
+  if (requestedPhotos.length > 4) return res.status(400).json({ success: false, message: 'A review can include up to 4 photos.' });
+  const photos = requestedPhotos.map(value => String(value || '').trim()).filter(Boolean);
+  if (photos.some(url => url.length > 1000 || !/^https:\/\/res\.cloudinary\.com\//i.test(url))) {
+    return res.status(400).json({ success: false, message: 'Review photos must be uploaded through the customer image upload endpoint.' });
+  }
   const numericScore = Number(score);
   const numericRiderScore = riderScore == null || riderScore === '' ? null : Number(riderScore);
   if (!Number.isInteger(numericScore) || numericScore < 1 || numericScore > 5)
@@ -815,6 +823,19 @@ const submitReview = asyncHandler(async (req, res) => {
   if (order.status !== 'delivered') return res.status(400).json({ success: false, message: 'You can only review delivered orders.' });
 
   const cleanComment = String(comment || '').trim().slice(0, 500);
+  const itemRatings = [];
+  const seenItemKeys = new Set();
+  for (const raw of requestedItemRatings) {
+    const itemName = String(raw?.itemName || raw?.name || '').trim().slice(0,160);
+    const scoreValue = Number(raw?.score);
+    if (!itemName || !Number.isInteger(scoreValue) || scoreValue < 1 || scoreValue > 5) return res.status(400).json({ success:false, message:'Each item rating requires an item name and a whole-number score from 1 to 5.' });
+    const orderItem = (order.items || []).find(line => String(line.name || '').trim().toLowerCase() === itemName.toLowerCase() || (raw?.menuItem && line.menuItem && String(line.menuItem) === String(raw.menuItem)));
+    if (!orderItem) return res.status(400).json({ success:false, message:`Item rating does not match an item in this order: ${itemName}.` });
+    const key = String(orderItem.menuItem || orderItem.name).toLowerCase();
+    if (seenItemKeys.has(key)) return res.status(400).json({ success:false, message:`Duplicate rating for ${itemName}.` });
+    seenItemKeys.add(key);
+    itemRatings.push({ menuItem: orderItem.menuItem || null, itemName: orderItem.name, score: scoreValue, comment: String(raw?.comment || '').trim().slice(0,300) });
+  }
   let review = await Review.findOne({ order: order._id });
   const wasNewReview = !review;
   if (review && String(review.user) !== String(req.user._id)) return res.status(403).json({ success: false, message: 'Not authorized.' });
@@ -823,10 +844,12 @@ const submitReview = asyncHandler(async (req, res) => {
     review.score = numericScore;
     review.riderScore = numericRiderScore;
     review.comment = cleanComment;
+    review.photos = photos;
+    review.itemRatings = itemRatings;
     review.isVisible = true;
     review.adminNote = '';
   } else {
-    review = new Review({ restaurant: order.restaurant, user: req.user._id, order: order._id, score: numericScore, riderScore: numericRiderScore, comment: cleanComment });
+    review = new Review({ restaurant: order.restaurant, user: req.user._id, order: order._id, score: numericScore, riderScore: numericRiderScore, comment: cleanComment, photos, itemRatings });
   }
   await review.save();
 

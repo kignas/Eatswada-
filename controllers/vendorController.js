@@ -126,7 +126,7 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
   const skip  = (page - 1) * limit;
 
   const [orders, totalOrders] = await Promise.all([
-    Order.find(query)
+    Order.find(query).select('+pickupCode')
       .populate(VENDOR_ORDER_POPULATE)
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -169,6 +169,10 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
     });
   }
 
+  const prepRaw = req.body && (req.body.prepTimeMinutes ?? req.body.prepMinutes);
+  const prep = prepRaw == null || prepRaw === '' ? 20 : Number(prepRaw);
+  if (![15, 20, 25, 30].includes(prep)) return res.status(400).json({ success: false, message: 'prepTimeMinutes must be 15, 20, 25, or 30.' });
+
   const capacity = await getRestaurantCapacity(req.user.restaurantId);
   if (!capacity) return res.status(404).json({ success:false, message:'Restaurant not found.' });
   if (capacity.activeOrders >= capacity.maxActiveOrders) {
@@ -209,8 +213,9 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
     throw err;
   }
 
-  const prep = Number(req.body && req.body.prepMinutes);
-  if (Number.isFinite(prep) && prep > 0 && prep <= 240) order.prepMinutes = Math.round(prep);
+  order.prepMinutes = prep;
+  // Generate a separate restaurant pickup code; never reuse the customer delivery OTP.
+  order.generatePickupCode();
 
   order.advanceStatus('confirmed', 'Accepted by restaurant');
   // Persist a fallback dispatch deadline immediately. If the kitchen starts
@@ -275,6 +280,73 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
   await notifyOrderStatus(order.user, order);
 
   res.status(200).json({ success: true, data: order });
+});
+
+exports.extendOrderPreparation = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
+  if (order.status !== 'preparing') return res.status(409).json({ success: false, message: 'Preparation can only be extended while an order is preparing.' });
+  if (order.prepTimeExtended) return res.status(409).json({ success: false, code: 'PREP_EXTENSION_ALREADY_USED', message: 'The one-time +5 minute extension has already been used.' });
+  if (!order.prepStartedAt || !Number.isFinite(Number(order.prepMinutes)) || Number(order.prepMinutes) <= 0) return res.status(409).json({ success: false, message: 'Preparation timing is not initialized for this order.' });
+  order.prepTimeExtended = true;
+  order.prepMinutes = Math.min(240, Number(order.prepMinutes) + 5);
+  order.prepReadyAt = new Date(new Date(order.prepStartedAt).getTime() + Number(order.prepMinutes) * 60000);
+  if (order.deliveryModeSnapshot !== 'self_delivery' && !order.rider) {
+    order.dispatchNotBefore = new Date(new Date(order.prepStartedAt).getTime() + Math.max(0, Number(order.prepMinutes) - 12) * 60000);
+  }
+  order.statusHistory.push({ status: order.status, note: 'Restaurant used one-time +5 minute preparation extension.' });
+  await order.save();
+  return res.json({ success: true, message: 'Preparation extended by 5 minutes.', data: { orderId: order._id, prepMinutes: order.prepMinutes, prepReadyAt: order.prepReadyAt, dispatchNotBefore: order.dispatchNotBefore, prepTimeExtended: order.prepTimeExtended } });
+});
+
+exports.markOrderReady = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
+  if (order.status !== 'preparing') return res.status(409).json({ success: false, message: 'Only preparing orders can be marked ready.' });
+  if (order.deliveryModeSnapshot === 'self_delivery') {
+    order.isFoodReady = true; order.orderReadyAt = new Date(); order.undoReadyUntil = new Date(Date.now() + 15000);
+    order.readyPreviousPrepReadyAt = order.prepReadyAt; order.readyPreviousDispatchNotBefore = order.dispatchNotBefore;
+    order.advanceStatus('out_for_delivery', 'Restaurant marked food ready for self-delivery');
+    await order.save(); await notifyOrderStatus(order.user, order);
+    return res.json({ success: true, data: order, riderAssignment: null });
+  }
+  order.readyPreviousPrepReadyAt = order.prepReadyAt;
+  order.readyPreviousDispatchNotBefore = order.dispatchNotBefore;
+  order.isFoodReady = true;
+  order.orderReadyAt = new Date();
+  order.undoReadyUntil = new Date(Date.now() + 15000);
+  order.dispatchNotBefore = new Date();
+  order.advanceStatus('waiting_for_rider', 'Restaurant marked food ready');
+  let riderAssignment = null;
+  if (order.rider && ['accepted', 'reached_restaurant'].includes(order.riderStatus)) {
+    order.advanceStatus('assigned', 'Food ready; rider already accepted the assignment');
+    order.dispatchStatus = 'assigned';
+  } else if (!order.rider) {
+    riderAssignment = await autoAssignRider(order);
+  }
+  await order.save();
+  await notifyOrderStatus(order.user, order);
+  if (riderAssignment?.assigned) scheduleRiderTimeout(order._id, riderAssignment.rider?._id || riderAssignment.rider || order.rider);
+  return res.json({ success: true, data: order, ...(riderAssignment ? { riderAssignment } : {}) });
+});
+
+exports.undoOrderReady = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const order = await Order.findOne({ _id: req.params.id, ...orderOwnershipFilter(req) });
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found or access denied.' });
+  if (!order.isFoodReady || !order.undoReadyUntil || new Date(order.undoReadyUntil).getTime() < Date.now()) return res.status(409).json({ success: false, message: 'The 15-second Undo Ready window has expired.' });
+  if (order.rider || ['assigned', 'accepted', 'reached_restaurant', 'picked_up', 'out_for_delivery'].includes(order.riderStatus)) return res.status(409).json({ success: false, message: 'Undo is unavailable after rider assignment or pickup has begun.' });
+  if (!['waiting_for_rider', 'out_for_delivery'].includes(order.status)) return res.status(409).json({ success: false, message: 'Order can no longer be reverted safely.' });
+  order.status = 'preparing';
+  order.statusHistory.push({ status: 'preparing', note: 'Restaurant used Undo Ready within 15 seconds.' });
+  order.isFoodReady = false; order.orderReadyAt = null; order.undoReadyUntil = null;
+  order.prepReadyAt = order.readyPreviousPrepReadyAt || order.prepReadyAt;
+  order.dispatchNotBefore = order.readyPreviousDispatchNotBefore || order.dispatchNotBefore;
+  order.readyPreviousPrepReadyAt = null; order.readyPreviousDispatchNotBefore = null;
+  await order.save(); await notifyOrderStatus(order.user, order);
+  return res.json({ success: true, message: 'Order returned to preparing.', data: order });
 });
 
 exports.updateOrderStatus = asyncHandler(async (req, res) => {
@@ -452,12 +524,31 @@ exports.toggleItemStock = asyncHandler(async (req, res) => {
   const existing = await Menu.findOne({ _id: req.params.id, ...vendorMenuFilter(req) });
   if (!existing) return res.status(404).json({ success: false, message: 'Menu item not found or access denied.' });
 
-  const updated = await Menu.findByIdAndUpdate(existing._id, { inStock: !existing.inStock }, { new: true });
+  const turningOn = Object.prototype.hasOwnProperty.call(req.body || {}, 'inStock')
+    ? req.body.inStock === true
+    : !existing.inStock;
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'inStock') && typeof req.body.inStock !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'inStock must be a boolean.' });
+  }
+  let autoTurnOnAt = null;
+  if (!turningOn && Object.prototype.hasOwnProperty.call(req.body || {}, 'autoTurnOnAt') && req.body.autoTurnOnAt !== null && req.body.autoTurnOnAt !== '') {
+    const parsed = new Date(req.body.autoTurnOnAt);
+    if (!Number.isFinite(parsed.getTime()) || parsed.getTime() <= Date.now() || parsed.getTime() > Date.now() + 30 * 86400000) {
+      return res.status(400).json({ success: false, message: 'autoTurnOnAt must be a future timestamp within 30 days, or null for manual restock.' });
+    }
+    autoTurnOnAt = parsed;
+  }
+  const updated = await Menu.findOneAndUpdate(
+    { _id: existing._id, ...vendorMenuFilter(req) },
+    { $set: { inStock: turningOn, autoTurnOnAt: turningOn ? null : autoTurnOnAt } },
+    { new: true, runValidators: true }
+  );
   res.status(200).json({
     success: true,
     data: updated,
     inStock: updated.inStock,
-    message: updated.inStock ? 'Item is now In Stock.' : 'Item is now Out of Stock.',
+    autoTurnOnAt: updated.autoTurnOnAt || null,
+    message: updated.inStock ? 'Item is now In Stock.' : (updated.autoTurnOnAt ? 'Item is Out of Stock and scheduled to restock automatically.' : 'Item is now Out of Stock.'),
   });
 });
 
@@ -533,7 +624,7 @@ exports.getVendorReviews = asyncHandler(async (req, res) => {
   const skip = (page - 1) * limit;
   const [restaurant, reviews, total] = await Promise.all([
     Restaurant.findById(restaurantId).select('name rating ratingCount reviewCount'),
-    Review.find({ restaurant: restaurantId, isVisible: true }).populate('user','name avatar').sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Review.find({ restaurant: restaurantId, isVisible: true }).populate('user','name avatar').select('+itemRatings').sort({ createdAt: -1 }).skip(skip).limit(limit),
     Review.countDocuments({ restaurant: restaurantId, isVisible: true })
   ]);
   if (!restaurant) return res.status(404).json({ success:false, message:'Restaurant not found.' });

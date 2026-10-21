@@ -44,6 +44,8 @@ exports.createTicket = asyncHandler(async (req, res) => {
   const subject = String(req.body?.subject || '').trim().slice(0, 160);
   const message = String(req.body?.message || '').trim();
   const attachments = cleanAttachments(req.body?.attachments);
+  const photos = cleanAttachments(req.body?.photos);
+  if (Array.isArray(req.body?.photos) && req.body.photos.length > 4) return res.status(400).json({ success:false, message:'A complaint can include up to 4 photos.' });
   const affectedItems = cleanItems(req.body?.items);
 
   if (!ORDER_CATEGORIES.has(category) && !GENERAL_CATEGORIES.has(category)) return res.status(400).json({ success: false, message: 'Invalid support category.' });
@@ -65,7 +67,7 @@ exports.createTicket = asyncHandler(async (req, res) => {
     const now = new Date();
     const updated = await SupportTicket.findOneAndUpdate(
       { _id: existing._id, customer: req.user._id, status: { $in: OPEN_STATES }, ...sizeUnderCap },
-      { $push: { messages: { senderRole: 'user', sender: req.user._id, message, attachments, at: now } }, $set: { status: 'waiting_admin', customerLastReadAt: now } },
+      { $push: { messages: { senderRole: 'user', sender: req.user._id, message, attachments:[...new Set([...attachments, ...photos])].slice(0,3), at: now } }, $set: { status: 'waiting_admin', customerLastReadAt: now, ...(photos.length ? { photos } : {}) } },
       { new: true }
     );
     if (!updated) return res.status(409).json({ success: false, message: 'This conversation has reached its message limit. Please start a new request.' });
@@ -83,6 +85,7 @@ exports.createTicket = asyncHandler(async (req, res) => {
     subject: subject || `${category.replace(/_/g, ' ')}${label}`,
     status: 'open',
     affectedItems,
+    photos,
     customerLastReadAt: now,
     messages: [{ senderRole: 'user', sender: req.user._id, message, attachments, at: now }],
   });
