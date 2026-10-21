@@ -11,6 +11,8 @@ const payoutRequestSchema = new mongoose.Schema({
   schedule: { type: String, enum: ['weekly', 'monthly', 'manual'], default: 'weekly' },
   status: { type: String, enum: ['requested', 'processing', 'paid', 'rejected', 'cancelled'], default: 'requested', index: true },
   reference: { type: String, trim: true, maxlength: 120, default: '' },
+  // Explicit bank transfer reference/UTR, kept alongside legacy `reference`.
+  bankUtr: { type: String, trim: true, maxlength: 120, default: '' },
   adminNote: { type: String, trim: true, maxlength: 500, default: '' },
   requestedAt: { type: Date, default: Date.now },
   processedAt: { type: Date, default: null },

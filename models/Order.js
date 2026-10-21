@@ -254,6 +254,27 @@ const orderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    prepTimeExtended: { type: Boolean, default: false },
+    // Restaurant-to-rider handoff code. Hidden by default; only vendor order
+    // serialization explicitly selects the display code. Riders submit it.
+    pickupCodeRequired: { type: Boolean, default: false },
+    pickupCode: { type: String, select: false, default: null },
+    pickupCodeHash: { type: String, select: false, default: null },
+    pickupCodeSalt: { type: String, select: false, default: null },
+    pickupCodeAttempts: { type: Number, select: false, default: 0, min: 0 },
+    pickupCodeLockedUntil: { type: Date, select: false, default: null },
+    pickupCodeVerifiedAt: { type: Date, default: null },
+    riderReachedRestaurantAt: { type: Date, default: null },
+    riderArrivalLocation: {
+      coordinates: { type: [Number], default: undefined },
+      capturedAt: { type: Date, default: null },
+      distanceMeters: { type: Number, default: null },
+    },
+    isFoodReady: { type: Boolean, default: false },
+    orderReadyAt: { type: Date, default: null },
+    undoReadyUntil: { type: Date, default: null },
+    readyPreviousPrepReadyAt: { type: Date, default: null },
+    readyPreviousDispatchNotBefore: { type: Date, default: null },
     // Delivery dispatch is intentionally separate from kitchen/order status.
     // Riders may be sourced and assigned while the restaurant is preparing,
     // without falsely marking the food ready or changing the customer lifecycle.
@@ -472,6 +493,36 @@ orderSchema.pre('save', async function (next) {
 });
 
 /* ── Instance method: advance status ── */
+orderSchema.methods.generatePickupCode = function () {
+  const code = String(crypto.randomInt(1000, 10000));
+  const salt = crypto.randomBytes(16).toString('hex');
+  this.pickupCodeRequired = true;
+  this.pickupCode = code;
+  this.pickupCodeSalt = salt;
+  this.pickupCodeHash = hashOtp(code, salt);
+  this.pickupCodeAttempts = 0;
+  this.pickupCodeLockedUntil = null;
+  this.pickupCodeVerifiedAt = null;
+  return code;
+};
+
+orderSchema.methods.verifyPickupCode = function (enteredCode) {
+  const now = new Date();
+  if (this.pickupCodeLockedUntil && this.pickupCodeLockedUntil > now) return { ok: false, reason: 'locked', lockedUntil: this.pickupCodeLockedUntil };
+  if (!this.pickupCodeHash || !this.pickupCodeSalt) return { ok: false, reason: 'not_set' };
+  const received = String(enteredCode || '').trim();
+  const expected = this.pickupCodeHash;
+  const actual = hashOtp(received, this.pickupCodeSalt);
+  const ok = /^[0-9]{4}$/.test(received) && crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'));
+  if (ok) { this.pickupCodeVerifiedAt = now; this.pickupCodeAttempts = 0; return { ok: true }; }
+  this.pickupCodeAttempts = (this.pickupCodeAttempts || 0) + 1;
+  if (this.pickupCodeAttempts >= 5) {
+    this.pickupCodeLockedUntil = new Date(now.getTime() + 15 * 60 * 1000);
+    return { ok: false, reason: 'locked_now', lockedUntil: this.pickupCodeLockedUntil };
+  }
+  return { ok: false, reason: 'incorrect', attemptsRemaining: 5 - this.pickupCodeAttempts };
+};
+
 orderSchema.methods.advanceStatus = function (newStatus, note = '') {
   const NON_CANCELLABLE = ['preparing', 'out_for_delivery', 'delivered'];
   this.status = newStatus;

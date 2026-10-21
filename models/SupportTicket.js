@@ -23,6 +23,8 @@ const supportTicketSchema = new mongoose.Schema({
   subject: { type: String, required: true, trim: true, maxlength: 160 },
   status: { type: String, enum: ['open', 'waiting_vendor', 'waiting_admin', 'waiting_customer', 'resolved', 'closed'], default: 'open', index: true },
   messages: { type: [supportMessageSchema], default: [] },
+  // Complaint evidence visible to authorized ticket participants and admins.
+  photos: { type: [{ type: String, trim: true, maxlength: 1000 }], default: [] },
   closedAt: { type: Date, default: null },
   // Customer chat extras. affectedItems = item names the customer picked for
   // missing/wrong-item issues. customerLastReadAt drives the unread badge.

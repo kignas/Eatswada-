@@ -79,6 +79,8 @@ const menuItemSchema = new mongoose.Schema(
     stockQuantity: { type: Number, min: 0, default: 0 },
     lowStockThreshold: { type: Number, min: 0, default: 5 },
     pausedUntil: { type: Date, default: null },
+    // Optional persistent automatic restock deadline; null means manual stock control.
+    autoTurnOnAt: { type: Date, default: null, index: true },
     customizations: [
       {
         title: String,
