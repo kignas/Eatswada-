@@ -53,6 +53,7 @@ function publicTicket(ticket, { since = null } = {}) {
     order: o.order,
     restaurant: o.restaurant,
     affectedItems: o.affectedItems || [],
+    photos: o.photos || [],
     customerRating: o.customerRating || null,
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
