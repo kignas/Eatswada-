@@ -94,6 +94,11 @@ async function autoAssignRider(order, excludeRiderIds = []) {
     if (order.rider) return { assigned: false, rider: null, reason: 'Order already has a rider assigned.' };
     if (order.deliveryModeSnapshot === 'self_delivery') return { assigned: false, rider: null, reason: 'Restaurant uses self-delivery.' };
     if (!DISPATCHABLE_ORDER_STATUSES.includes(order.status)) return { assigned: false, rider: null, reason: `Order status ${order.status} is not eligible for dispatch.` };
+    // Do not offer a rider before the persisted preparation-aware dispatch time.
+    // An early-ready action can make this timestamp due immediately.
+    if (order.dispatchNotBefore && new Date(order.dispatchNotBefore).getTime() > Date.now()) {
+      return { assigned: false, rider: null, scheduled: true, dispatchNotBefore: order.dispatchNotBefore, reason: 'Rider dispatch is scheduled closer to the estimated food-ready time.' };
+    }
 
     const { rider, zoneMatched, distanceKm, reason } = await findBestAvailableRider(order, excludeRiderIds);
     const now = new Date();
@@ -175,13 +180,13 @@ async function recoverUnassignedOrders() {
   const retryCutoff = new Date(Date.now() - Math.max(30_000, Number(process.env.RIDER_DISPATCH_RETRY_MS) || 60_000));
   let candidates = [];
   try {
-    candidates = await Order.find({ rider: null, status: { $in: DISPATCHABLE_ORDER_STATUSES }, deliveryModeSnapshot: { $ne: 'self_delivery' }, dispatchStatus: { $in: ['not_started', 'searching', 'no_rider'] }, $or: [{ dispatchLastAttemptAt: null }, { dispatchLastAttemptAt: { $lte: retryCutoff } }] }).sort({ createdAt: 1 }).limit(50).lean();
+    candidates = await Order.find({ rider: null, status: { $in: DISPATCHABLE_ORDER_STATUSES }, deliveryModeSnapshot: { $ne: 'self_delivery' }, dispatchStatus: { $in: ['not_started', 'searching', 'no_rider'] }, $and: [ { $or: [{ dispatchNotBefore: null }, { dispatchNotBefore: { $lte: new Date() } }] }, { $or: [{ dispatchLastAttemptAt: null }, { dispatchLastAttemptAt: { $lte: retryCutoff } }] } ] }).sort({ createdAt: 1 }).limit(50).lean();
   } catch (err) { console.error('[dispatch-recovery] scan failed:', err.message); return { scanned: 0, assigned: 0 }; }
   let assigned = 0;
   for (const candidate of candidates) {
     try {
       const now = new Date();
-      const lock = await Order.updateOne({ _id: candidate._id, rider: null, $or: [{ dispatchLastAttemptAt: null }, { dispatchLastAttemptAt: { $lte: retryCutoff } }] }, { $set: { dispatchLastAttemptAt: now, dispatchStatus: 'searching' } });
+      const lock = await Order.updateOne({ _id: candidate._id, rider: null, $and: [ { $or: [{ dispatchNotBefore: null }, { dispatchNotBefore: { $lte: now } }] }, { $or: [{ dispatchLastAttemptAt: null }, { dispatchLastAttemptAt: { $lte: retryCutoff } }] } ] }, { $set: { dispatchLastAttemptAt: now, dispatchStatus: 'searching' } });
       if (!lock.modifiedCount) continue;
       const order = await Order.findById(candidate._id);
       if (!order || order.rider) continue;
