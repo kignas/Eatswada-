@@ -49,6 +49,7 @@ router.patch('/restaurants/:id/commission', protect, authorize('admin'), updateR
 router.get('/restaurants/:id/delivery-settings', protect, authorize('admin'), getRestaurantDeliverySettings);
 router.patch('/restaurants/:id/delivery-settings', protect, authorize('admin'), updateRestaurantDeliverySettings);
 router.get('/payout-requests', protect, authorize('admin'), adminMarketplace.listPayoutRequests);
+router.get('/payout-requests/:id/reconciliation', protect, authorize('admin'), adminMarketplace.getPayoutReconciliation);
 router.patch('/payout-requests/:id', protect, authorize('admin'), adminMarketplace.updatePayoutRequest);
 router.get('/support/tickets', protect, authorize('admin'), adminMarketplace.listSupportTickets);
 router.post('/support/tickets/:id/reply', protect, authorize('admin'), adminMarketplace.replySupportTicket);

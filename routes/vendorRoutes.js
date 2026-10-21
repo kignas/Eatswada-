@@ -20,6 +20,9 @@ const {
   getVendorOrders,
   acceptOrder,
   rejectOrder,
+  extendOrderPreparation,
+  markOrderReady,
+  undoOrderReady,
   updateOrderStatus,
   getVendorMenu,
   toggleItemStock,
@@ -80,6 +83,9 @@ router.get('/orders', protect, role('vendor'), getVendorOrders);
 
 // PUT  /api/vendor/orders/:id/accept  — accept a newly placed order
 router.put('/orders/:id/accept', protect, role('vendor'), acceptOrder);
+router.put('/orders/:id/extend-prep', protect, role('vendor'), extendOrderPreparation);
+router.put('/orders/:id/ready', protect, role('vendor'), markOrderReady);
+router.put('/orders/:id/undo-ready', protect, role('vendor'), undoOrderReady);
 
 // PUT  /api/vendor/orders/:id/reject  — reject a newly placed order, body: { reason }
 router.put('/orders/:id/reject', protect, role('vendor'), rejectOrder);
