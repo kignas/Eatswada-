@@ -900,6 +900,8 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 
   let riderAssignment = null;
   if (status === 'waiting_for_rider') {
+    // A ready event overrides the planned dispatch time; food is ready now.
+    order.dispatchNotBefore = new Date();
     if (order.rider && ['accepted', 'reached_restaurant'].includes(order.riderStatus)) {
       order.advanceStatus('assigned', 'Rider already accepted; restaurant marked food ready');
       order.dispatchStatus = 'assigned';

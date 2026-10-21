@@ -213,6 +213,13 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
   if (Number.isFinite(prep) && prep > 0 && prep <= 240) order.prepMinutes = Math.round(prep);
 
   order.advanceStatus('confirmed', 'Accepted by restaurant');
+  // Persist a fallback dispatch deadline immediately. If the kitchen starts
+  // preparation later, Order.advanceStatus('preparing') re-anchors it to the
+  // actual prep clock. The recovery worker never dispatches before this time.
+  if (order.deliveryModeSnapshot !== 'self_delivery' && Number(order.prepMinutes) > 0) {
+    const acceptedAt = new Date();
+    order.dispatchNotBefore = new Date(acceptedAt.getTime() + Math.max(0, Number(order.prepMinutes) - 12) * 60000);
+  }
   if (reserved.length) order.inventoryReservedAt = new Date();
   try { await order.save(); } catch (err) {
     for (const line of reserved) { await Menu.updateOne({_id:line.itemId,restaurantId:req.user.restaurantId},{$inc:{stockQuantity:line.quantity},$set:{inStock:true}}); }
@@ -304,6 +311,8 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
 
   let riderAssignment = null;
   if (nextStatus === 'waiting_for_rider') {
+    // Food is ready earlier than forecast: dispatch can begin immediately.
+    order.dispatchNotBefore = new Date();
     // If the rider accepted/arrived while the kitchen was preparing, promote
     // the customer-facing order only now, when the restaurant marks it ready.
     if (order.rider && ['accepted', 'reached_restaurant'].includes(order.riderStatus)) {
