@@ -258,6 +258,7 @@ let server;
 
 const { startAssignmentRecovery } = require('./services/riderAssignmentService');
 const { startRestaurantResponseRecovery } = require('./services/restaurantOrderTimeoutService');
+const { startMenuStockScheduler } = require('./services/menuStockScheduler');
 
 connectDB().then(() => {
   // Durable safety net for rider auto-assignment: an in-process setTimeout is
@@ -266,6 +267,8 @@ connectDB().then(() => {
   startAssignmentRecovery();
   // Durable safety net for the restaurant's 5-minute response window.
   startRestaurantResponseRecovery();
+  // Recover scheduled automatic menu restocks after restarts and every minute.
+  startMenuStockScheduler();
 
   if (perfDiagnostics.enabled) perfDiagnostics.start(mongoose.connection);
 
