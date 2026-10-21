@@ -1,0 +1,16 @@
+'use strict';
+const fs = require('fs');
+const assert = require('assert');
+const read = (p) => fs.readFileSync(require('path').join(__dirname, '..', p), 'utf8');
+const uploadRoutes = read('routes/uploadRoutes.js');
+const uploadController = read('controllers/uploadController.js');
+const orderController = read('controllers/orderController.js');
+const reviewModel = read('models/Review.js');
+const restaurantController = read('controllers/restaurantController.js');
+assert(uploadRoutes.includes("router.post('/customer-media', protect, authorize('user')"), 'customer upload route must require authenticated user');
+assert(uploadRoutes.includes("customerMediaUpload.array('images', 4)"), 'customer upload must support up to four images');
+assert(uploadController.includes('Eatswada/customer-media/'), 'customer uploads must use a user-scoped Cloudinary folder');
+assert(reviewModel.includes('photos:'), 'review schema must store photos');
+assert(orderController.includes('Review photos must be uploaded through the customer image upload endpoint.'), 'review must validate uploaded image URLs');
+assert(restaurantController.includes('photos: r.photos || []'), 'public restaurant review API must return photo URLs');
+console.log('Customer media/review photo contract: PASS');
