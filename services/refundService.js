@@ -45,7 +45,28 @@ function syncInMemory(order, fresh) {
 
 async function initiateOrderRefund(order, reason = '') {
   if (!order) return { refunded: false, skipped: 'no_order' };
-  if (order.paymentMethod === 'cod') return { refunded: false, skipped: 'cod' };
+  if (order.paymentMethod === 'cod') {
+    // COD orders were paid in cash at the door, so a gateway refund is not the
+    // correct instrument. If the rider has already collected the cash
+    // (paymentStatus 'cod_collected'), queue a manual COD resolution payout
+    // for Admin to action. This records a pending obligation; it does NOT mean
+    // the customer has already been paid. Never throws.
+    if (order.paymentStatus === 'cod_collected') {
+      try {
+        await recordCodResolutionPayout(
+          order._id,
+          Number(order.total || 0),
+          String(reason || 'Order cancelled after COD collection').slice(0, 200),
+          null
+        );
+        return { refunded: false, skipped: 'cod_manual_payout_pending' };
+      } catch (err) {
+        console.error(`[REFUND] COD resolution payout failed for order=${order._id}: ${err.message}`);
+        return { refunded: false, skipped: 'cod', error: err.message };
+      }
+    }
+    return { refunded: false, skipped: 'cod' };
+  }
 
   const cleanReason = String(reason || '').slice(0, 200);
   const now = new Date();
@@ -257,23 +278,37 @@ async function initiateSupportRefund(orderId, amountRupees, reason = '', adminId
 /**
  * COD resolution payout. Cash was handed to the rider, so the customer cannot
  * be refunded through a gateway. Instead Admin records a manual payout, which
- * this stores on the order and in the rider's ledger for reconciliation.
+ * this stores as a pending obligation on the order for Admin follow-up.
  */
 async function recordCodResolutionPayout(orderId, amountRupees, reason = '', adminId = null) {
-  const order = await Order.findById(orderId).select('paymentMethod total codResolutionPayout');
+  const order = await Order.findById(orderId).select('paymentMethod paymentStatus total codResolutionPayout');
   if (!order) return { recorded: false, skipped: 'no_order' };
   const amount = round2(amountRupees);
   if (amount <= 0) return { recorded: false, skipped: 'invalid_amount' };
   if (order.paymentMethod !== 'cod') return { recorded: false, skipped: 'not_cod' };
-  if (order.codResolutionPayout?.status === 'recorded') return { recorded: false, skipped: 'already_recorded' };
+  if (order.paymentStatus !== 'cod_collected') return { recorded: false, skipped: 'cod_not_collected' };
+  if (['pending', 'paid'].includes(order.codResolutionPayout?.status)) return { recorded: false, skipped: 'already_recorded' };
 
+  // The Order schema defaults codResolutionPayout.status to 'none', so 'none'
+  // must be claimable alongside an absent/null value — otherwise the payout can
+  // never be recorded for any real order.
   const claimed = await Order.findOneAndUpdate(
-    { _id: order._id, paymentMethod: 'cod', $or: [{ 'codResolutionPayout.status': { $exists: false } }, { 'codResolutionPayout.status': null }] },
-    { $set: { 'codResolutionPayout': { status: 'recorded', amount: Math.min(amount, round2(order.total)), reason: String(reason || '').slice(0, 200), recordedBy: adminId, recordedAt: new Date() } } },
+    {
+      _id: order._id,
+      paymentMethod: 'cod',
+      paymentStatus: 'cod_collected',
+      $or: [
+        { 'codResolutionPayout.status': { $exists: false } },
+        { 'codResolutionPayout.status': null },
+        { 'codResolutionPayout.status': 'none' },
+        { 'codResolutionPayout.status': 'failed' },
+      ],
+    },
+    { $set: { 'codResolutionPayout': { status: 'pending', amount: Math.min(amount, round2(order.total)), reason: String(reason || '').slice(0, 200), recordedBy: adminId, recordedAt: new Date(), payoutReference: '', paidBy: null, paidAt: null } } },
     { new: true }
   );
   if (!claimed) return { recorded: false, skipped: 'already_recorded' };
-  return { recorded: true, amount: Math.min(amount, round2(order.total)), method: 'manual_payout' };
+  return { recorded: true, status: 'pending', amount: Math.min(amount, round2(order.total)), method: 'manual_payout_pending' };
 }
 
 /** Issue a platform coupon as a goodwill resolution (works for UPI and COD). */

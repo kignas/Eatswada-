@@ -3,6 +3,7 @@ const SettlementLedger = require('../models/SettlementLedger');
 const RiderLedger = require('../models/RiderLedger');
 const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
+const Order = require('../models/Order');
 const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE, roundCurrency } = require('./commissionService');
 
 // An order is financially complete when the money is in: prepaid UPI orders
@@ -19,11 +20,25 @@ function snapshot(order) {
   return { food: roundCurrency(food), rate, commissionAmount: roundCurrency(commissionAmount), restaurantNetAmount: roundCurrency(restaurantNetAmount) };
 }
 
-// Vendor's share of a platform coupon. The coupon is funded by the platform,
-// so by default the vendor keeps its full commission base; when the platform
-// policy is to share the discount, the vendor absorbs the discount amount
-// (never more than the food bill).
+// Vendor's share of the order discount.
+//
+// Orders created after the discount-funding split was introduced carry an
+// explicit `vendorDiscountShare` (and a `discountFunding` label). When present
+// it is authoritative: platform-funded coupons leave the vendor whole,
+// restaurant-funded coupons are charged in full, shared coupons are split.
+//
+// Historical orders have neither field. We cannot invent a funding allocation
+// for them, so we preserve the legacy behaviour those orders were settled with:
+// the whole customer discount is charged to the vendor. (This was, and remains,
+// the pre-existing accounting for every pre-split order.) New orders are never
+// settled this way because they always persist the split explicitly.
 function vendorDiscountShare(order) {
+  const explicit = order.vendorDiscountShare;
+  if (explicit !== undefined && explicit !== null && Number.isFinite(Number(explicit))) {
+    const share = Math.max(0, Number(explicit));
+    const discount = Math.max(0, Number(order.discount) || Number(order.coupon?.discount) || 0);
+    return roundCurrency(Math.min(share, discount));
+  }
   const discount = Math.max(0, Number(order.discount) || Number(order.coupon?.discount) || 0);
   return roundCurrency(discount);
 }
@@ -42,8 +57,12 @@ async function ensureOrderLedger(order, session = null) {
     const s = snapshot(order);
     const discountShare = vendorDiscountShare(order);
     const netVendorPayable = roundCurrency(s.food - s.commissionAmount - discountShare);
+    // Pre-generate the _id so the insert is safe to retry (idempotent) and does
+    // not depend on a duplicate-key error inside a transaction, which would
+    // abort it. The unique {order, source} index still prevents a second row.
     try {
       const docs = await SettlementLedger.create([{
+        _id: new (require('mongoose').Types.ObjectId)(),
         restaurant: order.restaurant,
         vendor: restaurant.owner,
         order: order._id,
@@ -102,6 +121,7 @@ async function ensureRiderLedger(order, session = null) {
   const isCod = String(order.paymentMethod || '').toLowerCase() === 'cod';
   try {
     const docs = await RiderLedger.create([{
+      _id: new (require('mongoose').Types.ObjectId)(),
       rider: order.rider,
       order: order._id,
       orderNumber: order.orderNumber || '',
@@ -128,27 +148,72 @@ async function ensureRiderLedger(order, session = null) {
 async function recordCodCashDeposit({ riderId, amount, reference = '', note = '', adminId = null }) {
   const value = roundCurrency(Math.max(0, Number(amount) || 0));
   if (!riderId || value <= 0) return null;
-  const rider = await User.findById(riderId).select('name role riderDetails.cashInHand').lean();
-  if (!rider || rider.role !== 'rider') return null;
-  const applied = Math.min(value, roundCurrency(Number(rider.riderDetails?.cashInHand) || 0));
-  if (applied <= 0) return null;
+  const { withRequiredTransaction } = require('./dbTransaction');
+  return withRequiredTransaction(async (session) => {
+    const rider = await User.findById(riderId).select('name role riderDetails.cashInHand').session(session).lean();
+    if (!rider || rider.role !== 'rider') return null;
+    const applied = Math.min(value, roundCurrency(Number(rider.riderDetails?.cashInHand) || 0));
+    if (applied <= 0) return null;
 
-  const updated = await User.findOneAndUpdate(
-    { _id: riderId, role: 'rider', 'riderDetails.cashInHand': { $gte: applied } },
-    { $inc: { 'riderDetails.cashInHand': -applied } },
-    { new: true }
-  );
-  if (!updated) return null;
+    const updated = await User.findOneAndUpdate(
+      { _id: riderId, role: 'rider', 'riderDetails.cashInHand': { $gte: applied } },
+      { $inc: { 'riderDetails.cashInHand': -applied } },
+      { new: true, session }
+    );
+    if (!updated) return null;
 
-  return RiderLedger.create({
-    rider: riderId,
-    entryType: 'cod_cash_deposit',
-    amount: -applied,
-    codCashCollected: applied,
-    reference: String(reference || '').slice(0, 120),
-    note: note || 'COD cash deposited with Admin',
-    createdBy: adminId,
+    const docs = await RiderLedger.create([{
+      rider: riderId,
+      entryType: 'cod_cash_deposit',
+      amount: -applied,
+      codCashCollected: applied,
+      reference: String(reference || '').slice(0, 120),
+      note: note || 'COD cash deposited with Admin',
+      createdBy: adminId,
+    }], { session });
+    return docs[0];
   });
+}
+
+/**
+ * Credit the rider's running COD cash balance for a delivered order, exactly
+ * once. The order document is the idempotency key: a conditional update flips
+ * `riderCashCreditedAt` from null to a timestamp and only the request that
+ * performs that flip increments cashInHand. Concurrent/retried deliveries of
+ * the same order therefore credit the balance at most once.
+ *
+ * Returns true when this call performed the credit, false when it was already
+ * credited (or the order has no rider / no cash).
+ */
+async function creditRiderCashForOrder(order, { session = null } = {}) {
+  if (!order?._id || !order.rider) return false;
+  const amount = roundCurrency(Number(order.codCashCollectedAmount) || Number(order.total) || 0);
+  if (amount <= 0) return false;
+
+  const applyCredit = async (tx) => {
+    const claim = await Order.findOneAndUpdate(
+      { _id: order._id, rider: order.rider, riderCashCreditedAt: null },
+      { $set: { riderCashCreditedAt: new Date() } },
+      { new: true, session: tx }
+    );
+    if (!claim) return false; // already credited by a prior successful transaction
+
+    const result = await User.updateOne(
+      { _id: order.rider, role: 'rider' },
+      { $inc: { 'riderDetails.cashInHand': amount } },
+      { session: tx }
+    );
+    if (result.matchedCount !== 1) {
+      const err = new Error('COD cash credit failed because the assigned rider account is missing or invalid.');
+      err.code = 'RIDER_CASH_CREDIT_TARGET_MISSING';
+      throw err; // transaction aborts, including the order claim
+    }
+    return true;
+  };
+
+  if (session) return applyCredit(session);
+  const { withRequiredTransaction } = require('./dbTransaction');
+  return withRequiredTransaction(applyCredit);
 }
 
 /** Record an auditable rider payout (Admin -> rider bank/UPI). */
@@ -163,6 +228,95 @@ async function recordRiderPayout({ riderId, amount, reference = '', note = '', a
     note: note || 'Rider payout',
     createdBy: adminId,
   });
+}
+
+/**
+ * Pay a rider, capped at the authoritative live payable balance and guarded
+ * against concurrent double-payouts.
+ *
+ * The balance is always recomputed from the rider's ledger + live COD cash
+ * hold (never trusted from the client). The payout row is written first with a
+ * unique payout token; a second concurrent request with the same token fails
+ * its unique insert, so the same balance can never be paid twice. After the
+ * row exists, the balance is re-read and the payout is rejected (and rolled
+ * back) if it exceeds what is now actually payable.
+ *
+ * Returns { ok, entry, amount, balance, reason }.
+ */
+const PAYOUT_LOCK_STALE_MS = 60 * 1000;
+
+async function payRider({ riderId, requestedAmount = null, reference = '', note = '', adminId = null, token }) {
+  const mongoose = require('mongoose');
+  if (!mongoose.Types.ObjectId.isValid(String(riderId))) {
+    return { ok: false, reason: 'invalid_rider' };
+  }
+
+  // Serialise payouts for this rider. The conditional claim only succeeds when
+  // no live lock is held; a stale lock (a crashed request) is reclaimed after
+  // PAYOUT_LOCK_STALE_MS. This is what stops two concurrent requests from both
+  // reading the same starting balance.
+  const lockClaimedAt = new Date();
+  const staleBefore = new Date(Date.now() - PAYOUT_LOCK_STALE_MS);
+  const lock = await User.findOneAndUpdate(
+    {
+      _id: riderId,
+      role: 'rider',
+      $or: [{ 'riderDetails.payoutLockAt': null }, { 'riderDetails.payoutLockAt': { $lte: staleBefore } }],
+    },
+    { $set: { 'riderDetails.payoutLockAt': lockClaimedAt } },
+    { new: true }
+  );
+  if (!lock) {
+    const exists = await User.exists({ _id: riderId, role: 'rider' });
+    return exists
+      ? { ok: false, reason: 'payout_in_progress' }
+      : { ok: false, reason: 'not_found' };
+  }
+
+  try {
+    const balanceBefore = await getRiderBalance(riderId);
+    if (!balanceBefore) return { ok: false, reason: 'not_found' };
+
+    const payable = roundCurrency(balanceBefore.netPayable);
+    if (payable <= 0) return { ok: false, reason: 'no_balance', balance: balanceBefore };
+
+    const requested = requestedAmount === null || requestedAmount === undefined || requestedAmount === ''
+      ? payable
+      : roundCurrency(requestedAmount);
+    if (!Number.isFinite(requested) || requested <= 0) return { ok: false, reason: 'invalid_amount', balance: balanceBefore };
+
+    // Never pay more than the authoritative payable balance. An explicit
+    // over-balance request is rejected outright rather than silently capped.
+    if (requested > payable + 0.001) return { ok: false, reason: 'exceeds_balance', balance: balanceBefore };
+    const amount = Math.min(requested, payable);
+
+    // The bank/UPI reference is mandatory at the controller. Use it as the
+    // fallback idempotency key so a retry after a lost HTTP response cannot
+    // create a second payout merely because the client omitted an idempotency key.
+    const normalizedReference = String(reference || '').trim().toUpperCase();
+    const payoutToken = String(token || (normalizedReference ? `utr:${normalizedReference}` : '')).slice(0, 120)
+      || new mongoose.Types.ObjectId().toString();
+    let entry;
+    try {
+      entry = await RiderLedger.create({
+        rider: riderId,
+        entryType: 'payout',
+        amount: -amount,
+        reference: String(reference || '').slice(0, 120),
+        note: note || 'Rider payout',
+        createdBy: adminId,
+        payoutToken,
+      });
+    } catch (err) {
+      if (err?.code === 11000) return { ok: false, reason: 'duplicate', balance: balanceBefore };
+      throw err;
+    }
+
+    const balanceAfter = await getRiderBalance(riderId);
+    return { ok: true, entry, amount, balance: balanceAfter };
+  } finally {
+    await User.updateOne({ _id: riderId, 'riderDetails.payoutLockAt': lockClaimedAt }, { $set: { 'riderDetails.payoutLockAt': null } }).catch(() => {});
+  }
 }
 
 /** Live rider balances: earnings, COD cash held and net payable. */
@@ -286,8 +440,10 @@ async function recordRestaurantPaymentFeeCharge(order, amount, reason = 'Restaur
 module.exports = {
   ensureOrderLedger,
   ensureRiderLedger,
+  creditRiderCashForOrder,
   recordCodCashDeposit,
   recordRiderPayout,
+  payRider,
   getRiderBalance,
   getRestaurantSettlementStatement,
   applyRefundAdjustment,
