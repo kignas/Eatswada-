@@ -184,6 +184,166 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   res.json({ success: true, data: order });
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// Pillar 7 — Live Order War Room overrides.
+//
+// Three emergency levers for the ops desk when a normal transition is stuck:
+//   force-accept   vendor is unresponsive -> accept on their behalf (+KPT)
+//   force-dispatch skip the delayed-dispatch window -> assign a rider now
+//   force-deliver  OTP cannot be delivered (no network at the door)
+//
+// Every override requires a reason, is written to AdminAuditLog, and is also
+// appended to the order's own adminOverrides history.
+// ─────────────────────────────────────────────────────────────────────
+
+function pushOrderOverride(order, action, reason, adminId) {
+  order.adminOverrides = order.adminOverrides || [];
+  order.adminOverrides.push({ action, reason: String(reason || '').slice(0, 300), by: adminId, at: new Date() });
+}
+
+exports.forceAcceptOrder = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  if (!reason) return res.status(400).json({ success: false, message: 'A reason is required for a force-accept override.' });
+
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+  if (['delivered', 'cancelled'].includes(order.status)) {
+    return res.status(409).json({ success: false, message: `Cannot force-accept an order that is already ${order.status}.` });
+  }
+  if (['preparing', 'waiting_for_rider', 'assigned', 'out_for_delivery'].includes(order.status)) {
+    return res.status(409).json({ success: false, message: `Order is already past vendor acceptance (${order.status}).` });
+  }
+
+  const previousStatus = order.status;
+  // Accept on the vendor's behalf. KPT = kitchen prep time; the platform
+  // default prep window is used so dispatch scheduling still works.
+  const prepMinutes = Number(order.prepMinutes) > 0 ? Number(order.prepMinutes) : 15;
+  if (!(Number(order.prepMinutes) > 0)) order.prepMinutes = prepMinutes;
+  order.vendorAcceptedAt = new Date();
+  order.advanceStatus('preparing', `Force-accepted by admin (${reason})`);
+  pushOrderOverride(order, 'force_accept', reason, req.user._id);
+  await order.save();
+
+  await logAdminAction(req, {
+    action: 'order.force_accept',
+    targetType: 'order',
+    targetId: order._id,
+    targetLabel: order.orderNumber || String(order._id),
+    oldValue: { status: previousStatus },
+    newValue: { status: order.status, reason, prepMinutes },
+  });
+  res.json({ success: true, data: order });
+});
+
+exports.forceDispatchOrder = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  if (!reason) return res.status(400).json({ success: false, message: 'A reason is required for a force-dispatch override.' });
+
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+  if (['delivered', 'cancelled'].includes(order.status)) {
+    return res.status(409).json({ success: false, message: `Cannot force-dispatch an order that is already ${order.status}.` });
+  }
+  if (['out_for_delivery', 'picked_up'].includes(order.riderStatus)) {
+    return res.status(409).json({ success: false, message: 'A rider is already carrying this order.' });
+  }
+
+  // Cancel the delayed-dispatch window so autoAssignRider dispatches NOW.
+  order.dispatchNotBefore = null;
+  order.isFoodReady = true;
+  order.orderReadyAt = order.orderReadyAt || new Date();
+  order.dispatchStartedAt = order.dispatchStartedAt || new Date();
+  pushOrderOverride(order, 'force_dispatch', reason, req.user._id);
+  await order.save();
+
+  const { autoAssignRider } = require('../services/riderAssignmentService');
+  const assignment = await autoAssignRider(order);
+  const fresh = await Order.findById(order._id);
+
+  await logAdminAction(req, {
+    action: 'order.force_dispatch',
+    targetType: 'order',
+    targetId: order._id,
+    targetLabel: order.orderNumber || String(order._id),
+    newValue: { reason, assigned: !!assignment?.rider, riderId: assignment?.rider?._id || null },
+  });
+  res.json({ success: true, data: { order: fresh, assignment } });
+});
+
+exports.forceDeliverOrder = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  if (!reason) return res.status(400).json({ success: false, message: 'A reason is required for a force-deliver override.' });
+
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+  if (order.status === 'delivered') return res.status(409).json({ success: false, message: 'Order is already delivered.' });
+  if (order.status === 'cancelled') return res.status(409).json({ success: false, message: 'A cancelled order cannot be force-delivered.' });
+  if (!order.rider) return res.status(409).json({ success: false, message: 'Assign a rider before force-delivering an order.' });
+
+  const isCod = String(order.paymentMethod || '').toLowerCase() === 'cod';
+  const codCashCollected = isCod ? req.body?.codCashCollected !== false : false;
+  if (isCod && !codCashCollected) {
+    return res.status(409).json({ success: false, message: 'Confirm the COD cash was collected before force-delivering.' });
+  }
+
+  const previousStatus = order.status;
+  // Bypass the customer OTP: network failure at the doorstep. The override is
+  // recorded on the order AND in the audit log so it is never silent.
+  order.deliveryOtpVerified = true;
+  order.deliveryOtpBypassReason = reason;
+  order.advanceStatus('delivered', `Force-delivered by admin (${reason})`);
+  if (isCod) {
+    order.paymentStatus = 'cod_collected';
+    order.cashCollected = true;
+    order.codCollectedAt = new Date();
+    order.codCashCollectedAmount = Number(order.total || 0);
+    await User.updateOne({ _id: order.rider, role: 'rider' }, { $inc: { 'riderDetails.cashInHand': Number(order.total || 0) } }).catch(() => {});
+  }
+  pushOrderOverride(order, 'force_deliver', reason, req.user._id);
+  await order.save();
+
+  try {
+    await require('../services/settlementService').ensureOrderLedger(order);
+    await require('../services/settlementService').ensureRiderLedger(order);
+  } catch (err) {
+    console.error(`[SETTLEMENT] ledger write failed for force-delivered order ${order._id}: ${err.message}`);
+  }
+
+  await logAdminAction(req, {
+    action: 'order.force_deliver',
+    targetType: 'order',
+    targetId: order._id,
+    targetLabel: order.orderNumber || String(order._id),
+    oldValue: { status: previousStatus, otpVerified: false },
+    newValue: { status: order.status, otpVerified: true, reason, codCashCollected },
+  });
+  res.json({ success: true, data: order });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Pillar 1 — live delivery-capacity view for the dashboard shortage card.
+// ─────────────────────────────────────────────────────────────────────
+exports.getDeliveryCapacity = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const { getZoneDeliveryCapacity } = require('../services/riderAssignmentService');
+  const { getPlatformSettings } = require('../services/platformSettingsService');
+  const zone = String(req.query.zone || '').trim();
+  const [capacity, settings] = await Promise.all([getZoneDeliveryCapacity(zone), getPlatformSettings()]);
+  res.json({ success: true, data: {
+    capacity,
+    settings: {
+      isUnderMaintenance: settings.isUnderMaintenance,
+      isDeliveryPausedShortage: settings.isDeliveryPausedShortage,
+      autoShortageCircuitBreaker: settings.autoShortageCircuitBreaker,
+      maxActiveOrdersPerOnlineRider: settings.maxActiveOrdersPerOnlineRider,
+      isRainSurgeActive: settings.isRainSurgeActive,
+    },
+  } });
+});
+
 exports.updateRestaurantFssai = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const status = req.body?.status;

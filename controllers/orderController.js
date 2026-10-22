@@ -27,6 +27,9 @@ const { initiateOrderRefund } = require('../services/refundService');
 const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE } = require('../services/commissionService');
 const { ensureOrderLedger } = require('../services/settlementService');
 const { deadlinesFrom, isWithinCustomerCancellationWindow } = require('../services/orderCancellationPolicy');
+const { getPlatformSettings, billPolicyFrom } = require('../services/platformSettingsService');
+const { computeCheckoutBill, evaluateCheckoutGate } = require('../services/checkoutMath');
+const { getZoneDeliveryCapacity, resolveOrderZone } = require('../services/riderAssignmentService');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -113,6 +116,7 @@ const {
   isPlaceholderRestaurantLocation,
   haversineKm,
   calculateDeliveryFee,
+  calculatePolicyDeliveryFee,
 } = require('../services/deliveryPricing');
 
 // Customer tip is optional, but must stay within a sane server-side limit.
@@ -267,7 +271,7 @@ async function resolveDeliveryAddress({ addressId, deliveryAddress, userId }) {
 // shared across every restaurant in the checkout. Throws (with .statusCode)
 // on any failure so the WHOLE checkout is rejected before a single order is
 // written — a customer never ends up with a partial multi-restaurant order.
-async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
+async function buildRestaurantPricing({ restaurantId, items, customerCoords, billPolicy = null }) {
   if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
     const error = new Error('Invalid restaurant'); error.statusCode = 400; throw error;
   }
@@ -346,12 +350,15 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     e.statusCode = 400; throw e;
   }
 
-  // Per-restaurant delivery fee + per-restaurant free-delivery threshold.
-  const baseDeliveryFee = calculateDeliveryFee(distanceKm);
+  // Per-restaurant delivery fee. When the platform bill policy is available
+  // it prices by distance (base fee + per-km); otherwise the legacy flat ₹30
+  // launch fee is used, so an unconfigured deployment is unchanged.
+  const policyFee = billPolicy
+    ? calculatePolicyDeliveryFee(distanceKm, billPolicy)
+    : calculateDeliveryFee(distanceKm);
   const freeDeliveryAbove = Number(restaurant.freeDeliveryAbove || 0);
-  const deliveryFee = freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove
-    ? 0
-    : baseDeliveryFee;
+  const restaurantFreeDelivery = freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove;
+  const baseDeliveryFee = policyFee;
 
   const commission = calculateRestaurantCommission({
     subtotal,
@@ -365,7 +372,12 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
     restaurant,
     serverItems,
     subtotal,
-    deliveryFee,
+    baseDeliveryFee,
+    restaurantFreeDelivery,
+    // Legacy field kept for existing callers/tests: the fee after the
+    // restaurant-level free-delivery waiver. The platform-level free-delivery
+    // rules are applied later by computeCheckoutBill.
+    deliveryFee: restaurantFreeDelivery ? 0 : baseDeliveryFee,
     distanceKm: Number(distanceKm.toFixed(2)),
     commission,
   };
@@ -378,14 +390,19 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords }) {
 function buildCheckoutResponse(orders, replay) {
   const shaped = orders.map(o => {
     const otp = replay ? (o.deliveryOtp || '') : (o._capturedOtp || '');
+    const base = withLiveDisplayData(o);
     return {
       order: {
-        ...withLiveDisplayData(o),
+        ...base,
         orderNumber: o.orderNumber,
         shipmentId: o.shipmentId,
         publicOrderId: o.orderNumber,
         publicShipmentId: o.shipmentId,
         deliveryDistanceKm: o.deliveryDistanceKm,
+        // Pillar 2 — itemized bill. `grandTotal` mirrors `total` for
+        // backward compatibility; the itemized lines drive the receipt UI.
+        bill: o.bill || null,
+        grandTotal: Number(o.grandTotal ?? o.total ?? 0),
       },
       deliveryOtp: otp,
     };
@@ -446,14 +463,20 @@ const createOrder = asyncHandler(async (req, res) => {
     couponCode = '',
   } = req.body;
 
-  const validPaymentMethods = ['upi'];
-  if (!validPaymentMethods.includes(paymentMethod)) {
-    const e = new Error('Only UPI online payment is available. Cash on Delivery is disabled.'); e.statusCode = 400; throw e;
+  // Pillar 3 — dual payment engine. Both methods are gated by the platform
+  // configuration below; the client's value is only a request, never a grant.
+  const requestedMethod = String(paymentMethod || 'upi').toLowerCase();
+  if (!['upi', 'cod'].includes(requestedMethod)) {
+    const e = new Error('Payment method must be either UPI or Cash on Delivery.'); e.statusCode = 400; throw e;
   }
-  assertConfigured();
+  if (requestedMethod === 'upi') assertConfigured();
   if (!Array.isArray(items) || items.length === 0) {
     const e = new Error('Cart is empty'); e.statusCode = 400; throw e;
   }
+
+  // ── Platform configuration (maintenance, shortage, bill, payment) ───
+  const settings = await getPlatformSettings();
+  const billPolicy = billPolicyFrom(settings);
 
   // ── Idempotency ─────────────────────────────────────────────────────
   // A client may retry (double-tap, dropped response, network retry). When it
@@ -470,6 +493,19 @@ const createOrder = asyncHandler(async (req, res) => {
     if (existing.length) {
       return res.status(200).json(buildCheckoutResponse(existing, true));
     }
+  }
+
+  // ── Pillar 1: Platform maintenance circuit breaker ──────────────────
+  // Checked before any pricing work. An idempotent REPLAY of an already-placed
+  // checkout above is intentionally allowed to succeed — it creates nothing.
+  if (settings.isUnderMaintenance === true) {
+    return res.status(503).json({
+      success: false,
+      code: 'PLATFORM_MAINTENANCE',
+      message: settings.maintenanceMessage || 'Eatswada is under maintenance. Ordering is paused right now.',
+      maintenanceTitle: settings.maintenanceTitle || 'Eatswada is under maintenance',
+      maintenanceEta: settings.maintenanceEta || '',
+    });
   }
 
   // ── Resolve the ONE delivery address for the whole checkout ─────────
@@ -498,6 +534,24 @@ const createOrder = asyncHandler(async (req, res) => {
   const menuRestaurantMap = new Map(ownerDocs.map(m => [String(m._id), String(m.restaurantId)]));
   const groups = groupItemsByRestaurant(items, menuRestaurantMap); // throws 400 on any unknown item
 
+  // ── Pillar 1: rider-shortage circuit breaker ────────────────────────
+  // Manual pause OR automatic capacity breach blocks new checkouts. The
+  // capacity snapshot is only fetched when the automatic breaker is armed, so
+  // an idle deployment pays nothing for it.
+  if (settings.isDeliveryPausedShortage === true ||
+      (settings.autoShortageCircuitBreaker === true && groups.length)) {
+    const zone = await resolveOrderZone({ restaurant: groups[0].restaurantId });
+    const capacity = await getZoneDeliveryCapacity(zone);
+    const gate = evaluateCheckoutGate({
+      settings,
+      onlineRiders: capacity.onlineRiders,
+      activeOrders: capacity.activeOrders,
+    });
+    if (gate) {
+      return res.status(gate.statusCode).json({ success: false, ...gate, deliveryCapacity: capacity });
+    }
+  }
+
   // ── Price EVERY restaurant before creating anything ─────────────────
   const priced = [];
   for (const group of groups) {
@@ -505,6 +559,7 @@ const createOrder = asyncHandler(async (req, res) => {
       restaurantId: group.restaurantId,
       items: group.items,
       customerCoords,
+      billPolicy,
     }));
   }
 
@@ -524,17 +579,57 @@ const createOrder = asyncHandler(async (req, res) => {
     if (priced.length && Math.abs(allocated-couponInfo.discount)>0.01) priced[priced.length-1].discount=Math.round((Number(priced.at(-1).discount||0)+(couponInfo.discount-allocated))*100)/100;
   }
 
-  // Platform payment policy: COD is permanently disabled for all new orders.
-  // The only accepted checkout method is UPI through the existing Razorpay flow.
+  // ── Pillar 3: dual payment engine gating ────────────────────────────
+  // COD is only available when the platform enables it, the customer is not
+  // COD-blocked, and the checkout total is within the COD cap. All three are
+  // validated server-side against the customer document, never the client.
+  const customer = await User.findById(req.user._id).select('name phone isCodBlocked').lean();
+  if (requestedMethod === 'cod') {
+    if (settings.isCodEnabled !== true) {
+      const e = new Error('Cash on Delivery is currently unavailable. Please pay online.'); e.statusCode = 400; throw e;
+    }
+    if (customer?.isCodBlocked === true) {
+      const e = new Error('Cash on Delivery is not available for your account. Please pay online.'); e.statusCode = 403; throw e;
+    }
+    if (priced.length > 1) {
+      const e = new Error('Cash on Delivery is available for single-restaurant orders only. Please pay online for a multi-restaurant order.'); e.statusCode = 403; throw e;
+    }
+  } else if (settings.isUpiEnabled !== true) {
+    const e = new Error('Online (UPI) payment is temporarily unavailable. Please try again shortly.'); e.statusCode = 503; throw e;
+  }
 
   // Split the tip across restaurants by delivery fee (never duplicated).
   const tipShares = allocateTip(totalTip, priced.map(p => p.deliveryFee));
 
   const isSingle = priced.length === 1;
-  const customer = await User.findById(req.user._id).select('name phone').lean();
+  const isFirstOrder = !(await Order.exists({ user: req.user._id }));
   const perRestaurantNotes = normalizeRestaurantNotes(restaurantNotes, mongoose.Types.ObjectId.isValid);
   const sharedDeliveryInstructions = typeof deliveryInstructions === 'string'
     ? deliveryInstructions.trim().slice(0, 250) : '';
+
+  // ── Pillar 2: itemized bill per restaurant ──────────────────────────
+  // computeCheckoutBill applies the platform free-delivery / handling /
+  // small-cart / rain-surge rules on top of the distance fee.
+  const bills = priced.map((p, i) => computeCheckoutBill({
+    subtotal: p.subtotal,
+    deliveryFee: p.deliveryFee,
+    discountAmount: Number(p.discount || 0),
+    tipAmount: tipShares[i] || 0,
+    itemCount: (p.serverItems || []).reduce((n, it) => n + Number(it.quantity || 0), 0),
+    policy: billPolicy,
+    isFirstOrder,
+    restaurantFreeDeliveryApplied: p.restaurantFreeDelivery === true,
+  }));
+
+  const checkoutGrandTotal = bills.reduce((sum, b) => sum + b.grandTotal, 0);
+
+  if (requestedMethod === 'cod') {
+    const maxCod = Number(settings.maxCodOrderAmount);
+    if (Number.isFinite(maxCod) && maxCod > 0 && checkoutGrandTotal > maxCod) {
+      const e = new Error(`Cash on Delivery is available for orders up to ₹${maxCod}. Please pay online for this order.`);
+      e.statusCode = 400; throw e;
+    }
+  }
 
   // ── Atomic idempotency lock ─────────────────────────────────────────
   // Address resolution, pricing and the closed / out-of-stock checks above can
@@ -592,6 +687,7 @@ const createOrder = asyncHandler(async (req, res) => {
         globalNote: globalNote === true,
       });
       const tip = tipShares[i] || 0;
+      const bill = bills[i];
 
       const order = await Order.create({
         user: req.user._id,
@@ -607,9 +703,13 @@ const createOrder = asyncHandler(async (req, res) => {
         deliveryAddress: { ...addressSnapshot, coordinates: customerCoords },
         deliveryDistanceKm: p.distanceKm,
         subtotal: p.subtotal,
-        deliveryFee: p.deliveryFee,
+        // deliveryFee stores the FINAL (post free-delivery waiver) fee so every
+        // legacy consumer of order.deliveryFee sees exactly what was charged.
+        deliveryFee: bill.deliveryFee,
         discount: Number(p.discount || 0),
         coupon: couponInfo ? { code: couponInfo.coupon.code, discount: Number(p.discount || 0), couponId: couponInfo.coupon._id } : undefined,
+        // Itemized bill snapshot (Pillar 2) — the customer's receipt.
+        bill: { ...bill, tipAmount: tip },
         commission: {
           rate: p.commission.rate,
           baseAmount: p.commission.baseAmount,
@@ -620,11 +720,14 @@ const createOrder = asyncHandler(async (req, res) => {
         restaurantNote: note,
         deliveryInstructions: sharedDeliveryInstructions,
         tipAmount: tip,
-        total: Math.max(0, p.subtotal - Number(p.discount || 0)) + p.deliveryFee + tip,
+        total: bill.grandTotal,
+        grandTotal: bill.grandTotal,
         customerCancellationDeadline: deadlinesFrom(new Date()).customerCancellationDeadline,
         restaurantResponseDeadline: null,
-        paymentMethod,
-        paymentStatus: 'pending',
+        paymentMethod: requestedMethod,
+        // COD orders are paid at the door: they start as cod_pending and the
+        // rider flips them to cod_collected on handoff (see riderController).
+        paymentStatus: requestedMethod === 'cod' ? 'cod_pending' : 'pending',
         ...(idempotencyKey ? { idempotencyKey } : {}),
       });
 
@@ -634,7 +737,7 @@ const createOrder = asyncHandler(async (req, res) => {
       created.push(order);
     }
 
-    if (paymentMethod === 'upi') {
+    if (requestedMethod === 'upi') {
       const checkoutTotal = created.reduce((sum, order) => sum + Number(order.total || 0), 0);
       const razorpayOrder = await createRazorpayOrder(
         checkoutTotal,
@@ -649,18 +752,15 @@ const createOrder = asyncHandler(async (req, res) => {
         { $set: { razorpayOrderId: razorpayOrder.id } }
       );
       created.forEach(order => { order.razorpayOrderId = razorpayOrder.id; });
-    } else {
-      // Defensive guard: paymentMethod is already restricted to UPI above.
-      const e = new Error('Cash on Delivery is disabled. Only UPI online payment is available.');
-      e.statusCode = 400;
-      throw e;
     }
+    // COD orders need no gateway step: they are already created as
+    // `cod_pending` and go straight to the vendor queue.
   } catch (err) {
     // Roll back everything this checkout created and release the lock so the
     // customer can safely retry. Mirrors (and unifies) the original
     // Razorpay-failure cleanup.
     if (created.length) {
-      await Order.deleteMany({ _id: { $in: created.map(o => o._id) }, user: req.user._id, paymentStatus: 'pending' }).catch(() => {});
+      await Order.deleteMany({ _id: { $in: created.map(o => o._id) }, user: req.user._id, paymentStatus: { $in: ['pending', 'cod_pending'] } }).catch(() => {});
     }
     if (idempotencyLockId) {
       await IdempotencyKey.deleteOne({ _id: idempotencyLockId }).catch(() => {});
