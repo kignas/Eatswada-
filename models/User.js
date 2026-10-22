@@ -189,6 +189,14 @@ const userSchema = new mongoose.Schema(
         default: 2000,
         min: 0,
       },
+      // Short-lived lock used to serialise Admin payouts for one rider, so two
+      // concurrent payout requests cannot both be computed against the same
+      // starting balance (a write-skew a snapshot transaction alone cannot
+      // prevent). Cleared as soon as the payout completes or fails.
+      payoutLockAt: {
+        type: Date,
+        default: null,
+      },
     },
   },
   { timestamps: true }

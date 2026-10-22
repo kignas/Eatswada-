@@ -141,6 +141,20 @@ const orderSchema = new mongoose.Schema(
       couponId: { type: mongoose.Schema.Types.ObjectId, ref: 'Coupon', default: null },
     },
 
+    // ── DISCOUNT FUNDING SPLIT ─────────────────────────────────────────
+    // `discount` above is the customer-facing discount. `vendorDiscountShare`
+    // is the portion the RESTAURANT funds (deducted from its settlement);
+    // the remainder (discount - vendorDiscountShare) is platform-funded.
+    // Historical orders predate this field, so it stays optional: settlement
+    // falls back to the legacy behaviour (whole discount charged to the
+    // vendor) when it is absent, and only uses it when explicitly present.
+    vendorDiscountShare: { type: Number, min: 0, default: null },
+    discountFunding: {
+      type: String,
+      enum: ['platform', 'restaurant', 'shared', 'none', null],
+      default: null,
+    },
+
     // ── ITEMIZED CHECKOUT BILL SNAPSHOT (Pillar 2) ─────────────────────
     // Every line item the customer saw at checkout is frozen here so the
     // receipt, the Admin console and settlements agree forever, even after an
@@ -213,6 +227,11 @@ const orderSchema = new mongoose.Schema(
     cashCollected: { type: Boolean, default: false },
     codCollectedAt: { type: Date, default: null },
     codCashCollectedAmount: { type: Number, min: 0, default: 0 },
+    // Set exactly once, by the conditional update that credits the rider's
+    // riderDetails.cashInHand for this order. Its presence is the idempotency
+    // marker that guarantees the cash is credited at most once even if the
+    // delivery transition is retried or raced.
+    riderCashCreditedAt: { type: Date, default: null },
     // Rider earning split for this order (Pillar 6), frozen at delivery.
     riderEarningBreakdown: {
       basePay: { type: Number, min: 0, default: 0 },
@@ -404,11 +423,14 @@ const orderSchema = new mongoose.Schema(
     },
     // COD goodwill payout recorded by support (cash was already collected).
     codResolutionPayout: {
-      status: { type: String, enum: ['none', 'recorded'], default: 'none' },
+      status: { type: String, enum: ['none', 'pending', 'paid', 'failed'], default: 'none' },
       amount: { type: Number, min: 0, default: 0 },
       reason: { type: String, default: '', maxlength: 200 },
       recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
       recordedAt: { type: Date, default: null },
+      payoutReference: { type: String, default: '', maxlength: 120 },
+      paidBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      paidAt: { type: Date, default: null },
     },
 
     rating: {

@@ -42,6 +42,9 @@ const riderLedgerSchema = new mongoose.Schema({
   codCashCollected: { type: Number, min: 0, default: 0 },
   // Bank/UPI UTR or reference for deposits and payouts.
   reference: { type: String, default: '', maxlength: 120 },
+  // Client-supplied idempotency token for a payout. Unique when present, so a
+  // retried payout request can never create a second payout row.
+  payoutToken: { type: String, default: null },
   note: { type: String, default: '', maxlength: 300 },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   currency: { type: String, default: 'INR' },
@@ -50,5 +53,7 @@ const riderLedgerSchema = new mongoose.Schema({
 // One earning entry per delivered order; makes delivery idempotent.
 riderLedgerSchema.index({ order: 1, entryType: 1 }, { unique: true, partialFilterExpression: { order: { $type: 'objectId' }, entryType: 'delivery_earning' } });
 riderLedgerSchema.index({ rider: 1, createdAt: -1 });
+// Idempotency for Admin payouts: one payout row per client-supplied token.
+riderLedgerSchema.index({ payoutToken: 1 }, { unique: true, partialFilterExpression: { payoutToken: { $type: 'string' } } });
 
 module.exports = mongoose.models.RiderLedger || mongoose.model('RiderLedger', riderLedgerSchema);
