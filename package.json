@@ -29,7 +29,13 @@
     "test:firebase-auth": "node tests/firebase-auth-error.js",
     "test:vendor-ecosystem": "node tests/vendor-ecosystem-contract.js",
     "test:restaurant-hours": "node tests/restaurant-hours-schedule.js && node tests/restaurant-hours-api-contract.js",
-    "test:rider-dispatch": "node tests/rider-dispatch-registration-contract.js"
+    "test:rider-dispatch": "node tests/rider-dispatch-registration-contract.js",
+    "test:financial-cod": "node tests/financial-cod-delivery.test.js",
+    "test:financial-payout": "node tests/financial-payout.test.js",
+    "test:financial-settlement": "node tests/financial-settlement.test.js",
+    "test:financial-cross-cutting": "node tests/financial-cross-cutting.test.js",
+    "test:financial-standalone": "node tests/financial-standalone-fallback.test.js",
+    "test:financial": "node tests/financial-cod-delivery.test.js && node tests/financial-payout.test.js && node tests/financial-settlement.test.js && node tests/financial-cross-cutting.test.js && node tests/financial-standalone-fallback.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -57,6 +63,7 @@
     "nodemailer": "^7.0.6"
   },
   "devDependencies": {
+    "mongodb-memory-server": "^11.3.0",
     "nodemon": "^3.0.2"
   },
   "engines": {
