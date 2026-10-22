@@ -59,7 +59,7 @@ exports.vendorLedger=async(req,res)=>{if(req.user?.role!=='vendor'||!req.user.re
 // All endpoints require finance.manage and are audited.
 // ─────────────────────────────────────────────────────────────────────
 
-const { getRestaurantSettlementStatement, getRiderBalance, recordCodCashDeposit, recordRiderPayout } = require('../services/settlementService');
+const { getRestaurantSettlementStatement, getRiderBalance, recordCodCashDeposit, payRider } = require('../services/settlementService');
 const { logAdminAction } = require('../services/auditService');
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const csvCell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -144,31 +144,69 @@ exports.createRestaurantAdjustment = async (req, res) => {
 /** Create a settlement batch and mark the chosen ledger entries paid (with UTR). */
 exports.createSettlementBatch = async (req, res) => {
   if (!admin(req, res)) return;
-  const ids = Array.isArray(req.body?.ledgerIds) ? req.body.ledgerIds.filter(mongoose.Types.ObjectId.isValid) : [];
+  const suppliedIds = Array.isArray(req.body?.ledgerIds) ? req.body.ledgerIds : [];
+  if (!suppliedIds.length) return res.status(400).json({ success: false, message: 'ledgerIds are required.' });
+  if (suppliedIds.some(id => !mongoose.Types.ObjectId.isValid(id))) {
+    return res.status(400).json({ success: false, message: 'Every ledgerIds entry must be a valid ID.' });
+  }
+  const ids = [...new Set(suppliedIds.map(String))];
   const reference = String(req.body?.reference || req.body?.bankUtr || '').trim().slice(0, 120);
-  if (!ids.length) return res.status(400).json({ success: false, message: 'ledgerIds are required.' });
   if (!reference) return res.status(400).json({ success: false, message: 'A bank UTR/reference is required to mark a batch paid.' });
 
-  const rows = await Ledger.find({ _id: { $in: ids }, status: 'eligible', ledgerType: 'vendor' }).lean();
-  if (!rows.length) return res.status(409).json({ success: false, message: 'No eligible ledger entries found.' });
-  const amount = round2(rows.reduce((sum, r) => sum + Number(r.netVendorPayable ?? r.netSettlementAmount ?? 0), 0));
-  if (amount < 0) return res.status(409).json({ success: false, message: 'This vendor has a negative settlement balance. Add eligible positive earnings before paying out.' });
-
-  const vendor = rows[0].vendor;
-  const restaurant = rows[0].restaurant;
-  const batch = await Batch.create({
-    restaurant, vendor, ledgerEntries: rows.map(r => r._id), amount,
-    status: 'settled', reference, settledAt: new Date(),
-  });
-  const update = await Ledger.updateMany(
-    { _id: { $in: rows.map(r => r._id) }, status: 'eligible' },
-    { $set: { status: 'settled', settlementBatch: batch._id, settledAt: new Date() } }
-  );
-  if (update.modifiedCount !== rows.length) {
-    return res.status(409).json({ success: false, message: 'Settlement changed concurrently. Please refresh and try again.' });
+  // A settlement batch pays ONE restaurant/vendor. The batch model itself
+  // carries a single restaurant+vendor, so mixing restaurants here would
+  // silently attribute one restaurant's money to another. Reject it up front.
+  const preRows = await Ledger.find({ _id: { $in: ids }, status: 'eligible', ledgerType: 'vendor' })
+    .select('restaurant vendor').lean();
+  if (!preRows.length) return res.status(409).json({ success: false, message: 'No eligible ledger entries found.' });
+  if (preRows.length !== ids.length) return res.status(409).json({ success: false, message: 'Every selected ledger entry must still be eligible for settlement. Refresh and select the entries again.' });
+  const restaurant = preRows[0].restaurant;
+  const vendor = preRows[0].vendor;
+  if (preRows.some(r => String(r.restaurant) !== String(restaurant) || String(r.vendor) !== String(vendor))) {
+    return res.status(400).json({ success: false, message: 'All ledger entries in a settlement batch must belong to the same restaurant and vendor.' });
   }
-  await logAdminAction(req, { action: 'settlement.batch.create', targetType: 'restaurant', targetId: restaurant, targetLabel: String(restaurant), newValue: { batchId: batch._id, amount, reference, entries: rows.length } });
-  res.status(201).json({ success: true, data: { batch, count: rows.length, amount } });
+
+  // Wrap the batch creation + ledger updates in a transaction when supported so
+  // a failure cannot leave a batch created but its entries still 'eligible'
+  // (which would allow the same entries to be settled twice).
+  const { withRequiredTransaction } = require('../services/dbTransaction');
+  let outcome;
+  try {
+    outcome = await withRequiredTransaction(async (session) => {
+      const rowsQuery = Ledger.find({ _id: { $in: ids }, status: 'eligible', ledgerType: 'vendor' });
+      if (session) rowsQuery.session(session);
+      const rows = await rowsQuery.lean();
+      if (!rows.length || rows.length !== ids.length) { const e = new Error('Every selected ledger entry must still be eligible for settlement. Refresh and select the entries again.'); e.statusCode = 409; throw e; }
+      if (rows.some(r => String(r.restaurant) !== String(restaurant) || String(r.vendor) !== String(vendor))) {
+        const e = new Error('All ledger entries in a settlement batch must belong to the same restaurant and vendor.'); e.statusCode = 400; throw e;
+      }
+      const amount = round2(rows.reduce((sum, r) => sum + Number(r.netVendorPayable ?? r.netSettlementAmount ?? 0), 0));
+      if (amount < 0) { const e = new Error('This vendor has a negative settlement balance. Add eligible positive earnings before paying out.'); e.statusCode = 409; throw e; }
+
+      const batchDocs = await Batch.create([{
+        restaurant, vendor, ledgerEntries: rows.map(r => r._id), amount,
+        status: 'settled', reference, settledAt: new Date(),
+      }], session ? { session } : undefined);
+      const batch = batchDocs[0];
+
+      const update = await Ledger.updateMany(
+        { _id: { $in: rows.map(r => r._id) }, status: 'eligible' },
+        { $set: { status: 'settled', settlementBatch: batch._id, settledAt: batch.settledAt } },
+        session ? { session } : undefined
+      );
+      if (update.modifiedCount !== rows.length) {
+        const e = new Error('Settlement changed concurrently. Please refresh and try again.'); e.statusCode = 409; throw e;
+      }
+      return { batch, count: rows.length, amount };
+    });
+  } catch (err) {
+    const code = err?.statusCode || 500;
+    if (code === 500) console.error(`[SETTLEMENT] batch create failed: ${err.message}`);
+    return res.status(code).json({ success: false, message: err.message || 'Settlement failed.' });
+  }
+
+  await logAdminAction(req, { action: 'settlement.batch.create', targetType: 'restaurant', targetId: restaurant, targetLabel: String(restaurant), newValue: { batchId: outcome.batch._id, amount: outcome.amount, reference, entries: outcome.count } });
+  res.status(201).json({ success: true, data: { batch: outcome.batch, count: outcome.count, amount: outcome.amount } });
 };
 
 /** CSV export of the vendor settlement ledger. */
@@ -250,15 +288,56 @@ exports.settleRiderPayout = async (req, res) => {
   if (!admin(req, res)) return;
   const reference = String(req.body?.reference || req.body?.bankUtr || req.body?.utr || '').trim().slice(0, 120);
   if (!reference) return res.status(400).json({ success: false, message: 'A bank/UPI UTR reference is required.' });
-  const balance = await getRiderBalance(req.params.id);
-  if (!balance) return res.status(404).json({ success: false, message: 'Rider not found.' });
-  const requested = round2(req.body?.amount);
-  const amount = Number.isFinite(requested) && requested > 0 ? requested : balance.netPayable;
-  if (amount <= 0) return res.status(409).json({ success: false, message: 'This rider has no positive payable balance to settle.' });
-  const entry = await recordRiderPayout({ riderId: req.params.id, amount, reference, note: req.body?.note || '', adminId: req.user._id });
-  await logAdminAction(req, { action: 'settlement.rider.payout', targetType: 'rider', targetId: req.params.id, targetLabel: balance.rider?.name || String(req.params.id), newValue: { amount, reference } });
-  const fresh = await getRiderBalance(req.params.id);
-  res.status(201).json({ success: true, data: { entry, balance: fresh } });
+
+  // The amount is optional (defaults to the full payable balance). When
+  // supplied it must be a positive, finite number — a malformed value is
+  // rejected rather than silently ignored, and it is capped at the
+  // authoritative payable balance inside payRider (never trusted from the
+  // client). A client-supplied idempotency key makes a retried payout safe.
+  let requestedAmount = null;
+  if (req.body?.amount !== undefined && req.body?.amount !== null && req.body?.amount !== '') {
+    const requested = round2(req.body.amount);
+    if (!Number.isFinite(requested) || requested <= 0) {
+      return res.status(400).json({ success: false, message: 'amount must be a positive number.' });
+    }
+    requestedAmount = requested;
+  }
+  const token = String(req.body?.idempotencyKey || req.body?.payoutToken || '').trim().slice(0, 120) || undefined;
+
+  const result = await payRider({
+    riderId: req.params.id,
+    requestedAmount,
+    reference,
+    note: req.body?.note || '',
+    adminId: req.user._id,
+    token,
+  });
+
+  if (!result.ok) {
+    const status = result.reason === 'not_found' ? 404
+      : result.reason === 'invalid_rider' ? 400
+      : result.reason === 'invalid_amount' ? 400
+      : 409;
+    const message = {
+      not_found: 'Rider not found.',
+      invalid_rider: 'A valid riderId is required.',
+      invalid_amount: 'amount must be a positive number.',
+      no_balance: 'This rider has no positive payable balance to settle.',
+      exceeds_balance: 'The requested payout exceeds the rider\'s payable balance.',
+      duplicate: 'This payout was already recorded (duplicate request).',
+      payout_in_progress: 'Another payout for this rider is being processed. Please retry shortly.',
+    }[result.reason] || 'Payout could not be processed.';
+    return res.status(status).json({ success: false, message, ...(result.balance ? { balance: result.balance } : {}) });
+  }
+
+  await logAdminAction(req, {
+    action: 'settlement.rider.payout',
+    targetType: 'rider',
+    targetId: req.params.id,
+    targetLabel: result.balance?.rider?.name || String(req.params.id),
+    newValue: { amount: result.amount, reference, payoutToken: token || null },
+  });
+  res.status(201).json({ success: true, data: { entry: result.entry, balance: result.balance } });
 };
 
 /** Full rider ledger history (earnings, deposits, payouts, adjustments). */

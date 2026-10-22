@@ -569,6 +569,14 @@ const createOrder = asyncHandler(async (req, res) => {
   // subtotal so it is never duplicated across child orders.
   const checkoutSubtotal = priced.reduce((sum,p)=>sum+Number(p.subtotal||0),0);
   const couponInfo = await resolveCheckoutCoupon(couponCode, req.user._id, checkoutSubtotal, priced.map(p=>p.restaurant._id));
+  // Who funds the discount. Only the restaurant-funded portion is deducted from
+  // the vendor's settlement; the platform absorbs the rest. Defaults to
+  // platform-funded so a coupon without an explicit funding policy never
+  // silently reduces a restaurant's payout.
+  const discountFundedBy = couponInfo ? (couponInfo.coupon.fundedBy || 'platform') : 'none';
+  const restaurantSharePercent = discountFundedBy === 'restaurant' ? 100
+    : discountFundedBy === 'shared' ? Math.max(0, Math.min(100, Number(couponInfo.coupon.restaurantSharePercent) || 0))
+    : 0;
   if (couponInfo) {
     for (const p of priced) {
       const share = checkoutSubtotal > 0 ? Number(p.subtotal) / checkoutSubtotal : 0;
@@ -577,6 +585,13 @@ const createOrder = asyncHandler(async (req, res) => {
     }
     const allocated=priced.reduce((a,p)=>a+Number(p.discount||0),0);
     if (priced.length && Math.abs(allocated-couponInfo.discount)>0.01) priced[priced.length-1].discount=Math.round((Number(priced.at(-1).discount||0)+(couponInfo.discount-allocated))*100)/100;
+  }
+  // Snapshot each restaurant's share of the discount AFTER the final allocation
+  // adjustment so the vendor-funded portion always reconciles with `discount`.
+  for (const p of priced) {
+    p.vendorDiscountShare = couponInfo
+      ? Math.round(Number(p.discount || 0) * restaurantSharePercent) / 100
+      : 0;
   }
 
   // ── Pillar 3: dual payment engine gating ────────────────────────────
@@ -708,6 +723,10 @@ const createOrder = asyncHandler(async (req, res) => {
         deliveryFee: bill.deliveryFee,
         discount: Number(p.discount || 0),
         coupon: couponInfo ? { code: couponInfo.coupon.code, discount: Number(p.discount || 0), couponId: couponInfo.coupon._id } : undefined,
+        // Discount funding split (frozen): only vendorDiscountShare is charged
+        // back to this restaurant at settlement; the rest is platform-funded.
+        vendorDiscountShare: couponInfo ? Number(p.vendorDiscountShare || 0) : 0,
+        discountFunding: couponInfo ? discountFundedBy : 'none',
         // Itemized bill snapshot (Pillar 2) — the customer's receipt.
         bill: { ...bill, tipAmount: tip },
         commission: {

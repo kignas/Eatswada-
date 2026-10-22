@@ -5,44 +5,9 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const { uploadToCloudinary } = require('../utils/riderUpload');
 const { notifyOrderStatus, notifyDeliveryIssue } = require('../services/notificationService');
-const { getPlatformSettings } = require('../services/platformSettingsService');
-const { ensureOrderLedger, ensureRiderLedger } = require('../services/settlementService');
-
-/**
- * Pillar 6 — rider earning for one delivered order.
- *   basePay + distancePay + rainSurgeBonus + waitTimePay + tip
- * Settings come from the platform configuration; distancePay uses the order's
- * server-calculated delivery distance, and waitTimePay the rider's confirmed
- * restaurant wait. Kept here (rather than settlementService) because the
- * breakdown is frozen onto the order at delivery.
- */
-async function computeRiderEarning(order) {
-  let settings;
-  try { settings = await getPlatformSettings(); }
-  catch (_) { settings = {}; }
-
-  const basePay = Math.max(0, Number(settings.riderBasePay) || 0);
-  const perKm = Math.max(0, Number(settings.riderPerKmPay) || 0);
-  const distanceKm = Math.max(0, Number(order.deliveryDistanceKm) || 0);
-  const distancePay = Math.round(perKm * distanceKm * 100) / 100;
-  const rainSurgeBonus = settings.isRainSurgeActive === true
-    ? Math.max(0, Number(settings.riderRainSurgeBonus) || 0)
-    : 0;
-
-  // Wait-time pay is measured from arrival to pickup, when both are known.
-  let waitTimeMinutes = 0;
-  if (order.riderReachedRestaurantAt && order.orderReadyAt) {
-    const ms = new Date(order.orderReadyAt).getTime() - new Date(order.riderReachedRestaurantAt).getTime();
-    if (Number.isFinite(ms) && ms > 0) waitTimeMinutes = Math.round(ms / 60000);
-  } else if (Number(order.riderWaitTimeMinutes) > 0) {
-    waitTimeMinutes = Math.round(Number(order.riderWaitTimeMinutes));
-  }
-  const waitTimePay = Math.round((Math.max(0, Number(settings.riderWaitTimePayPerMin) || 0) * waitTimeMinutes) * 100) / 100;
-
-  const tip = Math.max(0, Number(order.tipAmount) || 0);
-  const total = Math.round((basePay + distancePay + rainSurgeBonus + waitTimePay + tip) * 100) / 100;
-  return { basePay, distancePay, rainSurgeBonus, waitTimePay, tip, total, waitTimeMinutes };
-}
+const { ensureOrderLedger, ensureRiderLedger, creditRiderCashForOrder } = require('../services/settlementService');
+const { computeRiderEarning } = require('../services/riderEarningService');
+const { withRequiredTransaction } = require('../services/dbTransaction');
 
 /* ── Rider-owned delivery status flow ──
  * unassigned -> assigned -> accepted -> reached_restaurant -> picked_up -> out_for_delivery -> delivered
@@ -379,71 +344,104 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
     });
   }
 
-  order.riderStatus = status;
-  order.riderStatusHistory = order.riderStatusHistory || [];
-  order.riderStatusHistory.push({ status, note: note || '', at: new Date() });
+  // Freeze the rider's earning split for this delivery so settlements never
+  // have to re-derive it from changing settings. Computed before the atomic
+  // transition so the value written with the transition is authoritative.
+  let earningBreakdown = null;
+  if (status === 'delivered') {
+    earningBreakdown = await computeRiderEarning(order);
+  }
+
+  // ── ATOMIC DELIVERY TRANSITION ─────────────────────────────
+  // A conditional update keyed on the CURRENT riderStatus is the single gate
+  // that makes the delivery transition idempotent: two concurrent delivery
+  // requests (or a retry after the order is already delivered) both filter on
+  // the same previous riderStatus, so only one can match and commit. The COD
+  // cash credit is part of the same transition, so the order can never be
+  // marked delivered without the corresponding ledger credit.
+  const setFields = {
+    riderStatus: status,
+    dispatchStatus: status === 'accepted' ? 'assigned' : order.dispatchStatus,
+  };
+  const pushFields = { riderStatusHistory: { status, note: note || '', at: new Date() } };
 
   // FIX: Using advanceStatus ensures deliveredAt is set so the vendor active tab clears it
   if (status === 'accepted') {
     // Do not overwrite the kitchen state when a rider accepts early. The
     // vendor promotes waiting_for_rider -> assigned once food is ready.
     if (order.status === 'waiting_for_rider') {
-      order.advanceStatus('assigned', `Accepted by rider (${req.user.name})`);
+      setFields.status = 'assigned';
+      setFields.isCancellable = false;
+      pushFields.statusHistory = { status: 'assigned', note: `Accepted by rider (${req.user.name})` };
     }
-    order.dispatchStatus = 'assigned';
   } else if (status === 'out_for_delivery' || status === 'delivered') {
-    order.advanceStatus(status, `Updated by rider (${req.user.name})`);
+    setFields.status = status;
+    setFields.isCancellable = false;
+    pushFields.statusHistory = { status, note: `Updated by rider (${req.user.name})` };
     if (status === 'delivered') {
-      // Pillar 6 — freeze the rider's earning split for this delivery so
-      // settlements never have to re-derive it from changing settings.
-      const breakdown = await computeRiderEarning(order);
-      order.riderEarningBreakdown = breakdown;
-      order.riderEarning = breakdown.total;
-      order.riderWaitTimeMinutes = breakdown.waitTimeMinutes;
+      setFields.deliveredAt = new Date();
+      setFields.riderEarningBreakdown = earningBreakdown;
+      setFields.riderEarning = earningBreakdown.total;
+      setFields.riderWaitTimeMinutes = earningBreakdown.waitTimeMinutes;
+      // Guarantee the COD cash credit (conditional on this being null) can
+      // claim this delivery exactly once.
+      setFields.riderCashCreditedAt = null;
     }
     // COD is collected at the door. Once the rider confirms collection the
-    // order becomes cod_collected and the cash is added to their cashInHand
+    // order becomes cod_collected and the cash is credited to their cashInHand
     // for Admin reconciliation (Pillar 3 / 6).
     if (status === 'delivered' && isCodOrder) {
-      order.paymentStatus = 'cod_collected';
-      order.cashCollected = true;
-      order.codCollectedAt = new Date();
-      order.codCashCollectedAmount = Number(order.total || 0);
+      setFields.paymentStatus = 'cod_collected';
+      setFields.cashCollected = true;
+      setFields.codCollectedAt = new Date();
+      setFields.codCashCollectedAmount = Number(order.total || 0);
     }
   }
 
-  await order.save();
+  const updated = await withRequiredTransaction(async (session) => {
+    const claimed = await Order.findOneAndUpdate(
+      { _id: order._id, rider: req.user._id, riderStatus: order.riderStatus, status: order.status, paymentStatus: order.paymentStatus },
+      { $set: setFields, $push: pushFields },
+      { new: true, session: session || undefined }
+    );
+    if (!claimed) return null;
 
-  // Atomically add collected COD cash to the rider's running balance AFTER the
-  // order state is committed, so a crash between the two can never lose the
-  // order (Admin can still reconcile from the order's codCashCollectedAmount).
-  if (status === 'delivered' && isCodOrder) {
-    try {
-      await User.updateOne(
-        { _id: req.user._id, role: 'rider' },
-        { $inc: { 'riderDetails.cashInHand': Number(order.total || 0) } }
-      );
-    } catch (err) {
-      console.error(`[COD] could not add cash to rider ${req.user._id}: ${err.message}`);
+    // Credit collected COD cash in the SAME transaction as the transition.
+    // creditRiderCashForOrder is itself conditional on riderCashCreditedAt
+    // being null, so even without a transaction (standalone MongoDB) the cash
+    // is credited at most once.
+    if (status === 'delivered' && isCodOrder) {
+      await creditRiderCashForOrder(claimed, { session });
     }
+
+    // Ledger rows are idempotent (unique order+type) and written in the same
+    // transaction, so a failure rolls the whole delivery back rather than
+    // leaving an order delivered without its financial ledger entry.
+    if (status === 'delivered') {
+      await ensureOrderLedger(claimed, session);
+      await ensureRiderLedger(claimed, session);
+    }
+    return claimed;
+  });
+
+  if (!updated) {
+    return res.status(409).json({
+      success: false,
+      code: 'DELIVERY_ALREADY_PROCESSED',
+      message: 'This delivery has already been recorded. Refresh to see the latest status.',
+    });
   }
 
-  // Ledger writes are idempotent and best-effort: a delivery must never fail
-  // because a settlement row could not be written.
-  if (status === 'delivered') {
-    try {
-      await ensureOrderLedger(order);
-      await ensureRiderLedger(order);
-    } catch (err) {
-      console.error(`[SETTLEMENT] ledger write failed for order ${order._id}: ${err.message}`);
-    }
-  }
+  // Re-read with the restaurant populated so the response keeps its existing
+  // shape (the atomic update returns the raw document).
+  const fresh = await Order.findById(order._id).populate('restaurant', 'name image address location');
+  const responseOrder = fresh || updated;
 
   if (status === 'out_for_delivery' || status === 'delivered') {
-    try { await notifyOrderStatus(order.user, order); } catch (_) {}
+    try { await notifyOrderStatus(responseOrder.user, responseOrder); } catch (_) {}
   }
 
-  res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: order });
+  res.json({ success: true, message: `Order marked as ${STATUS_LABELS[status]}.`, data: responseOrder });
 });
 
 /* PUT /api/riders/orders/:id/verify-otp

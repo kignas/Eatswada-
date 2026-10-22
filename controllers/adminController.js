@@ -208,6 +208,13 @@ exports.forceAcceptOrder = asyncHandler(async (req, res) => {
 
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
+  // Force-accept acts on the vendor's behalf, so the order must belong to a
+  // restaurant. (Acceptance is intentionally allowed before payment — the
+  // checkout/payment lifecycle lets the kitchen accept first; the payment
+  // prerequisite is enforced at rider acceptance / delivery, not here.)
+  if (!order.restaurant) {
+    return res.status(409).json({ success: false, message: 'This order has no restaurant and cannot be accepted.' });
+  }
   if (['delivered', 'cancelled'].includes(order.status)) {
     return res.status(409).json({ success: false, message: `Cannot force-accept an order that is already ${order.status}.` });
   }
@@ -219,11 +226,33 @@ exports.forceAcceptOrder = asyncHandler(async (req, res) => {
   // Accept on the vendor's behalf. KPT = kitchen prep time; the platform
   // default prep window is used so dispatch scheduling still works.
   const prepMinutes = Number(order.prepMinutes) > 0 ? Number(order.prepMinutes) : 15;
-  if (!(Number(order.prepMinutes) > 0)) order.prepMinutes = prepMinutes;
-  order.vendorAcceptedAt = new Date();
-  order.advanceStatus('preparing', `Force-accepted by admin (${reason})`);
-  pushOrderOverride(order, 'force_accept', reason, req.user._id);
-  await order.save();
+  const now = new Date();
+  const prepStartedAt = order.prepStartedAt || now;
+  const setFields = {
+    status: 'preparing',
+    vendorAcceptedAt: now,
+    prepStartedAt,
+    prepReadyAt: new Date(prepStartedAt.getTime() + prepMinutes * 60000),
+    dispatchNotBefore: new Date(prepStartedAt.getTime() + Math.max(0, prepMinutes - 12) * 60000),
+  };
+  if (!(Number(order.prepMinutes) > 0)) setFields.prepMinutes = prepMinutes;
+
+  // Conditional on the pre-acceptance status so a retried / concurrent
+  // force-accept cannot transition the order twice.
+  const updated = await Order.findOneAndUpdate(
+    { _id: order._id, status: order.status },
+    {
+      $set: setFields,
+      $push: {
+        statusHistory: { status: 'preparing', note: `Force-accepted by admin (${reason})` },
+        adminOverrides: { action: 'force_accept', reason: String(reason || '').slice(0, 300), by: req.user._id, at: now },
+      },
+    },
+    { new: true }
+  );
+  if (!updated) {
+    return res.status(409).json({ success: false, message: 'This order changed concurrently. Refresh and try again.' });
+  }
 
   await logAdminAction(req, {
     action: 'order.force_accept',
@@ -231,9 +260,9 @@ exports.forceAcceptOrder = asyncHandler(async (req, res) => {
     targetId: order._id,
     targetLabel: order.orderNumber || String(order._id),
     oldValue: { status: previousStatus },
-    newValue: { status: order.status, reason, prepMinutes },
+    newValue: { status: 'preparing', reason, prepMinutes },
   });
-  res.json({ success: true, data: order });
+  res.json({ success: true, data: updated });
 });
 
 exports.forceDispatchOrder = asyncHandler(async (req, res) => {
@@ -284,32 +313,83 @@ exports.forceDeliverOrder = asyncHandler(async (req, res) => {
   if (!order.rider) return res.status(409).json({ success: false, message: 'Assign a rider before force-delivering an order.' });
 
   const isCod = String(order.paymentMethod || '').toLowerCase() === 'cod';
-  const codCashCollected = isCod ? req.body?.codCashCollected !== false : false;
-  if (isCod && !codCashCollected) {
-    return res.status(409).json({ success: false, message: 'Confirm the COD cash was collected before force-delivering.' });
+
+  // Payment-state integrity (Pillar 7). An unpaid ONLINE order must not be
+  // force-delivered: there is no collected money to settle. COD is different —
+  // the cash is taken at the door, so it only needs an explicit, validated
+  // cash-collection confirmation.
+  if (!isCod) {
+    if (order.paymentStatus !== 'paid') {
+      return res.status(409).json({
+        success: false,
+        message: `Cannot force-deliver an unpaid online order (payment status: ${order.paymentStatus}). Recover the payment first.`,
+      });
+    }
+  } else {
+    // Never treat an absent / null / malformed confirmation as success.
+    const codCashCollected = req.body?.codCashCollected === true;
+    if (!codCashCollected) {
+      return res.status(409).json({
+        success: false,
+        code: 'COD_CASH_NOT_COLLECTED',
+        message: 'Confirm the COD cash was collected (codCashCollected: true) before force-delivering.',
+      });
+    }
   }
 
   const previousStatus = order.status;
-  // Bypass the customer OTP: network failure at the doorstep. The override is
-  // recorded on the order AND in the audit log so it is never silent.
-  order.deliveryOtpVerified = true;
-  order.deliveryOtpBypassReason = reason;
-  order.advanceStatus('delivered', `Force-delivered by admin (${reason})`);
-  if (isCod) {
-    order.paymentStatus = 'cod_collected';
-    order.cashCollected = true;
-    order.codCollectedAt = new Date();
-    order.codCashCollectedAmount = Number(order.total || 0);
-    await User.updateOne({ _id: order.rider, role: 'rider' }, { $inc: { 'riderDetails.cashInHand': Number(order.total || 0) } }).catch(() => {});
-  }
-  pushOrderOverride(order, 'force_deliver', reason, req.user._id);
-  await order.save();
+  const previousPaymentStatus = order.paymentStatus;
 
-  try {
-    await require('../services/settlementService').ensureOrderLedger(order);
-    await require('../services/settlementService').ensureRiderLedger(order);
-  } catch (err) {
-    console.error(`[SETTLEMENT] ledger write failed for force-delivered order ${order._id}: ${err.message}`);
+  // ── ATOMIC FORCE-DELIVER ───────────────────────────────────
+  // Conditional on the current status so a retried / concurrent force-deliver
+  // cannot transition twice or credit COD cash twice.
+  const { computeRiderEarning } = require('../services/riderEarningService');
+  const { creditRiderCashForOrder } = require('../services/settlementService');
+  const earningBreakdown = await computeRiderEarning(order);
+  const now = new Date();
+  const setFields = {
+    status: 'delivered',
+    deliveredAt: now,
+    isCancellable: false,
+    deliveryOtpVerified: true,
+    deliveryOtpBypassReason: reason,
+    riderStatus: 'delivered',
+    riderEarningBreakdown: earningBreakdown,
+    riderEarning: earningBreakdown.total,
+    riderWaitTimeMinutes: earningBreakdown.waitTimeMinutes,
+    riderCashCreditedAt: null,
+  };
+  if (isCod) {
+    setFields.paymentStatus = 'cod_collected';
+    setFields.cashCollected = true;
+    setFields.codCollectedAt = now;
+    setFields.codCashCollectedAmount = Number(order.total || 0);
+  }
+  const adminOverrides = order.adminOverrides || [];
+  adminOverrides.push({ action: 'force_deliver', reason: String(reason || '').slice(0, 300), by: req.user._id, at: now });
+
+  const { withRequiredTransaction } = require('../services/dbTransaction');
+  const updated = await withRequiredTransaction(async (session) => {
+    const claimed = await Order.findOneAndUpdate(
+      { _id: order._id, status: order.status, rider: order.rider, paymentMethod: order.paymentMethod, paymentStatus: order.paymentStatus },
+      {
+        $set: setFields,
+        $push: {
+          statusHistory: { status: 'delivered', note: `Force-delivered by admin (${reason})` },
+          adminOverrides: adminOverrides[adminOverrides.length - 1],
+        },
+      },
+      { new: true, session: session || undefined }
+    );
+    if (!claimed) return null;
+    if (isCod) await creditRiderCashForOrder(claimed, { session });
+    await require('../services/settlementService').ensureOrderLedger(claimed, session);
+    await require('../services/settlementService').ensureRiderLedger(claimed, session);
+    return claimed;
+  });
+
+  if (!updated) {
+    return res.status(409).json({ success: false, message: 'This order changed concurrently. Refresh and try again.' });
   }
 
   await logAdminAction(req, {
@@ -317,10 +397,10 @@ exports.forceDeliverOrder = asyncHandler(async (req, res) => {
     targetType: 'order',
     targetId: order._id,
     targetLabel: order.orderNumber || String(order._id),
-    oldValue: { status: previousStatus, otpVerified: false },
-    newValue: { status: order.status, otpVerified: true, reason, codCashCollected },
+    oldValue: { status: previousStatus, paymentStatus: previousPaymentStatus, otpVerified: false },
+    newValue: { status: 'delivered', paymentStatus: isCod ? 'cod_collected' : previousPaymentStatus, otpVerified: true, reason, codCashCollected: isCod },
   });
-  res.json({ success: true, data: order });
+  res.json({ success: true, data: updated });
 });
 
 // ─────────────────────────────────────────────────────────────────────
