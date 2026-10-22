@@ -39,11 +39,18 @@ check('Deployment gate checks liveness and readiness before traffic',()=>{
   assert(s.includes('`${apiOrigin}/ready`'));
   assert(s.includes('body.ready === true'));
 });
-check('New orders default to UPI-only',()=>{
+check('New orders default to UPI; COD is opt-in and platform-gated',()=>{
   const s=read('models/Order.js');
   assert(s.includes("enum: ['upi', 'card', 'wallet', 'cod']"));
   assert(s.includes("default: 'upi'"));
-  assert(read('controllers/orderController.js').includes("const validPaymentMethods = ['upi'];"));
+  // Pillar 3: COD is no longer permanently disabled, but it is never granted
+  // from client input alone — orderController must gate it on the platform
+  // settings (isCodEnabled / maxCodOrderAmount) and the customer's COD block.
+  const c=read('controllers/orderController.js');
+  assert(c.includes("['upi', 'cod'].includes(requestedMethod)"));
+  assert(c.includes('settings.isCodEnabled !== true'));
+  assert(c.includes('settings.maxCodOrderAmount'));
+  assert(c.includes('customer?.isCodBlocked === true'));
 });
 check('Cart payment endpoint accepts UPI only',()=>{
   assert(read('controllers/cartController.js').includes("paymentMethod !== 'upi'"));
