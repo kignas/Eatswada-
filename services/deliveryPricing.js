@@ -69,6 +69,41 @@ function calculateDeliveryFee(distanceKm) {
   return DELIVERY_RULES.WITHIN_10_KM;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Configurable (Admin-controlled) delivery pricing.
+//
+// The legacy calculateDeliveryFee() above stays the frozen ₹30 launch rule
+// and is still used as the fallback whenever the platform policy is not
+// supplied. calculatePolicyDeliveryFee() is the Pillar-2 fee engine: a base
+// fee covering baseDistanceKm, then perKmExtraFee for every additional km.
+// It reuses the same 10 km cap so the delivery limit cannot drift.
+// ─────────────────────────────────────────────────────────────────────
+function calculatePolicyDeliveryFee(distanceKm, policy = {}) {
+  const d = Number(distanceKm);
+  if (!Number.isFinite(d) || d < 0) throw new Error('Invalid delivery distance');
+  if (d > MAX_DELIVERY_RADIUS_KM) {
+    const error = new Error('Delivery distance exceeds the Eatswada 10 km maximum.');
+    error.code = 'DELIVERY_RADIUS_EXCEEDED';
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const baseFee = Number(policy?.baseDeliveryFee);
+  const baseKm = Number(policy?.baseDistanceKm);
+  const perKm = Number(policy?.perKmExtraFee);
+
+  // No usable policy → preserve the legacy flat ₹30 behaviour exactly.
+  if (!Number.isFinite(baseFee) || baseFee < 0 ||
+      !Number.isFinite(baseKm) || baseKm < 0 ||
+      !Number.isFinite(perKm) || perKm < 0) {
+    return DELIVERY_RULES.WITHIN_10_KM;
+  }
+
+  const extraKm = Math.max(0, d - baseKm);
+  const fee = baseFee + extraKm * perKm;
+  return Math.round(fee * 100) / 100;
+}
+
 /**
  * Resolve the effective per-restaurant delivery radius: the admin-configured
  * radius clamped to the platform-wide launch cap. Mirrors the logic used in
@@ -88,5 +123,6 @@ module.exports = {
   isPlaceholderRestaurantLocation,
   haversineKm,
   calculateDeliveryFee,
+  calculatePolicyDeliveryFee,
   effectiveDeliveryRadiusKm,
 };

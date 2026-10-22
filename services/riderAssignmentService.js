@@ -53,7 +53,7 @@ async function getRestaurantCoordinates(order) {
   } catch (_) { return null; }
 }
 
-async function findBestAvailableRider(order, excludeRiderIds = []) {
+async function findBestAvailableRider(order, excludeRiderIds = [], options = {}) {
   const cutoff = new Date(Date.now() - LOCATION_MAX_AGE_MS);
   const query = {
     role: 'rider', isActive: true,
@@ -68,8 +68,19 @@ async function findBestAvailableRider(order, excludeRiderIds = []) {
   if (!onlineRiders.length) return { rider: null, zoneMatched: false, reason: 'No online riders with a fresh GPS location are currently available.' };
   if (!restaurantCoords) return { rider: null, zoneMatched: false, reason: 'Restaurant coordinates are missing or invalid; dispatch cannot safely estimate pickup distance.' };
 
-  const sameZone = orderZone ? onlineRiders.filter(r => normalizeZone(r.riderDetails?.deliveryZone) === orderZone) : [];
-  const riderIds = onlineRiders.map(r => r._id);
+  // COD cash-capacity guard (Pillar 3): a rider already holding cash at or
+  // above their limit must not take another cash order. They stay eligible
+  // for prepaid UPI orders, so only COD dispatches filter them out.
+  const isCodOrder = String(options.paymentMethod || order?.paymentMethod || '').toLowerCase() === 'cod';
+  const cashEligible = isCodOrder
+    ? onlineRiders.filter(r => Number(r.riderDetails?.cashInHand || 0) < Number(r.riderDetails?.codCashLimit ?? Infinity))
+    : onlineRiders;
+  if (!cashEligible.length) {
+    return { rider: null, zoneMatched: false, reason: 'Every eligible rider is at their COD cash limit. Collect deposits before dispatching another cash order.' };
+  }
+
+  const sameZone = orderZone ? cashEligible.filter(r => normalizeZone(r.riderDetails?.deliveryZone) === orderZone) : [];
+  const riderIds = cashEligible.map(r => r._id);
   const loadCounts = await Order.aggregate([
     { $match: { rider: { $in: riderIds }, riderStatus: { $in: ACTIVE_RIDER_STATUSES }, status: { $nin: ['delivered', 'cancelled'] } } },
     { $group: { _id: '$rider', activeCount: { $sum: 1 } } },
@@ -84,7 +95,7 @@ async function findBestAvailableRider(order, excludeRiderIds = []) {
   // fall back to the wider eligible pool rather than leaving a job unassigned.
   let ranked = rankPool(sameZone);
   let zoneMatched = ranked.length > 0;
-  if (!ranked.length) { ranked = rankPool(onlineRiders); zoneMatched = false; }
+  if (!ranked.length) { ranked = rankPool(cashEligible); zoneMatched = false; }
   if (!ranked.length) return { rider: null, zoneMatched: false, reason: 'No rider has fresh valid coordinates and capacity for another delivery.' };
   return { rider: ranked[0].rider, zoneMatched, distanceKm: Number(ranked[0].distanceKm.toFixed(2)) };
 }
@@ -100,7 +111,7 @@ async function autoAssignRider(order, excludeRiderIds = []) {
       return { assigned: false, rider: null, scheduled: true, dispatchNotBefore: order.dispatchNotBefore, reason: 'Rider dispatch is scheduled closer to the estimated food-ready time.' };
     }
 
-    const { rider, zoneMatched, distanceKm, reason } = await findBestAvailableRider(order, excludeRiderIds);
+    const { rider, zoneMatched, distanceKm, reason } = await findBestAvailableRider(order, excludeRiderIds, { paymentMethod: order.paymentMethod });
     const now = new Date();
     if (!rider) {
       await Order.updateOne({ _id: order._id, rider: null, status: { $in: DISPATCHABLE_ORDER_STATUSES } }, {
@@ -205,4 +216,41 @@ function startAssignmentRecovery(intervalMs = 60 * 1000) {
   if (recoveryTimer.unref) recoveryTimer.unref();
   return recoveryTimer;
 }
-module.exports = { autoAssignRider, findBestAvailableRider, resolveOrderZone, handleReassignment, scheduleRiderTimeout, recoverStuckAssignments, recoverUnassignedOrders, startAssignmentRecovery, haversineKm };
+/**
+ * Pillar 1 — live delivery capacity snapshot for a zone.
+ *
+ * `onlineRiders` counts active riders with a fresh GPS fix in the zone (or
+ * platform-wide when no zone resolves). `activeOrders` counts orders those
+ * riders are currently carrying. Used by the checkout shortage circuit
+ * breaker; also exposed to the Admin dashboard.
+ */
+async function getZoneDeliveryCapacity(zone = '') {
+  const cutoff = new Date(Date.now() - LOCATION_MAX_AGE_MS);
+  const normalized = normalizeZone(zone);
+  const riderQuery = {
+    role: 'rider', isActive: true,
+    'riderDetails.isOnline': true,
+    'riderDetails.currentLocation.updatedAt': { $gte: cutoff },
+  };
+  if (normalized) riderQuery['riderDetails.deliveryZone'] = { $regex: `^${normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' };
+
+  let onlineRiders = 0;
+  let activeOrders = 0;
+  try {
+    const riders = await User.find(riderQuery).select('_id').lean();
+    onlineRiders = riders.length;
+    if (onlineRiders) {
+      activeOrders = await Order.countDocuments({
+        rider: { $in: riders.map(r => r._id) },
+        riderStatus: { $in: ACTIVE_RIDER_STATUSES },
+        status: { $nin: ['delivered', 'cancelled'] },
+      });
+    }
+  } catch (err) {
+    console.error('[capacity] snapshot failed:', err.message);
+  }
+  const ratio = onlineRiders > 0 ? activeOrders / onlineRiders : Infinity;
+  return { zone: normalized, onlineRiders, activeOrders, activeOrdersPerRider: onlineRiders ? Number(ratio.toFixed(2)) : null };
+}
+
+module.exports = { autoAssignRider, findBestAvailableRider, resolveOrderZone, handleReassignment, scheduleRiderTimeout, recoverStuckAssignments, recoverUnassignedOrders, startAssignmentRecovery, getZoneDeliveryCapacity, haversineKm };

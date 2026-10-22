@@ -173,6 +173,129 @@ function normalizeRestaurantNotes(input, isValidObjectId) {
   return out;
 }
 
+/**
+ * Pillar 2 — server-authoritative, Admin-configurable checkout bill.
+ *
+ * Turns a restaurant's verified subtotal + distance-based base fee into the
+ * itemized customer bill. Pure and dependency-free so the money math is
+ * unit-testable without a database.
+ *
+ * `deliveryFee` is the already-computed distance fee (see
+ * deliveryPricing.calculatePolicyDeliveryFee) BEFORE any free-delivery
+ * waiver; this function applies the platform free-delivery rules on top.
+ *
+ * Returns every line item the Admin console and the customer receipt show,
+ * plus `grandTotal` (which includes the rider tip).
+ */
+function computeCheckoutBill({
+  subtotal = 0,
+  deliveryFee = 0,
+  discountAmount = 0,
+  tipAmount = 0,
+  itemCount = 0,
+  policy = {},
+  isFirstOrder = false,
+  restaurantFreeDeliveryApplied = false,
+} = {}) {
+  const itemSubtotal = roundCurrency(Math.max(0, Number(subtotal) || 0));
+  const safeDiscount = roundCurrency(Math.min(itemSubtotal, Math.max(0, Number(discountAmount) || 0)));
+  const safeTip = roundCurrency(Math.max(0, Number(tipAmount) || 0));
+  const baseDeliveryFee = roundCurrency(Math.max(0, Number(deliveryFee) || 0));
+
+  const packagingRate = Math.max(0, Number(policy.packagingChargePerItem) || 0);
+  const packagingCharge = roundCurrency(packagingRate * Math.max(0, Number(itemCount) || 0));
+
+  // ── Free-delivery rules (global threshold, first-order, restaurant) ──
+  const freeMin = Number(policy.freeDeliveryMinSubtotal);
+  const globalFree = policy.isGlobalFreeDelivery === true &&
+    Number.isFinite(freeMin) &&
+    (freeMin === 0 || itemSubtotal >= freeMin);
+  const firstOrderFree = policy.isFirstOrderFreeDelivery === true && isFirstOrder === true;
+  const isFreeDeliveryApplied = globalFree || firstOrderFree || restaurantFreeDeliveryApplied === true;
+  const finalDeliveryFee = isFreeDeliveryApplied ? 0 : baseDeliveryFee;
+
+  const platformHandlingFee = roundCurrency(Math.max(0, Number(policy.platformHandlingFee) || 0));
+
+  const smallCartThreshold = Number(policy.smallCartThreshold);
+  const smallCartFee = Number.isFinite(smallCartThreshold) && smallCartThreshold > 0 && itemSubtotal < smallCartThreshold
+    ? roundCurrency(Math.max(0, Number(policy.smallCartFee) || 0))
+    : 0;
+
+  const rainSurgeFee = policy.isRainSurgeActive === true
+    ? roundCurrency(Math.max(0, Number(policy.rainSurgeFee) || 0))
+    : 0;
+
+  const taxPercent = Math.max(0, Number(policy.taxPercent) || 0);
+  const taxAmount = roundCurrency((itemSubtotal - safeDiscount) * taxPercent / 100);
+
+  const grandTotal = roundCurrency(
+    itemSubtotal - safeDiscount + packagingCharge + finalDeliveryFee +
+    platformHandlingFee + smallCartFee + rainSurgeFee + taxAmount + safeTip
+  );
+
+  return {
+    itemSubtotal,
+    packagingCharge,
+    deliveryFee: finalDeliveryFee,
+    baseDeliveryFee,
+    isFreeDeliveryApplied,
+    platformHandlingFee,
+    smallCartFee,
+    rainSurgeFee,
+    discountAmount: safeDiscount,
+    taxAmount,
+    tipAmount: safeTip,
+    grandTotal,
+  };
+}
+
+/**
+ * Pillar 1 — pure checkout gate evaluator.
+ *
+ * Returns null when checkout is allowed, or an { statusCode, code, message }
+ * describing why it is blocked. Kept pure so the circuit-breaker policy is
+ * unit-testable without a database.
+ *
+ * Shortage rules (block when either holds):
+ *   - Admin flipped the manual `isDeliveryPausedShortage` pause on, OR
+ *   - the automatic breaker is enabled AND the zone has no online riders, or
+ *     activeOrders / onlineRiders exceeds maxActiveOrdersPerOnlineRider.
+ */
+function evaluateCheckoutGate({ settings = {}, onlineRiders = 0, activeOrders = 0 } = {}) {
+  if (settings.isUnderMaintenance === true) {
+    return {
+      statusCode: 503,
+      code: 'PLATFORM_MAINTENANCE',
+      message: settings.maintenanceMessage || 'Eatswada is under maintenance. Ordering is paused right now.',
+      maintenanceTitle: settings.maintenanceTitle || 'Eatswada is under maintenance',
+      maintenanceEta: settings.maintenanceEta || '',
+    };
+  }
+
+  const manualPause = settings.isDeliveryPausedShortage === true;
+  const autoBreaker = settings.autoShortageCircuitBreaker === true;
+  const maxPerRider = Number(settings.maxActiveOrdersPerOnlineRider);
+  const safeMax = Number.isFinite(maxPerRider) && maxPerRider > 0 ? maxPerRider : 3;
+
+  let shortage = manualPause;
+  if (!shortage && autoBreaker) {
+    const riders = Math.max(0, Number(onlineRiders) || 0);
+    const orders = Math.max(0, Number(activeOrders) || 0);
+    if (riders === 0) shortage = true;
+    else if (orders / riders > safeMax) shortage = true;
+  }
+
+  if (shortage) {
+    return {
+      statusCode: 503,
+      code: 'DELIVERY_PARTNER_SHORTAGE',
+      message: settings.shortageBannerMessage || 'All delivery partners are busy right now. Ordering is paused briefly.',
+    };
+  }
+
+  return null;
+}
+
 module.exports = {
   getMenuRefId,
   groupItemsByRestaurant,
@@ -180,4 +303,6 @@ module.exports = {
   roundCurrency,
   resolveRestaurantNote,
   normalizeRestaurantNotes,
+  computeCheckoutBill,
+  evaluateCheckoutGate,
 };
