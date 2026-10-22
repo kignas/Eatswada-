@@ -13,6 +13,7 @@ const {
   getRestaurantCommission, updateRestaurantCommission, updateRestaurantFssai,
   getRestaurantDeliverySettings, updateRestaurantDeliverySettings,
   getAdminPermissions, updateAdminPermissions,
+  forceAcceptOrder, forceDispatchOrder, forceDeliverOrder, getDeliveryCapacity,
 } = require('../controllers/adminController');
 const {
   getVendorApplications, getVendorApplicationById,
@@ -38,6 +39,12 @@ router.get('/dashboard/peak-hours', protect, authorize('admin'), getPeakHours);
 router.get('/orders', protect, authorize('admin'), getOrders);
 router.patch('/orders/:id/status', protect, authorize('admin'), updateOrderStatus);
 router.patch('/orders/:id/cancel', protect, authorize('admin'), cancelOrder);
+// Pillar 7 — live order war-room overrides.
+router.put('/orders/:id/force-accept', protect, authorize('admin'), requirePermission('orders.manage'), forceAcceptOrder);
+router.put('/orders/:id/force-dispatch', protect, authorize('admin'), requirePermission('orders.manage'), forceDispatchOrder);
+router.put('/orders/:id/force-deliver', protect, authorize('admin'), requirePermission('orders.manage'), forceDeliverOrder);
+// Pillar 1 — live delivery capacity for the dashboard shortage circuit breaker.
+router.get('/delivery-capacity', protect, authorize('admin'), getDeliveryCapacity);
 router.get('/restaurants', protect, authorize('admin'), getRestaurants);
 router.get('/restaurants/:id/fssai', protect, authorize('admin'), async (req,res,next) => {
   // Reuse the restaurant settings reader so admin UI can inspect FSSAI data.
@@ -52,6 +59,9 @@ router.get('/payout-requests', protect, authorize('admin'), adminMarketplace.lis
 router.get('/payout-requests/:id/reconciliation', protect, authorize('admin'), adminMarketplace.getPayoutReconciliation);
 router.patch('/payout-requests/:id', protect, authorize('admin'), adminMarketplace.updatePayoutRequest);
 router.get('/support/tickets', protect, authorize('admin'), adminMarketplace.listSupportTickets);
+router.get('/support/tickets/:id/resolution', protect, authorize('admin'), adminMarketplace.getSupportResolutionContext);
+router.post('/support/tickets/:id/resolve', protect, authorize('admin'), adminMarketplace.resolveSupportTicket);
+router.patch('/support/tickets/:id/fault', protect, authorize('admin'), adminMarketplace.setSupportFaultAttribution);
 router.post('/support/tickets/:id/reply', protect, authorize('admin'), adminMarketplace.replySupportTicket);
 router.patch('/restaurants/:id/toggle', protect, authorize('admin'), toggleRestaurant);
 router.get('/customers', protect, authorize('admin'), getCustomers);

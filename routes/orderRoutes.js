@@ -52,8 +52,8 @@ const createOrderValidation = [
   }).withMessage('Each cart item must have a valid menu item ID and quantity between 1 and 99.'),
   body('addressId').optional({ values: 'falsy' }).isMongoId()
     .withMessage('Invalid delivery address ID.'),
-  body('paymentMethod').optional().equals('upi')
-    .withMessage('Only UPI online payment is available.'),
+  body('paymentMethod').optional().isIn(['upi', 'cod'])
+    .withMessage('Payment method must be UPI or Cash on Delivery.'),
   body('tipAmount').optional().isFloat({ min: 0, max: 500 })
     .withMessage('Tip must be between ₹0 and ₹500.'),
   body('deliveryAddress').optional().isObject()
