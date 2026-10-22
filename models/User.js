@@ -111,6 +111,12 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Admin-set COD block for a customer who has repeatedly refused/failed
+    // cash-on-delivery payments. Prepaid UPI orders are unaffected.
+    isCodBlocked: {
+      type: Boolean,
+      default: false,
+    },
     otp: {
       code:      { type: String, select: false },
       expiresAt: { type: Date,   select: false },
@@ -167,6 +173,21 @@ const userSchema = new mongoose.Schema(
       currentLocation: {
         coordinates: { type: [Number], default: undefined },
         updatedAt:   { type: Date },
+      },
+      // ── COD cash reconciliation (Pillar 3 / 6) ──
+      // cashInHand = COD cash this rider has collected but not yet deposited
+      // with Admin. codCashLimit caps how much they may hold; a rider at/over
+      // the limit is filtered out of COD dispatch but still receives prepaid
+      // UPI orders.
+      cashInHand: {
+        type: Number,
+        default: 0,
+        min: 0,
+      },
+      codCashLimit: {
+        type: Number,
+        default: 2000,
+        min: 0,
       },
     },
   },

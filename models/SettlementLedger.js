@@ -12,6 +12,23 @@ const settlementLedgerSchema = new mongoose.Schema({
   restaurantNetAmount: { type: Number, required: true, min: 0 },
   adjustmentAmount: { type: Number, default: 0 },
   netSettlementAmount: { type: Number, required: true },
+
+  // ── Transparent vendor settlement statement (Pillar 5) ─────────────
+  // These mirror the legacy columns above for a human-readable ledger:
+  //   grossFoodBill      ≡ foodSales
+  //   vendorDiscountShare = the vendor's share of the coupon discount
+  //   penaltyAdjustment   = cancellation / quality penalties (negative)
+  //   netVendorPayable    = grossFoodBill - commissionAmount
+  //                         - vendorDiscountShare + penaltyAdjustment
+  // They are additive; every existing reader keeps using the legacy fields.
+  grossFoodBill: { type: Number, min: 0, default: 0 },
+  vendorDiscountShare: { type: Number, min: 0, default: 0 },
+  penaltyAdjustment: { type: Number, default: 0 },
+  netVendorPayable: { type: Number, default: 0 },
+  // Rider-side statement columns (Pillar 6) live in models/RiderLedger.js so
+  // they never leak into vendor settlement aggregations.
+  ledgerType: { type: String, enum: ['vendor', 'platform'], default: 'vendor', index: true },
+  note: { type: String, default: '', maxlength: 300 },
   currency: { type: String, default: 'INR' },
   status: { type: String, enum: ['eligible', 'reserved', 'settled', 'void'], default: 'eligible', index: true },
   settlementBatch: { type: mongoose.Schema.Types.ObjectId, ref: 'SettlementBatch', default: null, index: true },

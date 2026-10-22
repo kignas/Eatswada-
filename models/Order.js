@@ -141,6 +141,28 @@ const orderSchema = new mongoose.Schema(
       couponId: { type: mongoose.Schema.Types.ObjectId, ref: 'Coupon', default: null },
     },
 
+    // ── ITEMIZED CHECKOUT BILL SNAPSHOT (Pillar 2) ─────────────────────
+    // Every line item the customer saw at checkout is frozen here so the
+    // receipt, the Admin console and settlements agree forever, even after an
+    // admin changes platform pricing. `total` remains the authoritative
+    // grand total (kept for backward compatibility with every existing
+    // consumer); `grandTotal` mirrors it for the itemized API response.
+    bill: {
+      itemSubtotal: { type: Number, min: 0, default: 0 },
+      packagingCharge: { type: Number, min: 0, default: 0 },
+      deliveryFee: { type: Number, min: 0, default: 0 },
+      baseDeliveryFee: { type: Number, min: 0, default: 0 },
+      isFreeDeliveryApplied: { type: Boolean, default: false },
+      platformHandlingFee: { type: Number, min: 0, default: 0 },
+      smallCartFee: { type: Number, min: 0, default: 0 },
+      rainSurgeFee: { type: Number, min: 0, default: 0 },
+      discountAmount: { type: Number, min: 0, default: 0 },
+      taxAmount: { type: Number, min: 0, default: 0 },
+      tipAmount: { type: Number, min: 0, default: 0 },
+      grandTotal: { type: Number, min: 0, default: 0 },
+    },
+    grandTotal: { type: Number, min: 0, default: 0 },
+
     // ── PLATFORM COMMISSION SNAPSHOT ───────────────────────────────────
     // These values are frozen at order creation. They are deliberately kept
     // on the order instead of being recomputed from Restaurant.commissionRate
@@ -181,9 +203,42 @@ const orderSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ['pending', 'paid', 'failed', 'refunded'],
+      enum: ['pending', 'paid', 'failed', 'refunded', 'cod_pending', 'cod_collected'],
       default: 'pending',
     },
+    // ── COD cash reconciliation (Pillar 3 / 6) ─────────────────────────
+    // cashCollected is the rider-confirmed flag; codCollectedAt stamps the
+    // handoff. The rider's riderDetails.cashInHand is incremented atomically
+    // by the same value so Admin can reconcile deposits later.
+    cashCollected: { type: Boolean, default: false },
+    codCollectedAt: { type: Date, default: null },
+    codCashCollectedAmount: { type: Number, min: 0, default: 0 },
+    // Rider earning split for this order (Pillar 6), frozen at delivery.
+    riderEarningBreakdown: {
+      basePay: { type: Number, min: 0, default: 0 },
+      distancePay: { type: Number, min: 0, default: 0 },
+      rainSurgeBonus: { type: Number, min: 0, default: 0 },
+      waitTimePay: { type: Number, min: 0, default: 0 },
+      tip: { type: Number, min: 0, default: 0 },
+      total: { type: Number, min: 0, default: 0 },
+    },
+    riderWaitTimeMinutes: { type: Number, min: 0, default: 0 },
+    // Restaurant-to-rider handoff proof captured by the rider app.
+    pickupPhotoUrl: { type: String, default: '', maxlength: 1000 },
+    // KPT ("Kitchen Prep Time") gaming detector flag: set when the vendor
+    // marks food ready suspiciously early / late, surfaced to support agents.
+    kptGamingFlag: { type: Boolean, default: false },
+    kptGamingNote: { type: String, default: '', maxlength: 250 },
+    // ── Admin war-room overrides (Pillar 7) ────────────────────────────
+    adminOverrides: [{
+      _id: false,
+      action: { type: String, required: true },
+      reason: { type: String, default: '', maxlength: 300 },
+      by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      at: { type: Date, default: Date.now },
+    }],
+    // Set only when an admin force-delivered past the customer OTP.
+    deliveryOtpBypassReason: { type: String, default: '', maxlength: 300 },
     razorpayOrderId:   { type: String, default: '' },
     razorpayPaymentId: { type: String, default: '' },
     // Atomic payment-capture claim. The first captured payment id that claims
@@ -331,6 +386,29 @@ const orderSchema = new mongoose.Schema(
       paymentProcessingCost: { type: Number, min: 0, default: 0 },
       restaurantChargeAmount: { type: Number, min: 0, default: 0 },
       restaurantChargeRecordedAt: { type: Date, default: null },
+    },
+
+    // ── Support-resolution refund lifecycle (Pillar 4) ─────────────────
+    // Separate from `refund` (cancellation refunds) because a delivered-order
+    // goodwill/partial refund has a different lifecycle and can coexist with a
+    // later cancellation refund decision. Claimed atomically by refundService.
+    supportRefund: {
+      status: { type: String, enum: ['none', 'processing', 'completed', 'failed'], default: 'none' },
+      amount: { type: Number, min: 0, default: 0 },
+      reason: { type: String, default: '', maxlength: 200 },
+      razorpayRefundId: { type: String, default: '' },
+      error: { type: String, default: '', maxlength: 200 },
+      initiatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      initiatedAt: { type: Date, default: null },
+      completedAt: { type: Date, default: null },
+    },
+    // COD goodwill payout recorded by support (cash was already collected).
+    codResolutionPayout: {
+      status: { type: String, enum: ['none', 'recorded'], default: 'none' },
+      amount: { type: Number, min: 0, default: 0 },
+      reason: { type: String, default: '', maxlength: 200 },
+      recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      recordedAt: { type: Date, default: null },
     },
 
     rating: {

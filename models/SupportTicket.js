@@ -25,6 +25,44 @@ const supportTicketSchema = new mongoose.Schema({
   messages: { type: [supportMessageSchema], default: [] },
   // Complaint evidence visible to authorized ticket participants and admins.
   photos: { type: [{ type: String, trim: true, maxlength: 1000 }], default: [] },
+
+  // ── Production support & refund console (Pillar 4) ─────────────────
+  // `category` above is the legacy inbox taxonomy. `issueCategory` is the
+  // structured resolution taxonomy the refund console keys off. Both coexist.
+  issueCategory: {
+    type: String,
+    enum: ['missing_item', 'wrong_item', 'spilled_packaging', 'quality_issue', 'late_delivery', 'payment_issue'],
+    default: null,
+    index: true,
+  },
+  evidencePhotos: { type: [{ type: String, trim: true, maxlength: 1000 }], default: [] },
+  faultAttribution: {
+    type: String,
+    enum: ['vendor', 'rider', 'platform', 'none'],
+    default: 'none',
+    index: true,
+  },
+  resolutionType: {
+    type: String,
+    enum: ['full_refund', 'partial_refund', 'coupon_issued', 'rejected'],
+    default: null,
+  },
+  refundAmount: { type: Number, min: 0, default: 0 },
+  // Free-form resolution audit: which admin resolved it, how, and any
+  // gateway/coupon/payout reference produced by the refund service.
+  resolution: {
+    resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    resolvedAt: { type: Date, default: null },
+    method: { type: String, default: '' },
+    reference: { type: String, default: '' },
+    note: { type: String, maxlength: 500, default: '' },
+    ledgerDeduction: {
+      target: { type: String, enum: ['', 'vendor', 'rider', 'platform'], default: '' },
+      amount: { type: Number, min: 0, default: 0 },
+      ledgerId: { type: mongoose.Schema.Types.ObjectId, ref: 'SettlementLedger', default: null },
+    },
+  },
+
   closedAt: { type: Date, default: null },
   // Customer chat extras. affectedItems = item names the customer picked for
   // missing/wrong-item issues. customerLastReadAt drives the unread badge.
