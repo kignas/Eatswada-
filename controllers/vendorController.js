@@ -16,6 +16,7 @@ const { getRestaurantCapacity } = require('../services/vendorMarketplaceService'
 const { isRestaurantResponseOverdue } = require('../services/orderCancellationPolicy');
 const { buildOpeningHoursUpdate, operationalStatus, getLocalContext } = require('../services/restaurantHours');
 const { buildPaymentView } = require('../services/orderPaymentView');
+const { getPlatformSettings } = require('../services/platformSettingsService');
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -43,6 +44,18 @@ const VENDOR_ORDER_POPULATE = [
   },
 ];
 
+// The COD label is an admin-configurable platform setting. The serializer is
+// synchronous, so handlers load the label once per request into this holder.
+let vendorCodLabel;
+async function loadVendorCodLabel() {
+  try {
+    const settings = await getPlatformSettings();
+    vendorCodLabel = settings?.codDisplayLabel;
+  } catch (_) {
+    vendorCodLabel = undefined;
+  }
+}
+
 function serializeVendorOrder(orderDoc) {
   const order = orderDoc.toObject({ virtuals: false });
   const customer = order.user && typeof order.user === 'object' ? order.user : null;
@@ -61,7 +74,7 @@ function serializeVendorOrder(orderDoc) {
 
   // Pillar 3 — the restaurant sees exactly what was paid online vs collected in
   // cash, so a partial-COD order can never be mistaken for fully prepaid.
-  order.payment = buildPaymentView(order);
+  order.payment = buildPaymentView(order, { codDisplayLabel: vendorCodLabel });
 
   return order;
 }
@@ -112,6 +125,7 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
     const orders = await Order.find(query)
       .populate(VENDOR_ORDER_POPULATE)
       .sort({ createdAt: -1 });
+    await loadVendorCodLabel();
 
     return res.status(200).json({
       success: true,
@@ -138,6 +152,7 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
       .limit(limit),
     Order.countDocuments(query),
   ]);
+  await loadVendorCodLabel();
 
   res.status(200).json({
     success: true,

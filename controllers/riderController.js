@@ -10,6 +10,7 @@ const { computeRiderEarning } = require('../services/riderEarningService');
 const { withRequiredTransaction } = require('../services/dbTransaction');
 const { recordCodFailure, isCustomerFaultReason } = require('../services/customerTrustService');
 const { buildPaymentView } = require('../services/orderPaymentView');
+const { getPlatformSettings } = require('../services/platformSettingsService');
 
 /* ── Rider-owned delivery status flow ──
  * unassigned -> assigned -> accepted -> reached_restaurant -> picked_up -> out_for_delivery -> delivered
@@ -43,12 +44,24 @@ const haversineMeters = (a, b) => {
 };
 
 // Attach the shared payment view to a hydrated order doc before serializing, so
-// the rider app never has to derive cash-due from raw fields itself.
-function withRiderPaymentView(orderDoc) {
+// the rider app never has to derive cash-due from raw fields itself. The label
+// comes from the live platform setting so an admin can reword it.
+function withRiderPaymentView(orderDoc, codDisplayLabel) {
   if (!orderDoc) return orderDoc;
   const order = typeof orderDoc.toObject === 'function' ? orderDoc.toObject({ virtuals: false }) : orderDoc;
-  order.payment = buildPaymentView(order);
+  order.payment = buildPaymentView(order, { codDisplayLabel });
   return order;
+}
+
+// Load the admin-configurable COD label once per request. Never throws — a
+// settings failure must not stop a rider seeing their orders.
+async function codLabel() {
+  try {
+    const settings = await getPlatformSettings();
+    return settings?.codDisplayLabel;
+  } catch (_) {
+    return undefined;
+  }
 }
 
 /* GET /api/riders/profile */
@@ -146,7 +159,8 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
 
   // Attach the normalized payment view so the rider app shows exactly how much
   // cash to collect (advance already paid vs balance due) on every order.
-  res.json({ success: true, data: { orders: orders.map(withRiderPaymentView), total, page: Number(page), pages: Math.ceil(total / limit) } });
+  const label = await codLabel();
+  res.json({ success: true, data: { orders: orders.map(o => withRiderPaymentView(o, label)), total, page: Number(page), pages: Math.ceil(total / limit) } });
 });
 
 /* GET /api/riders/orders/active — the single in-progress order, if any. */
@@ -156,7 +170,7 @@ exports.getActiveOrder = asyncHandler(async (req, res) => {
     riderStatus: { $in: ACTIVE_RIDER_STATUSES },
   }).sort({ riderAssignedAt: -1 }).populate('restaurant', 'name image address location');
 
-  res.json({ success: true, data: order ? withRiderPaymentView(order) : null });
+  res.json({ success: true, data: order ? withRiderPaymentView(order, await codLabel()) : null });
 });
 
 /* GET /api/riders/orders/history — delivered or cancelled orders for this rider. */
@@ -181,7 +195,7 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
 exports.getAssignedOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).populate('restaurant', 'name image address location');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
-  res.json({ success: true, data: withRiderPaymentView(order) });
+  res.json({ success: true, data: withRiderPaymentView(order, await codLabel()) });
 });
 
 /* GET /api/riders/earnings — earnings summary (all time / today / week / month).

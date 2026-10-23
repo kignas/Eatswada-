@@ -40,8 +40,13 @@ exports.getPublicStatus=async(req,res)=>{
     // expose the state so the UI can explain why instead of failing at submit.
     data.isAccountFrozen=u?.accountStatus==='frozen';
     // Per-customer COD terms override the platform default for this user only.
-    if(Number.isFinite(Number(u?.codPolicy?.advancePercent)))data.codAdvancePercent=Number(u.codPolicy.advancePercent);
-    if(Number.isFinite(Number(u?.codPolicy?.advanceRequiredAbove)))data.codAdvanceThreshold=Number(u.codPolicy.advanceRequiredAbove);
+    // Null (unset) must not be read as 0 — Number(null) is 0, which would
+    // advertise a 0% advance / ₹0 threshold to every normal customer.
+    const optNum = v => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v))) ? null : Number(v);
+    const custAdvancePercent = optNum(u?.codPolicy?.advancePercent);
+    const custAdvanceAbove = optNum(u?.codPolicy?.advanceRequiredAbove);
+    if(custAdvancePercent!==null)data.codAdvancePercent=custAdvancePercent;
+    if(custAdvanceAbove!==null)data.codAdvanceThreshold=custAdvanceAbove;
   }
   res.set('Cache-Control','no-store');
   res.json({success:true,data});

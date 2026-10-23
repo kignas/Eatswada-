@@ -1271,6 +1271,14 @@ exports.getCustomerSavedLocations = asyncHandler(async (req, res) => {
  *  together so an operator can act in one place.
  * ───────────────────────────────────────────────────────────────────── */
 
+// Mongoose persists unset Number fields as null, and Number(null) === 0. A
+// plain isFinite() test would therefore report "no override" as "override = 0".
+function nullableNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function serializeCustomerTrust(u) {
   return {
     id: u._id,
@@ -1289,8 +1297,8 @@ function serializeCustomerTrust(u) {
       autoBlockedAt: u.codTrust?.autoBlockedAt || null,
     },
     codPolicy: {
-      advanceRequiredAbove: Number.isFinite(Number(u.codPolicy?.advanceRequiredAbove)) ? Number(u.codPolicy.advanceRequiredAbove) : null,
-      advancePercent: Number.isFinite(Number(u.codPolicy?.advancePercent)) ? Number(u.codPolicy.advancePercent) : null,
+      advanceRequiredAbove: nullableNumber(u.codPolicy?.advanceRequiredAbove),
+      advancePercent: nullableNumber(u.codPolicy?.advancePercent),
       note: u.codPolicy?.note || '',
       updatedAt: u.codPolicy?.updatedAt || null,
     },
