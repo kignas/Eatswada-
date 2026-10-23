@@ -1,0 +1,33 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const read = p => fs.readFileSync(path.join(root, p), 'utf8');
+
+const adminRoutes = read('routes/adminRoutes.js');
+const adminController = read('controllers/adminController.js');
+const vendorRoutes = read('routes/vendorRoutes.js');
+const vendorMarketplace = read('controllers/vendorMarketplaceController.js');
+const menuModel = read('models/Menu.js');
+const orderController = read('controllers/orderController.js');
+const restaurantController = read('controllers/restaurantController.js');
+const reservationService = read('services/inventoryReservationService.js');
+const vendorController = read('controllers/vendorController.js');
+
+assert.match(adminRoutes, /router\.get\('\/inventory',\s*protect,\s*authorize\('admin'\),\s*getAllRestaurantInventory\)/);
+assert.match(adminRoutes, /router\.patch\('\/inventory\/:itemId',\s*protect,\s*authorize\('admin'\),\s*updateAnyRestaurantInventory\)/);
+assert.match(adminRoutes, /customers\/:userId\/saved-locations/);
+assert.match(adminController, /exports\.getCustomerSavedLocations/);
+assert.match(adminController, /Address\.find\(\{user:user\._id\}\)/);
+assert.match(adminController, /exports\.updateAnyRestaurantInventory/);
+assert.match(vendorRoutes, /router\.put\('\/menu\/:id\/inventory',\s*protect,\s*role\('vendor'\),\s*marketplace\.setVendorInventory\)/);
+assert.match(vendorMarketplace, /restaurantId:req\.user\.restaurantId/);
+assert.match(menuModel, /manualAvailability:\s*\{\s*type:\s*Boolean,\s*default:\s*true\s*\}/);
+assert.match(orderController, /menuItem\.trackStock === true && Number\(menuItem\.stockQuantity \|\| 0\) <= 0/);
+assert.match(orderController, /p\.restaurant\?\.codEnabled !== true/);
+assert.match(restaurantController, /payload\.inStock = payload\.manualAvailability && quantity > 0/);
+assert.match(reservationService, /stockQuantity:\{\$gte:quantity\}/);
+assert.match(reservationService, /checkout_stock_reserved/);
+assert.match(orderController, /reserveOrderInventory\(order, req\.user\._id\)/);
+assert.match(vendorController, /order\.inventoryReservedAt && !order\.inventoryReleasedAt/);
+console.log('Admin inventory/location and stock-availability contract checks passed.');
