@@ -24,7 +24,7 @@ async function getRestaurantCapacity(restaurantId) {
 
   const maxActiveOrders = Number.isInteger(Number(restaurant.maxActiveOrders)) && Number(restaurant.maxActiveOrders) > 0
     ? Number(restaurant.maxActiveOrders)
-    : 20;
+    : 10;
 
   const activeOrders = await Order.countDocuments({
     restaurant: restaurant._id,

@@ -15,7 +15,23 @@ const ACTIVE_RIDER_STATUSES = ['assigned', 'accepted', 'reached_restaurant', 'pi
 const DISPATCHABLE_ORDER_STATUSES = ['confirmed', 'preparing', 'waiting_for_rider'];
 const LOCATION_MAX_AGE_MS = Math.max(30_000, Number(process.env.RIDER_LOCATION_MAX_AGE_MS) || 3 * 60 * 1000);
 const ACCEPT_TIMEOUT_MS = Math.max(15_000, Number(process.env.RIDER_ACCEPT_TIMEOUT_MS) || 60 * 1000);
-const MAX_ACTIVE_ORDERS_PER_RIDER = Math.max(1, Number(process.env.MAX_ACTIVE_ORDERS_PER_RIDER) || 1);
+// Fallback concurrency cap when the platform setting is unavailable. Zomato and
+// Swiggy batch up to 2–3 orders per rider in one trip, so 3 is a safe default;
+// admins tune it live via maxActiveOrdersPerOnlineRider.
+const MAX_ACTIVE_ORDERS_PER_RIDER = Math.max(1, Number(process.env.MAX_ACTIVE_ORDERS_PER_RIDER) || 3);
+
+// Resolve the live per-rider concurrency cap from platform settings, falling
+// back to the env/default constant if settings cannot be read.
+async function resolveMaxActiveOrdersPerRider() {
+  try {
+    const { getPlatformSettings } = require('./platformSettingsService');
+    const settings = await getPlatformSettings();
+    const cap = Number(settings.maxActiveOrdersPerOnlineRider);
+    return Number.isFinite(cap) && cap >= 1 ? cap : MAX_ACTIVE_ORDERS_PER_RIDER;
+  } catch (_) {
+    return MAX_ACTIVE_ORDERS_PER_RIDER;
+  }
+}
 
 function normalizeZone(value) { return String(value || '').trim().toLowerCase(); }
 function validCoords(coords) {
@@ -81,6 +97,7 @@ async function findBestAvailableRider(order, excludeRiderIds = [], options = {})
 
   const sameZone = orderZone ? cashEligible.filter(r => normalizeZone(r.riderDetails?.deliveryZone) === orderZone) : [];
   const riderIds = cashEligible.map(r => r._id);
+  const maxPerRider = await resolveMaxActiveOrdersPerRider();
   const loadCounts = await Order.aggregate([
     { $match: { rider: { $in: riderIds }, riderStatus: { $in: ACTIVE_RIDER_STATUSES }, status: { $nin: ['delivered', 'cancelled'] } } },
     { $group: { _id: '$rider', activeCount: { $sum: 1 } } },
@@ -89,7 +106,7 @@ async function findBestAvailableRider(order, excludeRiderIds = [], options = {})
   const rankPool = pool => pool.map(r => {
     const coords = r.riderDetails?.currentLocation?.coordinates;
     return { rider: r, distanceKm: validCoords(coords) ? haversineKm(coords, restaurantCoords) : Infinity, activeCount: loadMap.get(String(r._id)) || 0 };
-  }).filter(x => Number.isFinite(x.distanceKm) && x.activeCount < MAX_ACTIVE_ORDERS_PER_RIDER)
+  }).filter(x => Number.isFinite(x.distanceKm) && x.activeCount < maxPerRider)
     .sort((a,b) => a.distanceKm - b.distanceKm || a.activeCount - b.activeCount || String(a.rider._id).localeCompare(String(b.rider._id)));
   // Prefer same-zone riders when they have capacity; if all are busy, safely
   // fall back to the wider eligible pool rather than leaving a job unassigned.
@@ -253,4 +270,4 @@ async function getZoneDeliveryCapacity(zone = '') {
   return { zone: normalized, onlineRiders, activeOrders, activeOrdersPerRider: onlineRiders ? Number(ratio.toFixed(2)) : null };
 }
 
-module.exports = { autoAssignRider, findBestAvailableRider, resolveOrderZone, handleReassignment, scheduleRiderTimeout, recoverStuckAssignments, recoverUnassignedOrders, startAssignmentRecovery, getZoneDeliveryCapacity, haversineKm };
+module.exports = { autoAssignRider, findBestAvailableRider, resolveOrderZone, handleReassignment, scheduleRiderTimeout, recoverStuckAssignments, recoverUnassignedOrders, startAssignmentRecovery, getZoneDeliveryCapacity, haversineKm, resolveMaxActiveOrdersPerRider, MAX_ACTIVE_ORDERS_PER_RIDER };

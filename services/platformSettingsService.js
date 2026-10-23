@@ -51,18 +51,26 @@ const DEFAULT_PLATFORM_SETTINGS = Object.freeze({
   isUpiEnabled: true,
   isCodEnabled: true,
   maxCodOrderAmount: 1000,
+  codAdvanceThreshold: 1000,
+  codAdvancePercent: 10,
+  codAutoBlockEnabled: false,
+  codMaxRefusalsBeforeAutoBlock: 3,
+  codDisplayLabel: 'Cash on Delivery — Free',
 
   // ── Pillar 6: rider pay model ──
   riderBasePay: 25,
   riderPerKmPay: 5,
   riderWaitTimePayPerMin: 1,
   riderRainSurgeBonus: 15,
+  // Rider distance pay is capped at riderMaxDistanceKm × riderPerKmPay so a
+  // long trip cannot produce an unbounded payout (e.g. 3 km × ₹5 = ₹15 cap).
+  riderMaxDistanceKm: 3,
 });
 
 const BOOLEAN_KEYS = new Set([
   'isUnderMaintenance', 'isDeliveryPausedShortage', 'autoShortageCircuitBreaker',
   'isRainSurgeActive', 'isGlobalFreeDelivery', 'isFirstOrderFreeDelivery',
-  'isUpiEnabled', 'isCodEnabled',
+  'isUpiEnabled', 'isCodEnabled', 'codAutoBlockEnabled',
 ]);
 
 const NUMBER_KEYS = new Set([
@@ -70,17 +78,21 @@ const NUMBER_KEYS = new Set([
   'freeDeliveryMinSubtotal', 'baseDeliveryFee', 'baseDistanceKm', 'perKmExtraFee',
   'platformHandlingFee', 'smallCartThreshold', 'smallCartFee',
   'packagingChargePerItem', 'taxPercent', 'maxCodOrderAmount',
+  'codAdvanceThreshold', 'codAdvancePercent', 'codMaxRefusalsBeforeAutoBlock',
   'riderBasePay', 'riderPerKmPay', 'riderWaitTimePayPerMin', 'riderRainSurgeBonus',
+  'riderMaxDistanceKm',
 ]);
 
 const MIN_ZERO_KEYS = new Set([
   'rainSurgeFee', 'rainExtraEtaMinutes', 'freeDeliveryMinSubtotal', 'baseDeliveryFee',
   'baseDistanceKm', 'perKmExtraFee', 'platformHandlingFee', 'smallCartThreshold',
   'smallCartFee', 'packagingChargePerItem', 'taxPercent', 'maxCodOrderAmount',
+  'codAdvanceThreshold', 'codAdvancePercent', 'codMaxRefusalsBeforeAutoBlock',
   'riderBasePay', 'riderPerKmPay', 'riderWaitTimePayPerMin', 'riderRainSurgeBonus',
+  'riderMaxDistanceKm',
 ]);
 
-const STRING_KEYS = new Set(['maintenanceTitle', 'maintenanceMessage', 'maintenanceEta', 'shortageBannerMessage']);
+const STRING_KEYS = new Set(['maintenanceTitle', 'maintenanceMessage', 'maintenanceEta', 'shortageBannerMessage', 'codDisplayLabel']);
 
 const STRING_MAX = 500;
 

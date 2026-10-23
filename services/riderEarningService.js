@@ -20,7 +20,13 @@ async function computeRiderEarning(order) {
   const basePay = Math.max(0, Number(settings.riderBasePay) || 0);
   const perKm = Math.max(0, Number(settings.riderPerKmPay) || 0);
   const distanceKm = Math.max(0, Number(order.deliveryDistanceKm) || 0);
-  const distancePay = Math.round(perKm * distanceKm * 100) / 100;
+  // Distance pay is capped at riderMaxDistanceKm (default 3 km) so a long trip
+  // cannot produce an unbounded payout: 3 km × ₹5 = ₹15 maximum.
+  const maxDistanceKm = Number.isFinite(Number(settings.riderMaxDistanceKm)) && Number(settings.riderMaxDistanceKm) > 0
+    ? Number(settings.riderMaxDistanceKm)
+    : 3;
+  const payableKm = Math.min(distanceKm, maxDistanceKm);
+  const distancePay = Math.round(perKm * payableKm * 100) / 100;
   const rainSurgeBonus = settings.isRainSurgeActive === true
     ? Math.max(0, Number(settings.riderRainSurgeBonus) || 0)
     : 0;
