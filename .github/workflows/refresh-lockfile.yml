@@ -1,1 +1,47 @@
+name: Refresh package lockfile
 
+# Manual-only utility. This workflow regenerates package-lock.json and uploads
+# it as an artifact. It never commits, pushes, deploys, or accesses production.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-lockfile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refresh-lockfile:
+    name: Regenerate and validate package-lock.json
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Regenerate lockfile from package.json
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      - name: Validate clean install against regenerated lockfile
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Upload regenerated lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: eatswada-package-lock
+          path: package-lock.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Explain next steps
+        run: |
+          echo "The regenerated package-lock.json was uploaded as the eatswada-package-lock artifact."
+          echo "This workflow does not commit, push, deploy, or modify any production service."
