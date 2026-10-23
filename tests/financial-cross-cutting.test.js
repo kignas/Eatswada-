@@ -89,6 +89,9 @@ async function runCheckout({ fundedBy, restaurantSharePercent = 0, value = 200, 
   const customer = await User.create({ name: 'Cust', phone: `8900000${String(seq).padStart(3, '0')}`, role: 'user', password: 'x'.repeat(12) });
   const restaurant = await Restaurant.create({
     name: `Chk${seq}`, owner: owner._id, cuisines: ['Indian'], isActive: true,
+    // COD is off by default; these cases checkout with COD to assert the
+    // discount-funding split, so the restaurant must opt in.
+    codEnabled: true,
     location: { type: 'Point', coordinates: [88.8210, 26.5610] },
   });
   const menu = await Menu.create({ name: 'Dish', price, inStock: true, restaurantId: restaurant._id });

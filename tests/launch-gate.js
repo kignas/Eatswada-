@@ -60,8 +60,16 @@ check('Order checkout resets cart to UPI',()=>{
   assert(read('controllers/paymentController.js').includes("paymentMethod: 'upi'"));
 });
 check('Restaurant creation/update cannot enable COD',()=>{
-  assert(read('controllers/restaurantController.js').includes('req.body.codEnabled = false'));
-  assert(read('controllers/restaurantController.js').includes('update.codEnabled = false'));
+  const rc = read('controllers/restaurantController.js');
+  // Non-admins cannot set the COD gate on create...
+  assert(rc.includes('delete req.body.codEnabled'));
+  // ...nor on update: the vendor allow-list must exclude it, and any non
+  // privileged admin gets it stripped from the update payload.
+  const start = rc.indexOf('const VENDOR_EDITABLE');
+  const vendorEditable = rc.slice(start, rc.indexOf('];', start));
+  assert(!vendorEditable.includes('codEnabled'), 'vendor allow-list must not expose codEnabled');
+  assert(rc.includes('delete update.codEnabled'));
+  // Vendor-created restaurants are born with COD off.
   assert(read('controllers/authController.js').includes('codEnabled: false'));
 });
 check('Rider history persists riderId',()=>{

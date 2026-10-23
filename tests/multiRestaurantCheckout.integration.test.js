@@ -75,8 +75,11 @@ async function invoke(handler, req) {
 }
 
 // ── Seed helpers (Maynaguri-area coordinates so distance < radius) ────────
+// Unique phone suffix for throwaway vendor owners.
+let vendorSeq = 1;
+
 async function seedUser() {
-  return User.create({ name: 'Test Customer', phone: '9000000001', role: 'customer' });
+  return User.create({ name: 'Test Customer', phone: '9000000001', role: 'user' });
 }
 
 async function seedAddress(userId) {
@@ -88,12 +91,20 @@ async function seedAddress(userId) {
 }
 
 async function seedRestaurant(overrides = {}) {
+  // The Restaurant model requires an owner; supply a throwaway vendor unless the
+  // caller passes one explicitly. Phones are unique, so use a local counter.
+  let owner = overrides.owner;
+  if (!owner) {
+    owner = await User.create({ name: 'Vendor', phone: `9800000${String(vendorSeq++).padStart(3, '0')}`, role: 'vendor' });
+  }
   return Restaurant.create({
     name: 'Rest', isActive: true, codEnabled: true,
+    owner,
     minOrder: 0, freeDeliveryEnabled: true, freeDeliveryAbove: 0,
     availability: { isOpen: true },
     location: { type: 'Point', coordinates: [88.8210, 26.5610] },
     ...overrides,
+    owner,
   });
 }
 
