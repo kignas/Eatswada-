@@ -14,6 +14,7 @@ const {
   getRestaurantDeliverySettings, updateRestaurantDeliverySettings,
   getAdminPermissions, updateAdminPermissions,
   forceAcceptOrder, forceDispatchOrder, forceDeliverOrder, getDeliveryCapacity,
+  getAllRestaurantInventory, updateAnyRestaurantInventory, getCustomerSavedLocations,
 } = require('../controllers/adminController');
 const {
   getVendorApplications, getVendorApplicationById,
@@ -65,6 +66,9 @@ router.patch('/support/tickets/:id/fault', protect, authorize('admin'), adminMar
 router.post('/support/tickets/:id/reply', protect, authorize('admin'), adminMarketplace.replySupportTicket);
 router.patch('/restaurants/:id/toggle', protect, authorize('admin'), toggleRestaurant);
 router.get('/customers', protect, authorize('admin'), getCustomers);
+router.get('/customers/:userId/saved-locations', protect, authorize('admin'), getCustomerSavedLocations);
+router.get('/inventory', protect, authorize('admin'), getAllRestaurantInventory);
+router.patch('/inventory/:itemId', protect, authorize('admin'), updateAnyRestaurantInventory);
 router.get('/analytics/revenue', protect, authorize('admin'), getRevenueAnalytics);
 router.get('/analytics/top-restaurants', protect, authorize('admin'), getTopRestaurants);
 router.get('/reviews', protect, authorize('admin'), getReviews);
