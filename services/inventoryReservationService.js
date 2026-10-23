@@ -4,6 +4,18 @@ const Order = require('../models/Order');
 const InventoryMovement = require('../models/InventoryMovement');
 
 
+// A line's menuItem may be a raw ObjectId OR a populated Menu document (some
+// callers pass an order that was just `.populate('items.menuItem')`d, e.g. the
+// checkout controller). `String(populatedDoc)` yields the whole document's JSON,
+// which then fails ObjectId casting and aborts the reservation. Resolve to the
+// id in both cases.
+function menuItemIdOf(line) {
+  const ref = line && line.menuItem;
+  if (!ref) return '';
+  if (typeof ref === 'object' && ref._id) return String(ref._id);
+  return String(ref);
+}
+
 // Reserve tracked stock at checkout using a conditional atomic decrement. Two
 // concurrent checkouts cannot both consume the same units. Untracked legacy
 // items keep their previous unlimited-stock behavior.
@@ -12,7 +24,7 @@ async function reserveOrderInventory(order, actorId = null) {
   if (order.inventoryReservedAt && !order.inventoryReleasedAt) return {reserved:false,reason:'already_reserved'};
   const needs = new Map();
   for (const line of (order.items || [])) {
-    const id=String(line.menuItem || '');
+    const id = menuItemIdOf(line);
     if (id) needs.set(id,(needs.get(id)||0)+Number(line.quantity||0));
   }
   const reserved=[];
@@ -60,7 +72,7 @@ async function releaseOrderInventory(order, actorId = null) {
   if (!claim) return { released:false, reason:'already_released' };
   const quantities = new Map();
   for (const line of (order.items || [])) {
-    const id=String(line.menuItem||''); if(id) quantities.set(id,(quantities.get(id)||0)+Number(line.quantity||0));
+    const id = menuItemIdOf(line); if(id) quantities.set(id,(quantities.get(id)||0)+Number(line.quantity||0));
   }
   for (const [menuItemId, quantity] of quantities) {
     const item=await Menu.findOne({_id:menuItemId,restaurantId:order.restaurant}).select('_id stockQuantity inStock');

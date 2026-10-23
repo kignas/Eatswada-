@@ -36,6 +36,19 @@ function percentOfPaise(basePaise, percent) {
 }
 
 /**
+ * Read a number that may be genuinely absent. A Mongoose document persists
+ * unset Number fields as `null`, and `Number(null)` is `0` — a finite value —
+ * so a naive `Number.isFinite(Number(x))` test would treat "no override" as
+ * "override = 0" and silently disable the platform default. Nullish and empty
+ * values must therefore resolve to `null` (absent), not 0.
+ */
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
  * Resolve the COD terms for one restaurant's order.
  *
  * @param {object}  args
@@ -54,25 +67,25 @@ function resolveCodTerms({ subtotalRupees, discountRupees, grandTotalRupees, set
   const foodPaise = discountedFoodSubtotalPaise(subtotalRupees, discountRupees);
   const grandTotalPaise = Math.max(0, Math.round(Number(grandTotalRupees || 0) * 100));
 
-  const customerThreshold = customer?.codPolicy?.advanceRequiredAbove;
-  const customerPercent = customer?.codPolicy?.advancePercent;
+  const customerThreshold = optionalNumber(customer?.codPolicy?.advanceRequiredAbove);
+  const customerPercent = optionalNumber(customer?.codPolicy?.advancePercent);
 
-  const platformThreshold = Number(settings.codAdvanceThreshold);
-  const platformPercent = Number(settings.codAdvancePercent);
+  const platformThreshold = optionalNumber(settings.codAdvanceThreshold);
+  const platformPercent = optionalNumber(settings.codAdvancePercent);
 
-  const thresholdRupees = Number.isFinite(Number(customerThreshold))
-    ? Math.max(0, Number(customerThreshold))
-    : Number.isFinite(platformThreshold) && platformThreshold >= 0
+  const thresholdRupees = customerThreshold !== null
+    ? Math.max(0, customerThreshold)
+    : platformThreshold !== null && platformThreshold >= 0
       ? platformThreshold
       : DEFAULT_ADVANCE_THRESHOLD_RUPEES;
 
-  const advancePercent = Number.isFinite(Number(customerPercent))
-    ? Math.min(MAX_ADVANCE_PERCENT, Math.max(0, Number(customerPercent)))
-    : Number.isFinite(platformPercent) && platformPercent > 0
+  const advancePercent = customerPercent !== null
+    ? Math.min(MAX_ADVANCE_PERCENT, Math.max(0, customerPercent))
+    : platformPercent !== null && platformPercent > 0
       ? Math.min(MAX_ADVANCE_PERCENT, platformPercent)
       : DEFAULT_ADVANCE_PERCENT;
 
-  const source = Number.isFinite(Number(customerThreshold)) || Number.isFinite(Number(customerPercent))
+  const source = customerThreshold !== null || customerPercent !== null
     ? 'customer'
     : 'platform';
 

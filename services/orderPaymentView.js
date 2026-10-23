@@ -16,6 +16,10 @@ function money(value) {
   return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 }
 
+// Matches the platform registry default (platformSettingsService.codDisplayLabel);
+// callers that have the live settings can override it.
+const DEFAULT_COD_LABEL = 'Cash on Delivery — Free';
+
 /**
  * Build the normalized payment view for an order document (lean or hydrated).
  *
@@ -36,8 +40,9 @@ function money(value) {
  *   blockReason: string
  * }}
  */
-function buildPaymentView(order) {
+function buildPaymentView(order, options = {}) {
   if (!order) return null;
+  const codLabel = String(options.codDisplayLabel || DEFAULT_COD_LABEL);
   const method = String(order.paymentMethod || 'upi').toLowerCase() === 'cod' ? 'cod' : 'upi';
   const isCod = method === 'cod';
   const orderTotal = money(order.total ?? order.grandTotal ?? 0);
@@ -66,9 +71,10 @@ function buildPaymentView(order) {
   const isPartialCod = advanceRequired > 0;
   const advanceStatus = order.partialCodAdvanceStatus || (isPartialCod ? 'pending' : 'not_required');
   const advancePaid = advanceStatus === 'paid' ? advanceRequired : 0;
+  const cashDue = money(order.partialCodCashDue ?? Math.max(0, orderTotal - advanceRequired));
   // Cash to collect is the frozen cash-due when present, else the full total.
   const cashToCollect = isPartialCod
-    ? money(order.partialCodCashDue ?? Math.max(0, orderTotal - advanceRequired))
+    ? cashDue
     : money(order.cashCollected ? (order.codCashCollectedAmount || 0) : orderTotal);
 
   const cashCollected = order.cashCollected === true;
@@ -86,9 +92,13 @@ function buildPaymentView(order) {
     cashToCollect: cashCollected ? 0 : cashToCollect,
     cashCollected,
     cashCollectedAt: order.codCollectedAt || null,
+    // Never report "₹0 paid online" while the advance is still owed — that
+    // reads as if nothing was required. State the amount due instead.
     label: isPartialCod
-      ? `₹${advancePaid} paid online · collect ₹${money(order.partialCodCashDue ?? Math.max(0, orderTotal - advanceRequired))} cash`
-      : 'Cash on Delivery — Free',
+      ? (advanceUnpaid
+        ? `₹${advanceRequired} advance due online · then ₹${cashDue} cash on delivery`
+        : `₹${advancePaid} paid online · collect ₹${cashDue} cash`)
+      : codLabel,
     // Delivery is blocked until a required advance is confirmed paid.
     blocksDelivery: advanceUnpaid,
     blockReason: advanceUnpaid ? 'The customer advance has not been paid; delivery cannot proceed.' : '',
