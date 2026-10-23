@@ -192,6 +192,8 @@ const orderSchema = new mongoose.Schema(
 
     // Customer-provided order instructions and rider tip. These are persisted
     // on the real order so the vendor/rider apps can consume them directly.
+    // Customer asked for spoons/forks; surfaced to the vendor as a "Send cutlery" banner.
+    sendCutlery: { type: Boolean, default: false },
     restaurantNote: {
       type: String,
       maxlength: 250,
