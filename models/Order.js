@@ -222,6 +222,13 @@ const orderSchema = new mongoose.Schema(
       enum: ['pending', 'paid', 'failed', 'refunded', 'cod_pending', 'cod_collected'],
       default: 'pending',
     },
+    // Partial-COD advance is a separate Razorpay payment; paymentStatus stays
+    // cod_pending until the rider collects only the remaining cash at delivery.
+    partialCodAdvanceAmount: { type: Number, min: 0, default: 0 },
+    partialCodCashDue: { type: Number, min: 0, default: 0 },
+    partialCodAdvanceStatus: { type: String, enum: ['not_required', 'pending', 'paid', 'refund_processing', 'refunded', 'refund_failed'], default: 'not_required' },
+    partialCodRefundEligible: { type: Boolean, default: false },
+    partialCodAdvancePaidAt: { type: Date, default: null },
     // ── COD cash reconciliation (Pillar 3 / 6) ─────────────────────────
     // cashCollected is the rider-confirmed flag; codCollectedAt stamps the
     // handoff. The rider's riderDetails.cashInHand is incremented atomically

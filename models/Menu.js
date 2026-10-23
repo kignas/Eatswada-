@@ -76,6 +76,9 @@ const menuItemSchema = new mongoose.Schema(
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     isActive: { type: Boolean, default: true, index: true },
     trackStock: { type: Boolean, default: false },
+    // Explicit manual switch is separate from quantity-derived availability.
+    // Missing legacy values are treated as enabled unless the legacy inStock flag is false.
+    manualAvailability: { type: Boolean, default: true },
     stockQuantity: { type: Number, min: 0, default: 0 },
     lowStockThreshold: { type: Number, min: 0, default: 5 },
     pausedUntil: { type: Date, default: null },
