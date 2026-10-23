@@ -29,6 +29,7 @@
     "test:firebase-auth": "node tests/firebase-auth-error.js",
     "test:vendor-ecosystem": "node tests/vendor-ecosystem-contract.js",
     "test:restaurant-hours": "node tests/restaurant-hours-schedule.js && node tests/restaurant-hours-api-contract.js",
+    "test:pillars": "node tests/pillars-contract.test.js",
     "test:rider-dispatch": "node tests/rider-dispatch-registration-contract.js",
     "test:financial-cod": "node tests/financial-cod-delivery.test.js",
     "test:financial-payout": "node tests/financial-payout.test.js",

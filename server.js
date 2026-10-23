@@ -41,6 +41,7 @@ const firebaseAuthRoutes = require('./routes/firebaseAuthRoutes');
 const homeBannerRoutes = require('./routes/homeBannerRoutes');
 const privacyRoutes = require('./routes/privacyRoutes');
 const customerSupportRoutes = require('./routes/customerSupportRoutes');
+const analyticsRoutes = require('./routes/analyticsRoutes');
 const { handleWebhook } = require('./controllers/paymentController');
 
 // ── Connect to MongoDB ────────────────────────────────────────
@@ -240,6 +241,7 @@ const apiMounts = [
   ['/notifications',        notificationRoutes],
   ['/privacy',             privacyRoutes],
   ['/support',             customerSupportRoutes],
+  ['/analytics',           analyticsRoutes],
   ['/auth',                 firebaseAuthRoutes],
 ];
 
