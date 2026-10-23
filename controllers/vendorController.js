@@ -193,13 +193,13 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
   }
   const reserved = [];
   try {
-    for (const [itemId, quantity] of stockNeeds) {
+    for (const [itemId, quantity] of (order.inventoryReservedAt && !order.inventoryReleasedAt ? [] : stockNeeds)) {
       const item = await Menu.findOne({ _id:itemId, restaurantId:req.user.restaurantId, trackStock:true, isActive:{$ne:false} }).select('_id stockQuantity name');
       if (!item) continue;
       const before = Number(item.stockQuantity || 0);
       const updated = await Menu.findOneAndUpdate(
-        { _id:itemId, restaurantId:req.user.restaurantId, trackStock:true, stockQuantity:{$gte:quantity} },
-        { $inc:{stockQuantity:-quantity}, $set:{inStock: before-quantity > 0} },
+        { _id:itemId, restaurantId:req.user.restaurantId, trackStock:true, stockQuantity:{$gte:quantity}, inStock:true },
+        [{$set:{stockQuantity:{$subtract:['$stockQuantity',quantity]},inStock:{$and:[{$ne:[{$ifNull:['$manualAvailability','$inStock']},false]},{$gt:[{$subtract:['$stockQuantity',quantity]},0]}]}}}],
         { new:true }
       );
       if (!updated) throw Object.assign(new Error(`${item.name} no longer has enough stock.`), { statusCode:409 });
@@ -540,7 +540,7 @@ exports.toggleItemStock = asyncHandler(async (req, res) => {
   }
   const updated = await Menu.findOneAndUpdate(
     { _id: existing._id, ...vendorMenuFilter(req) },
-    { $set: { inStock: turningOn, autoTurnOnAt: turningOn ? null : autoTurnOnAt } },
+    { $set: { manualAvailability: turningOn, inStock: turningOn && (!existing.trackStock || Number(existing.stockQuantity || 0) > 0), autoTurnOnAt: turningOn ? null : autoTurnOnAt } },
     { new: true, runValidators: true }
   );
   res.status(200).json({

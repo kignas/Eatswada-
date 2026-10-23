@@ -11,7 +11,8 @@ const Coupon     = require('../models/Coupon');
 const Review     = require('../models/Review');
 const IdempotencyKey = require('../models/IdempotencyKey');
 const asyncHandler = require('express-async-handler');
-const { releaseOrderInventory } = require('../services/inventoryReservationService');
+const { releaseOrderInventory, reserveOrderInventory } = require('../services/inventoryReservationService');
+const { calculatePartialCod } = require('../services/partialCodPolicy');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 const {
   getMenuRefId,
@@ -281,7 +282,7 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords, bil
     isActive: true,
     approvalStatus: 'approved',
   })
-    .select('name image owner location availability isOpen openingHours deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate commissionPlan deliveryMode businessType');
+    .select('name image owner location availability isOpen openingHours deliveryRadiusKm minOrder freeDeliveryEnabled freeDeliveryAbove commissionRate commissionPlan deliveryMode businessType codEnabled');
   if (!restaurant) { const e = new Error('Restaurant not found or unavailable'); e.statusCode = 404; throw e; }
 
   const operational = operationalStatus(restaurant);
@@ -325,7 +326,7 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords, bil
     const menuItem = menuMap.get(String(rawId));
     if (!menuItem) { const e = new Error('A cart item no longer belongs to this restaurant. Please refresh your cart.'); e.statusCode = 409; throw e; }
     if (menuItem.isActive === false || (menuItem.approvalStatus && menuItem.approvalStatus !== 'approved')) { const e = new Error(`${menuItem.name || 'This item'} is not currently approved for ordering.`); e.statusCode = 409; throw e; }
-    if (menuItem.inStock === false) { const e = new Error(`${menuItem.name} is currently out of stock.`); e.statusCode = 409; throw e; }
+    if (menuItem.inStock === false || (menuItem.trackStock === true && Number(menuItem.stockQuantity || 0) <= 0)) { const e = new Error(`${menuItem.name} is currently out of stock.`); e.statusCode = 409; throw e; }
     const quantity = Number(requested.quantity);
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) { const e = new Error(`Invalid quantity for ${menuItem.name}.`); e.statusCode = 400; throw e; }
     if (menuItem.trackStock && Number(menuItem.stockQuantity) < quantity) { const e = new Error(`${menuItem.name} has only ${Math.max(0, Number(menuItem.stockQuantity)||0)} unit(s) remaining.`); e.statusCode = 409; throw e; }
@@ -409,9 +410,11 @@ function buildCheckoutResponse(orders, replay) {
   });
 
   const primary = orders[0];
-  const isOnline = primary && primary.paymentMethod !== 'cod';
+  const isOnline = primary && (primary.paymentMethod !== 'cod' || Number(primary.partialCodAdvanceAmount || 0) > 0) && primary.partialCodAdvanceStatus !== 'paid';
   const razorpayOrderId = orders.find(o => o.razorpayOrderId)?.razorpayOrderId || '';
-  const amountPaise = Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+  const amountPaise = primary && primary.paymentMethod === 'cod' && Number(primary.partialCodAdvanceAmount || 0) > 0
+    ? Math.round(Number(primary.partialCodAdvanceAmount) * 100)
+    : Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
   const payment = isOnline && razorpayOrderId && process.env.RAZORPAY_KEY_ID
     ? { provider: 'razorpay', keyId: process.env.RAZORPAY_KEY_ID, orderId: razorpayOrderId, amount: amountPaise, currency: 'INR' }
     : null;
@@ -607,6 +610,9 @@ const createOrder = asyncHandler(async (req, res) => {
     if (customer?.isCodBlocked === true) {
       const e = new Error('Cash on Delivery is not available for your account. Please pay online.'); e.statusCode = 403; throw e;
     }
+    if (priced.some(p => p.restaurant?.codEnabled !== true)) {
+      const e = new Error('Cash on Delivery is disabled for this restaurant. Please pay online.'); e.statusCode = 400; throw e;
+    }
     if (priced.length > 1) {
       const e = new Error('Cash on Delivery is available for single-restaurant orders only. Please pay online for a multi-restaurant order.'); e.statusCode = 403; throw e;
     }
@@ -639,10 +645,22 @@ const createOrder = asyncHandler(async (req, res) => {
 
   const checkoutGrandTotal = bills.reduce((sum, b) => sum + b.grandTotal, 0);
 
+  // Partial COD applies only to a single restaurant. Above ₹1,000 of
+  // discounted food subtotal, charge 10% in advance through Razorpay and collect
+  // the remainder at the door. Money calculations are converted to paise first.
+  let partialCodAdvance = 0;
+  let partialCodCashDue = 0;
   if (requestedMethod === 'cod') {
-    const maxCod = Number(settings.maxCodOrderAmount);
-    if (Number.isFinite(maxCod) && maxCod > 0 && checkoutGrandTotal > maxCod) {
-      const e = new Error(`Cash on Delivery is available for orders up to ₹${maxCod}. Please pay online for this order.`);
+    const policy = priced.length === 1
+      ? calculatePartialCod(priced[0]?.subtotal, priced[0]?.discount, checkoutGrandTotal, settings.maxCodOrderAmount)
+      : { required: false, cashDuePaise: Math.round(checkoutGrandTotal * 100), allowed: checkoutGrandTotal <= Number(settings.maxCodOrderAmount || Infinity) };
+    if (policy.required) {
+      partialCodAdvance = policy.advancePaise / 100;
+      partialCodCashDue = policy.cashDuePaise / 100;
+    }
+    if (!policy.allowed) {
+      const maxCod = Number(settings.maxCodOrderAmount);
+      const e = new Error(`Cash due at delivery must not exceed ₹${maxCod}. Please choose full UPI payment.`);
       e.statusCode = 400; throw e;
     }
   }
@@ -749,6 +767,9 @@ const createOrder = asyncHandler(async (req, res) => {
         // COD orders are paid at the door: they start as cod_pending and the
         // rider flips them to cod_collected on handoff (see riderController).
         paymentStatus: requestedMethod === 'cod' ? 'cod_pending' : 'pending',
+        partialCodAdvanceAmount: requestedMethod === 'cod' ? partialCodAdvance : 0,
+        partialCodCashDue: requestedMethod === 'cod' ? (partialCodAdvance > 0 ? partialCodCashDue : Number(bill.grandTotal || 0)) : 0,
+        partialCodAdvanceStatus: requestedMethod === 'cod' && partialCodAdvance > 0 ? 'pending' : 'not_required',
         ...(idempotencyKey ? { idempotencyKey } : {}),
       });
 
@@ -756,10 +777,21 @@ const createOrder = asyncHandler(async (req, res) => {
       order.clearOtpSecrets();
       await order.populate(ORDER_POPULATE_PATHS);
       created.push(order);
+      await reserveOrderInventory(order, req.user._id);
+      // Keep the in-memory snapshot aligned with the reservation marker used by
+      // cancellation/payment-failure paths. Existing untracked items are no-op.
+      if (order.items.some(line => line.menuItem)) {
+        const reservation = await Order.findById(order._id).select('inventoryReservedAt inventoryReleasedAt').lean();
+        order.inventoryReservedAt = reservation?.inventoryReservedAt || null;
+        order.inventoryReleasedAt = reservation?.inventoryReleasedAt || null;
+      }
     }
 
-    if (requestedMethod === 'upi') {
-      const checkoutTotal = created.reduce((sum, order) => sum + Number(order.total || 0), 0);
+    if (requestedMethod === 'upi' || partialCodAdvance > 0) {
+      const checkoutTotal = requestedMethod === 'cod'
+        ? partialCodAdvance
+        : created.reduce((sum, order) => sum + Number(order.total || 0), 0);
+      assertConfigured();
       const razorpayOrder = await createRazorpayOrder(
         checkoutTotal,
         created[0].orderNumber || created[0]._id,
@@ -774,13 +806,14 @@ const createOrder = asyncHandler(async (req, res) => {
       );
       created.forEach(order => { order.razorpayOrderId = razorpayOrder.id; });
     }
-    // COD orders need no gateway step: they are already created as
-    // `cod_pending` and go straight to the vendor queue.
+    // Ordinary COD orders need no gateway step. Partial COD orders remain
+    // `cod_pending`, but require the advance payment before the restaurant is notified.
   } catch (err) {
     // Roll back everything this checkout created and release the lock so the
     // customer can safely retry. Mirrors (and unifies) the original
     // Razorpay-failure cleanup.
     if (created.length) {
+      for (const order of created) await releaseOrderInventory(order, req.user._id).catch(() => {});
       await Order.deleteMany({ _id: { $in: created.map(o => o._id) }, user: req.user._id, paymentStatus: { $in: ['pending', 'cod_pending'] } }).catch(() => {});
     }
     if (idempotencyLockId) {
@@ -882,6 +915,11 @@ const cancelOrder = asyncHandler(async (req, res) => {
   }
 
   const reason = (typeof req.body.reason === 'string' && req.body.reason.trim()) || 'Cancelled by customer';
+  // Advance refund policy: full refund only if customer cancels while the order
+  // is still awaiting restaurant acceptance. Once accepted, no advance refund.
+  if (Number(order.partialCodAdvanceAmount || 0) > 0) {
+    order.partialCodRefundEligible = order.status === 'placed' && order.paymentStatus === 'cod_pending';
+  }
   order.advanceStatus('cancelled', reason);
   order.cancelReason = reason;
   order.cancellationResponsibility = 'customer';
@@ -1019,6 +1057,9 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
+  if (Number(order.partialCodAdvanceAmount || 0) > 0 && order.partialCodAdvanceStatus !== 'paid' && status !== 'cancelled') {
+    return res.status(409).json({ success: false, code: 'COD_ADVANCE_REQUIRED', message: 'The customer must complete the required COD advance before the restaurant can accept this order.' });
+  }
   const allowed = allowedNextStatuses(order.status);
   if (!allowed.includes(status)) {
     return res.status(409).json({

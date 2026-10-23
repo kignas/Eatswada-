@@ -287,6 +287,10 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   // completed. The rider confirms it explicitly; the collected amount is then
   // added to their running cashInHand for Admin reconciliation.
   const isCodOrder = String(order.paymentMethod || '').toLowerCase() === 'cod';
+  const isPartialCod = isCodOrder && Number(order.partialCodAdvanceAmount || 0) > 0;
+  if (isPartialCod && order.partialCodAdvanceStatus !== 'paid') {
+    return res.status(402).json({ success: false, code: 'COD_ADVANCE_UNPAID', message: 'The customer advance has not been paid; delivery cannot proceed.' });
+  }
   if (status === 'delivered' && isCodOrder && req.body?.codCashCollected !== true) {
     return res.status(409).json({
       success: false,
@@ -394,7 +398,7 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
       setFields.paymentStatus = 'cod_collected';
       setFields.cashCollected = true;
       setFields.codCollectedAt = new Date();
-      setFields.codCashCollectedAmount = Number(order.total || 0);
+      setFields.codCashCollectedAmount = isPartialCod ? Number(order.partialCodCashDue || 0) : Number(order.total || 0);
     }
   }
 

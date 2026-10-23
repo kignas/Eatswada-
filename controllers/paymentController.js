@@ -16,13 +16,14 @@ const {
   toPaise,
 } = require('../services/paymentService');
 const { RESTAURANT_RESPONSE_WINDOW_MS, deadlinesFrom } = require('../services/orderCancellationPolicy');
+const { releaseOrderInventory } = require('../services/inventoryReservationService');
 
 function publicPayment(order) {
   return {
     provider: 'razorpay',
     keyId: process.env.RAZORPAY_KEY_ID || '',
     orderId: order.razorpayOrderId || '',
-    amount: toPaise(order.total),
+    amount: toPaise(Number(order.partialCodAdvanceAmount || 0) > 0 ? order.partialCodAdvanceAmount : order.total),
     currency: 'INR',
     paymentStatus: order.paymentStatus,
   };
@@ -195,6 +196,31 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
   };
 }
 
+async function markPartialCodAdvancePaid(order, paymentId) {
+  const claimed = await Order.findOneAndUpdate(
+    { _id: order._id, paymentMethod: 'cod', partialCodAdvanceAmount: { $gt: 0 }, partialCodAdvanceStatus: 'pending', status: { $ne: 'cancelled' } },
+    { $set: { partialCodAdvanceStatus: 'paid', partialCodAdvancePaidAt: new Date(), razorpayPaymentId: String(paymentId), paymentStatus: 'cod_pending' } },
+    { new: true }
+  );
+  if (claimed) return { paid: true, order: claimed };
+  const current = await Order.findById(order._id);
+  if (current?.partialCodAdvanceStatus === 'paid' && current.razorpayPaymentId === String(paymentId)) return { paid: true, alreadyPaid: true, order: current };
+  if (current?.partialCodAdvanceStatus === 'paid' && current.razorpayPaymentId && current.razorpayPaymentId !== String(paymentId)) {
+    await refundDuplicatePayment([current._id], paymentId, Number(current.partialCodAdvanceAmount || 0), 'Duplicate partial-COD advance payment');
+    return { paid: false, duplicate: true, order: current };
+  }
+  // If the order was cancelled before the capture arrived, the payment must
+  // never reactivate it. Refund the late capture and leave the order cancelled.
+  if (current?.status === 'cancelled') {
+    if (current.partialCodRefundEligible === true) {
+      const cancelledPaid = await Order.findOneAndUpdate({ _id: current._id, status: 'cancelled', partialCodAdvanceStatus: 'pending', razorpayPaymentId: { $in: ['', null] } }, { $set: { partialCodAdvanceStatus: 'paid', partialCodAdvancePaidAt: new Date(), razorpayPaymentId: String(paymentId) } }, { new: true });
+      if (cancelledPaid) await initiateOrderRefund(cancelledPaid, 'Partial-COD advance captured after pre-acceptance cancellation');
+    }
+    return { paid: false, cancelled: true, order: current };
+  }
+  return { paid: false, order: current };
+}
+
 exports.verifyPayment = asyncHandler(async (req, res) => {
   assertConfigured();
   const { orderId, razorpayPaymentId, razorpayOrderId, razorpaySignature } = req.body || {};
@@ -204,7 +230,8 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
 
   const orders = await findCheckoutOrders(req.user._id, orderId, razorpayOrderId);
   if (!orders || !orders.length) return res.status(404).json({ success: false, message: 'Order not found.' });
-  if (orders[0].paymentMethod === 'cod') return res.status(400).json({ success: false, message: 'This order does not use online payment.' });
+  const isPartialCod = orders[0].paymentMethod === 'cod' && Number(orders[0].partialCodAdvanceAmount || 0) > 0;
+  if (orders[0].paymentMethod === 'cod' && !isPartialCod) return res.status(400).json({ success: false, message: 'This order does not use online payment.' });
 
   const knownIds = new Set(orders.flatMap(o => [o.razorpayOrderId, ...(o.razorpayOrderIdHistory || [])]).filter(Boolean));
   if (!knownIds.has(String(razorpayOrderId))) {
@@ -212,8 +239,11 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
   }
   const storedRazorpayOrderId = String(razorpayOrderId);
 
+  if (isPartialCod && orders[0].partialCodAdvanceStatus === 'paid' && orders[0].razorpayPaymentId === String(razorpayPaymentId)) {
+    return res.json({ success: true, alreadyPaid: true, paymentStatus: 'cod_pending', partialCodAdvanceStatus: 'paid', orderIds: orders.map(o => o._id) });
+  }
   const liveOrders = orders.filter(o => o.status !== 'cancelled');
-  if (liveOrders.length && liveOrders.every(o => o.paymentStatus === 'paid' && o.razorpayPaymentId === String(razorpayPaymentId))) {
+  if (!isPartialCod && liveOrders.length && liveOrders.every(o => o.paymentStatus === 'paid' && o.razorpayPaymentId === String(razorpayPaymentId))) {
     return res.json({ success: true, alreadyPaid: true, paymentStatus: 'paid', orderIds: orders.map(o => o._id) });
   }
 
@@ -222,7 +252,9 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
   }
 
   const payment = await fetchPayment(razorpayPaymentId);
-  const expectedAmount = Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+  const expectedAmount = isPartialCod
+    ? Math.round(Number(orders[0].partialCodAdvanceAmount || 0) * 100)
+    : Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
   if (String(payment.order_id || '') !== storedRazorpayOrderId) {
     return res.status(400).json({ success: false, message: 'Payment belongs to a different Razorpay order.' });
   }
@@ -233,6 +265,10 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
     // A terminal Razorpay failure must never leave a customer-facing order
     // looking live/placed. The order is cancelled here as a second line of
     // defence in case the Razorpay payment.failed webhook is delayed/missed.
+    if (payment.status === 'failed' && isPartialCod) {
+      await Order.updateOne({ _id: orders[0]._id, razorpayOrderId: storedRazorpayOrderId, partialCodAdvanceStatus: 'pending', status: { $ne: 'cancelled' } }, { $set: { partialCodAdvanceStatus: 'pending' } });
+      return res.status(409).json({ success: false, message: 'Advance payment failed. You can retry the advance payment.', partialCodAdvanceStatus: 'pending' });
+    }
     if (payment.status === 'failed') {
       await Order.updateMany(
         {
@@ -258,6 +294,7 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
           },
         }
       );
+      for (const failedOrder of orders) await releaseOrderInventory(failedOrder, req.user?._id || null).catch(() => {});
       return res.status(409).json({
         success: false,
         message: 'Payment failed. The order has been cancelled.',
@@ -268,6 +305,11 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: `Payment is ${payment.status || 'not captured yet'}.`, paymentStatus: payment.status || 'pending' });
   }
 
+  if (isPartialCod) {
+    const result = await markPartialCodAdvancePaid(orders[0], razorpayPaymentId);
+    if (!result.paid) return res.status(409).json({ success: false, message: result.cancelled ? 'Order was cancelled; the late advance payment is being refunded.' : 'Advance payment could not be applied to this order.' });
+    return res.json({ success: true, paymentStatus: 'cod_pending', partialCodAdvanceStatus: 'paid', advancePaid: Number(orders[0].partialCodAdvanceAmount || 0), cashDueAtDelivery: Number(orders[0].partialCodCashDue || 0), orderIds: orders.map(o => o._id), razorpayPaymentId });
+  }
   const result = await markCheckoutPaid(orders, razorpayPaymentId, payment.amount);
   if (result.duplicate) {
     return res.json({
@@ -298,14 +340,16 @@ exports.retryPayment = asyncHandler(async (req, res) => {
 
   const orders = await findCheckoutOrders(req.user._id, orderId);
   if (!orders || !orders.length) return res.status(404).json({ success: false, message: 'Order not found.' });
-  if (orders[0].paymentMethod === 'cod') return res.status(400).json({ success: false, message: 'COD orders do not need online payment.' });
-  if (orders.some(o => isSettledPayment(o))) return res.status(409).json({ success: false, message: 'This checkout is already paid.' });
+  const isPartialCod = orders[0].paymentMethod === 'cod' && Number(orders[0].partialCodAdvanceAmount || 0) > 0;
+  if (orders[0].paymentMethod === 'cod' && !isPartialCod) return res.status(400).json({ success: false, message: 'COD orders do not need online payment.' });
+  if (isPartialCod && orders[0].partialCodAdvanceStatus === 'paid') return res.status(409).json({ success: false, message: 'The COD advance is already paid.' });
+  if (!isPartialCod && orders.some(o => isSettledPayment(o))) return res.status(409).json({ success: false, message: 'This checkout is already paid.' });
 
   // A payment-failed order is intentionally stored as `cancelled` so it can
   // never enter the restaurant's live queue. It is still retryable by the
   // same customer. Other cancelled orders remain permanently cancelled.
   const retryableCancelled = orders.filter(o =>
-    o.status === 'cancelled' &&
+    !isPartialCod && o.status === 'cancelled' &&
     o.paymentStatus === 'failed' &&
     String(o.cancelReason || '') === 'Payment failed'
   );
@@ -327,15 +371,19 @@ exports.retryPayment = asyncHandler(async (req, res) => {
     }
     if (captured) {
       const all = await ordersForRazorpayOrder(previousRazorpayOrderId, req.user._id);
-      const expected = Math.round(all.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+      const expected = isPartialCod ? Math.round(Number(all[0]?.partialCodAdvanceAmount || 0) * 100) : Math.round(all.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
       if (Number(captured.amount) === expected && String(captured.currency || '') === 'INR') {
+        if (isPartialCod) {
+          await markPartialCodAdvancePaid(all[0], captured.id);
+          return res.status(409).json({ success: false, alreadyPaid: true, partialCodAdvanceStatus: 'paid', message: 'Your earlier advance payment went through. No need to pay again.' });
+        }
         await markCheckoutPaid(all, captured.id, captured.amount);
         return res.status(409).json({ success: false, alreadyPaid: true, paymentStatus: 'paid', message: 'Your earlier payment went through. No need to pay again.' });
       }
     }
   }
 
-  const amount = retryable.reduce((sum, o) => sum + Number(o.total || 0), 0);
+  const amount = isPartialCod ? Number(retryable[0].partialCodAdvanceAmount || 0) : retryable.reduce((sum, o) => sum + Number(o.total || 0), 0);
   const rpOrder = await createRazorpayOrder(amount, retryable[0].orderNumber || retryable[0]._id, {
     userId: String(req.user._id),
     orderIds: retryable.map(o => String(o._id)).join(',').slice(0, 240),
@@ -363,7 +411,7 @@ exports.retryPayment = asyncHandler(async (req, res) => {
   // Keep the old Razorpay order id in history so a late capture on it is
   // still matched (and refunded if this new payment also succeeds).
   const update = {
-    $set: { razorpayOrderId: rpOrder.id, paymentStatus: 'pending', razorpayPaymentId: '' },
+    $set: { razorpayOrderId: rpOrder.id, paymentStatus: isPartialCod ? 'cod_pending' : 'pending', razorpayPaymentId: '', ...(isPartialCod ? { partialCodAdvanceStatus: 'pending' } : {}) },
     ...(previousRazorpayOrderId ? { $addToSet: { razorpayOrderIdHistory: previousRazorpayOrderId } } : {}),
   };
   const result = await Order.updateMany(
@@ -387,7 +435,7 @@ exports.retryPayment = asyncHandler(async (req, res) => {
 
 exports.paymentStatus = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, user: req.user._id })
-    .select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason');
+    .select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason partialCodAdvanceAmount partialCodCashDue partialCodAdvanceStatus');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found.' });
 
   // Reconcile terminal Razorpay failures even if the webhook arrived late or
@@ -401,8 +449,8 @@ exports.paymentStatus = asyncHandler(async (req, res) => {
         const expectedAmount = Math.round(Number(order.total || 0) * 100);
         if (Number(captured.amount) === expectedAmount && String(captured.currency || '') === 'INR') {
           await markCheckoutPaid([order], captured.id, captured.amount);
-          const fresh = await Order.findById(order._id).select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason');
-          return res.json({ success: true, data: { ...publicPayment(fresh), orderId: fresh._id, paymentId: fresh.razorpayPaymentId || null, orderStatus: fresh.status, cancelReason: fresh.cancelReason || '' } });
+          const fresh = await Order.findById(order._id).select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason partialCodAdvanceAmount partialCodCashDue partialCodAdvanceStatus');
+          return res.json({ success: true, data: { ...publicPayment(fresh), orderId: fresh._id, paymentId: fresh.razorpayPaymentId || null, orderStatus: fresh.status, cancelReason: fresh.cancelReason || '', partialCodAdvanceAmount: Number(fresh.partialCodAdvanceAmount || 0), partialCodCashDue: Number(fresh.partialCodCashDue || 0), partialCodAdvanceStatus: fresh.partialCodAdvanceStatus } });
         }
       }
 
@@ -427,13 +475,14 @@ exports.paymentStatus = asyncHandler(async (req, res) => {
             },
           }
         );
+        await releaseOrderInventory(order, req.user?._id || null).catch(() => {});
       }
     } catch (err) {
       console.warn(`[PAYMENT] status reconciliation failed for ${order.razorpayOrderId}: ${err.message}`);
     }
   }
 
-  const fresh = await Order.findById(order._id).select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason');
+  const fresh = await Order.findById(order._id).select('paymentMethod paymentStatus razorpayOrderId razorpayPaymentId total status cancelReason partialCodAdvanceAmount partialCodCashDue partialCodAdvanceStatus');
   res.json({
     success: true,
     data: {
@@ -442,6 +491,9 @@ exports.paymentStatus = asyncHandler(async (req, res) => {
       paymentId: fresh.razorpayPaymentId || null,
       orderStatus: fresh.status,
       cancelReason: fresh.cancelReason || '',
+      partialCodAdvanceAmount: Number(fresh.partialCodAdvanceAmount || 0),
+      partialCodCashDue: Number(fresh.partialCodCashDue || 0),
+      partialCodAdvanceStatus: fresh.partialCodAdvanceStatus,
     },
   });
 });
@@ -478,13 +530,12 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
     const ids = targets.map(o => o._id);
     if (event.event === 'refund.processed' || refundEntity.status === 'processed') {
       await Order.updateMany(
-        { _id: { $in: ids } },
-        { $set: {
-            paymentStatus: 'refunded',
-            'refund.status': 'completed',
-            'refund.razorpayRefundId': refundId,
-            'refund.completedAt': new Date(),
-        } }
+        { _id: { $in: ids }, partialCodAdvanceAmount: { $gt: 0 }, 'refund.status': 'processing' },
+        { $set: { partialCodAdvanceStatus: 'refunded', 'refund.status': 'completed', 'refund.razorpayRefundId': refundId, 'refund.completedAt': new Date() } }
+      );
+      await Order.updateMany(
+        { _id: { $in: ids }, $or: [{ partialCodAdvanceAmount: { $exists: false } }, { partialCodAdvanceAmount: { $lte: 0 } }] },
+        { $set: { paymentStatus: 'refunded', 'refund.status': 'completed', 'refund.razorpayRefundId': refundId, 'refund.completedAt': new Date() } }
       );
       for (const id of ids) {
         const updated = await Order.findById(id);
@@ -493,7 +544,7 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
     } else if (event.event === 'refund.failed' || refundEntity.status === 'failed') {
       await Order.updateMany(
         { _id: { $in: ids } },
-        { $set: { 'refund.status': 'failed', 'refund.razorpayRefundId': refundId } }
+        { $set: { 'refund.status': 'failed', 'refund.razorpayRefundId': refundId, ...(targets.some(o => Number(o.partialCodAdvanceAmount || 0) > 0) ? { partialCodAdvanceStatus: 'refund_failed' } : {}) } }
       );
     }
     return res.json({ success: true });
@@ -509,14 +560,20 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
   const orders = await ordersForRazorpayOrder(razorpayOrderId);
   if (!orders.length) return res.json({ success: true, ignored: true });
 
-  const expectedAmount = Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+  const isPartialCod = orders.length === 1 && orders[0].paymentMethod === 'cod' && Number(orders[0].partialCodAdvanceAmount || 0) > 0;
+  const expectedAmount = isPartialCod
+    ? Math.round(Number(orders[0].partialCodAdvanceAmount || 0) * 100)
+    : Math.round(orders.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
   const actualAmount = Number(paymentEntity.amount || 0);
   if (actualAmount !== expectedAmount || String(paymentEntity.currency || '') !== 'INR') {
     return res.status(400).json({ success: false, message: 'Webhook amount/currency mismatch.' });
   }
 
   if (event.event === 'payment.captured' || paymentEntity.status === 'captured') {
-    await markCheckoutPaid(orders, paymentId, actualAmount);
+    if (isPartialCod) await markPartialCodAdvancePaid(orders[0], paymentId);
+    else await markCheckoutPaid(orders, paymentId, actualAmount);
+  } else if (event.event === 'payment.failed' && isPartialCod) {
+    await Order.updateOne({ _id: orders[0]._id, razorpayOrderId, partialCodAdvanceStatus: 'pending', status: { $ne: 'cancelled' } }, { $set: { partialCodAdvanceStatus: 'pending' } });
   } else if (event.event === 'payment.failed') {
     // A failed online payment must NEVER remain a live `placed` order.
     // Mark only the orders belonging to this CURRENT Razorpay attempt as

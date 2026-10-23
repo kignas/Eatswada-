@@ -797,9 +797,8 @@ const createRestaurant = asyncHandler(async (req, res) => {
   if (!req.body.cuisine && req.body.cuisineDisplay) req.body.cuisine = [req.body.cuisineDisplay]; 
   else if (!req.body.cuisine) req.body.cuisine = ['General'];
   if (!req.body.slug && req.body.name) req.body.slug = req.body.name.toLowerCase().replace(/\s+/g, '-').replace(/[^\w-]/g, '') + '-' + Date.now();
-  // Platform-wide policy: every newly created restaurant is online-payment only.
-  // Ignore any legacy/forged codEnabled value supplied by the client.
-  req.body.codEnabled = false;
+  // COD is admin-controlled per restaurant. Vendor routes cannot create restaurants.
+  if (req.user?.role !== 'admin') delete req.body.codEnabled;
   if (Object.prototype.hasOwnProperty.call(req.body, 'openingHours')) {
     const hoursCheck = buildOpeningHoursUpdate(req.body.openingHours);
     if (hoursCheck.error) return res.status(400).json({ success: false, message: hoursCheck.error });
@@ -844,8 +843,8 @@ const updateRestaurant = asyncHandler(async (req, res) => {
         .filter((field) => Object.prototype.hasOwnProperty.call(req.body, field))
         .map((field) => [field, req.body[field]]));
 
-  // Platform-wide policy: COD cannot be enabled by any caller.
-  update.codEnabled = false;
+  // Only admins can change the per-restaurant COD gate; vendor allow-list excludes it.
+  if (!isPrivilegedAdmin) delete update.codEnabled;
 
   if (isPrivilegedAdmin) {
     // Explicitly persist both boolean flags, including false. This avoids
@@ -1089,6 +1088,16 @@ const addMenuItem = asyncHandler(async (req, res) => {
   // the required `restaurantId` unset — so the item never matched
   // GET /api/restaurants/:id/menu, which filters on restaurantId.
   const payload = { ...req.body, restaurantId: targetRestaurantId, restaurant: targetRestaurantId };
+  if (payload.trackStock === true) {
+    const quantity = Number(payload.stockQuantity ?? 0);
+    if (!Number.isInteger(quantity) || quantity < 0) return res.status(400).json({ success:false, message:'stockQuantity must be a non-negative integer.' });
+    payload.stockQuantity = quantity;
+    payload.manualAvailability = payload.manualAvailability !== false && payload.inStock !== false;
+    payload.inStock = payload.manualAvailability && quantity > 0;
+  } else {
+    payload.manualAvailability = payload.manualAvailability !== false && payload.inStock !== false;
+    payload.inStock = payload.manualAvailability;
+  }
   if (payload.originalPrice !== undefined && payload.originalPrice !== null && Number(payload.originalPrice) <= Number(payload.price)) {
     payload.originalPrice = null;
   }
@@ -1111,6 +1120,17 @@ const updateMenuItem = asyncHandler(async (req, res) => {
   }
 
   const update = { ...req.body };
+  if (update.stockQuantity !== undefined) {
+    const quantity = Number(update.stockQuantity);
+    if (!Number.isInteger(quantity) || quantity < 0) return res.status(400).json({ success:false, message:'stockQuantity must be a non-negative integer.' });
+    update.stockQuantity = quantity;
+  }
+  if (typeof update.inStock === 'boolean' && update.manualAvailability === undefined) update.manualAvailability = update.inStock;
+  const nextTrackStock = update.trackStock === undefined ? existing.trackStock : update.trackStock === true;
+  const nextQuantity = update.stockQuantity === undefined ? Number(existing.stockQuantity || 0) : Number(update.stockQuantity);
+  const nextManualAvailability = update.manualAvailability === undefined ? existing.manualAvailability !== false : update.manualAvailability === true;
+  update.inStock = nextManualAvailability && (!nextTrackStock || nextQuantity > 0);
+  update.manualAvailability = nextManualAvailability;
   if (update.originalPrice !== undefined && update.originalPrice !== null && Number(update.originalPrice) <= Number(update.price ?? existing.price)) {
     update.originalPrice = null;
   }
@@ -1157,7 +1177,8 @@ const updateMenuItemAvailability = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'isAvailable must be true or false' });
   }
 
-  item.inStock = isAvailable;
+  item.manualAvailability = isAvailable;
+  item.inStock = isAvailable && (!item.trackStock || Number(item.stockQuantity || 0) > 0);
   await item.save();
   invalidateUnder99Cache();
 

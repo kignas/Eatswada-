@@ -8,6 +8,8 @@ const bcrypt       = require('bcryptjs');
 const User         = require('../models/User');
 const Order        = require('../models/Order');
 const Restaurant   = require('../models/Restaurant');
+const Menu = require('../models/Menu');
+const InventoryMovement = require('../models/InventoryMovement');
 const Review       = require('../models/Review');
 const generateToken = require('../utils/generateToken');
 const { uploadToCloudinary } = require('../utils/riderUpload');
@@ -1134,3 +1136,72 @@ exports.getPlatformRatings = asyncHandler(async (req, res) => {
 const ADMIN_PERMISSION_SET = ['restaurants.manage','restaurants.delete','vendors.manage','orders.manage','finance.manage','coupons.manage','settings.manage','analytics.view'];
 exports.getAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; const u=await User.findById(req.params.id).select('name email role permissions isActive'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); res.json({success:true,data:u}); });
 exports.updateAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(String(req.user._id)===String(req.params.id)) return res.status(400).json({success:false,message:'You cannot change your own admin permissions.'}); const u=await User.findById(req.params.id).select('role permissions'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); const previousPermissions=Array.isArray(u.permissions)?[...u.permissions]:[]; const permissions=Array.isArray(req.body?.permissions)?[...new Set(req.body.permissions.filter(p=>ADMIN_PERMISSION_SET.includes(p)))]:[]; u.permissions=permissions; await u.save(); await logAdminAction(req,{action:'admin.permissions.update',targetType:'admin',targetId:u._id,targetLabel:u.email||String(u._id),oldValue:{permissions:previousPermissions},newValue:{permissions:u.permissions}}); res.json({success:true,data:{adminId:u._id,permissions:u.permissions}}); });
+
+
+// Admin inventory controls are intentionally cross-restaurant; vendor inventory
+// routes remain scoped to req.user.restaurantId and cannot call these handlers.
+exports.getAllRestaurantInventory = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const page = clampPage(req.query.page);
+  const limit = clampLimit(req.query.limit, 50, 100);
+  const filter = { isActive: { $ne: false } };
+  if (req.query.restaurantId && require('mongoose').Types.ObjectId.isValid(req.query.restaurantId)) filter.restaurantId = req.query.restaurantId;
+  if (req.query.search) filter.name = { $regex: String(req.query.search).slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
+  const [items, total] = await Promise.all([
+    Menu.find(filter).select('restaurantId name price image inStock manualAvailability trackStock stockQuantity lowStockThreshold approvalStatus isActive updatedAt').populate('restaurantId', 'name owner').sort({ updatedAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+    Menu.countDocuments(filter),
+  ]);
+  res.json({ success:true, data:items, total, page, pages:Math.ceil(total / limit) });
+});
+
+exports.updateAnyRestaurantInventory = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const item = await Menu.findOne({ _id:req.params.itemId, isActive:{$ne:false} });
+  if (!item) return res.status(404).json({success:false,message:'Menu item not found.'});
+  const body = req.body || {};
+  const update = {};
+  if (body.stockQuantity !== undefined) {
+    const qty = Number(body.stockQuantity);
+    if (!Number.isInteger(qty) || qty < 0) return res.status(400).json({success:false,message:'stockQuantity must be a non-negative integer.'});
+    update.stockQuantity = qty;
+  }
+  if (body.trackStock !== undefined) {
+    if (typeof body.trackStock !== 'boolean') return res.status(400).json({success:false,message:'trackStock must be a boolean.'});
+    update.trackStock = body.trackStock;
+  }
+  if (body.isAvailable !== undefined || body.manualAvailability !== undefined) {
+    const available = body.manualAvailability !== undefined ? body.manualAvailability : body.isAvailable;
+    if (typeof available !== 'boolean') return res.status(400).json({success:false,message:'isAvailable must be a boolean.'});
+    update.manualAvailability = available;
+  }
+  if (body.lowStockThreshold !== undefined) {
+    const threshold = Number(body.lowStockThreshold);
+    if (!Number.isInteger(threshold) || threshold < 0) return res.status(400).json({success:false,message:'lowStockThreshold must be a non-negative integer.'});
+    update.lowStockThreshold = threshold;
+  }
+  if (!Object.keys(update).length) return res.status(400).json({success:false,message:'Provide stockQuantity, trackStock, isAvailable, or lowStockThreshold.'});
+  const nextTrack = update.trackStock === undefined ? item.trackStock : update.trackStock;
+  const nextQty = update.stockQuantity === undefined ? Number(item.stockQuantity || 0) : update.stockQuantity;
+  const nextManual = update.manualAvailability === undefined ? (item.manualAvailability !== false) : update.manualAvailability;
+  update.inStock = nextManual && (!nextTrack || nextQty > 0);
+  const before = Number(item.stockQuantity || 0);
+  const updated = await Menu.findOneAndUpdate({_id:item._id, restaurantId:item.restaurantId}, {$set:update}, {new:true,runValidators:true});
+  if (update.stockQuantity !== undefined && before !== Number(updated.stockQuantity)) {
+    await InventoryMovement.create({restaurantId:item.restaurantId,menuItemId:item._id,actorId:req.user._id,change:Number(updated.stockQuantity)-before,before,after:Number(updated.stockQuantity),reason:'admin_manual_adjustment'});
+  }
+  await logAdminAction(req,{action:'inventory.update',targetType:'menu_item',targetId:item._id,targetLabel:item.name,oldValue:{stockQuantity:before,inStock:item.inStock,trackStock:item.trackStock},newValue:{stockQuantity:updated.stockQuantity,inStock:updated.inStock,trackStock:updated.trackStock}});
+  res.json({success:true,data:updated});
+});
+
+// Admin-only customer saved-address lookup. This exposes only the address data
+// required for support/operations, not authentication secrets or live GPS.
+exports.getCustomerSavedLocations = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const User = require('../models/User');
+  const Address = require('../models/Address');
+  if (!require('mongoose').Types.ObjectId.isValid(req.params.userId)) return res.status(400).json({success:false,message:'Invalid user ID.'});
+  const user = await User.findOne({_id:req.params.userId,role:'user'}).select('name phone email addresses defaultAddress').lean();
+  if (!user) return res.status(404).json({success:false,message:'Customer not found.'});
+  const addresses = await Address.find({user:user._id}).select('tag house area landmark city pincode location isDefault createdAt updatedAt').sort({isDefault:-1,updatedAt:-1}).lean();
+  res.json({success:true,data:{user:{id:user._id,name:user.name,phone:user.phone,email:user.email||''},addresses:addresses.map(a=>({...a,coordinates:Array.isArray(a.location?.coordinates)?{longitude:a.location.coordinates[0],latitude:a.location.coordinates[1]}:null}))}});
+});

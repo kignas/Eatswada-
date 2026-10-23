@@ -146,7 +146,11 @@ exports.createVendorMenuItem = asyncHandler(async (req, res) => {
     isUnder99: price <= 99,
     isBestseller: false,
     isRecommended: false,
-    inStock: req.body?.inStock !== false,
+    inStock: req.body?.inStock !== false && (req.body?.trackStock !== true || Math.max(0, Math.floor(Number(req.body?.stockQuantity) || 0)) > 0),
+    manualAvailability: req.body?.inStock !== false,
+    trackStock: req.body?.trackStock === true,
+    stockQuantity: req.body?.trackStock === true ? Math.max(0, Math.floor(Number(req.body?.stockQuantity) || 0)) : 0,
+    lowStockThreshold: Number.isFinite(Number(req.body?.lowStockThreshold)) ? Math.max(0, Math.floor(Number(req.body.lowStockThreshold))) : 5,
     customizations: Array.isArray(req.body?.customizations) ? req.body.customizations : [],
     sortOrder: Number.isFinite(Number(req.body?.sortOrder)) ? Number(req.body.sortOrder) : 0,
     approvalStatus: 'pending',
@@ -161,14 +165,23 @@ exports.updateVendorMenuItem = asyncHandler(async (req, res) => {
   const item = await Menu.findOne({ _id: req.params.id, restaurantId: req.user.restaurantId, isActive: { $ne: false } });
   if (!item) return res.status(404).json({ success: false, message: 'Menu item not found or access denied.' });
 
-  const inventoryOnlyKeys = new Set(['inStock', 'stockQuantity', 'trackStock', 'lowStockThreshold']);
+  const inventoryOnlyKeys = new Set(['inStock', 'manualAvailability', 'stockQuantity', 'trackStock', 'lowStockThreshold']);
   const body = req.body || {};
   const keys = Object.keys(body);
   const materialChange = keys.some(k => !inventoryOnlyKeys.has(k));
-  const allowed = ['name','description','price','originalPrice','image','isVeg','category','customizations','sortOrder','inStock','stockQuantity','trackStock','lowStockThreshold'];
+  const allowed = ['name','description','price','originalPrice','image','isVeg','category','customizations','sortOrder','inStock','manualAvailability','stockQuantity','trackStock','lowStockThreshold'];
   for (const key of keys) if (!allowed.includes(key)) return res.status(400).json({ success:false, message:`Field not editable: ${key}` });
 
   for (const key of keys) item[key] = body[key];
+  if (typeof body.inStock === 'boolean' && body.manualAvailability === undefined) item.manualAvailability = body.inStock;
+  if (body.stockQuantity !== undefined) {
+    const quantity = Number(body.stockQuantity);
+    if (!Number.isInteger(quantity) || quantity < 0) return res.status(400).json({success:false,message:'stockQuantity must be a non-negative integer.'});
+    item.stockQuantity = quantity;
+  }
+  if (body.trackStock === true && Number(item.stockQuantity || 0) <= 0) item.inStock = false;
+  else if (item.trackStock && Number(item.stockQuantity || 0) <= 0) item.inStock = false;
+  else item.inStock = item.manualAvailability !== false;
   if (body.price !== undefined) item.isUnder99 = Number(item.price) <= 99;
   if (materialChange && ['approved', 'rejected'].includes(item.approvalStatus)) {
     item.approvalStatus = 'pending';
@@ -198,12 +211,12 @@ exports.setVendorInventory = asyncHandler(async (req, res) => {
   if (!item) return res.status(404).json({ success:false, message:'Menu item not found or access denied.' });
 
   const update = {};
-  if (typeof req.body?.inStock === 'boolean') update.inStock = req.body.inStock;
+  if (typeof req.body?.inStock === 'boolean') update.manualAvailability = req.body.inStock;
+  if (typeof req.body?.manualAvailability === 'boolean') update.manualAvailability = req.body.manualAvailability;
   if (req.body?.stockQuantity !== undefined) {
     const qty = Number(req.body.stockQuantity);
-    if (!Number.isFinite(qty) || qty < 0) return res.status(400).json({ success:false, message:'stockQuantity must be a non-negative number.' });
-    update.stockQuantity = Math.floor(qty);
-    update.inStock = qty > 0;
+    if (!Number.isInteger(qty) || qty < 0) return res.status(400).json({ success:false, message:'stockQuantity must be a non-negative integer.' });
+    update.stockQuantity = qty;
   }
   if (typeof req.body?.trackStock === 'boolean') update.trackStock = req.body.trackStock;
   if (req.body?.lowStockThreshold !== undefined) {
@@ -214,7 +227,11 @@ exports.setVendorInventory = asyncHandler(async (req, res) => {
   if (!Object.keys(update).length) return res.status(400).json({ success:false, message:'No inventory fields supplied.' });
 
   const before = Number(item.stockQuantity || 0);
-  const updated = await Menu.findByIdAndUpdate(item._id, { $set:update }, { new:true, runValidators:true });
+  const nextTrackStock = update.trackStock === undefined ? item.trackStock : update.trackStock;
+  const nextQty = update.stockQuantity === undefined ? before : Number(update.stockQuantity);
+  const nextManual = update.manualAvailability === undefined ? item.manualAvailability !== false : update.manualAvailability;
+  update.inStock = nextManual && (!nextTrackStock || nextQty > 0);
+  const updated = await Menu.findOneAndUpdate({ _id:item._id, restaurantId:req.user.restaurantId }, { $set:update }, { new:true, runValidators:true });
   if (update.stockQuantity !== undefined && Number(updated.stockQuantity) !== before) await InventoryMovement.create({restaurantId:item.restaurantId,menuItemId:item._id,actorId:req.user._id,change:Number(updated.stockQuantity)-before,before,after:Number(updated.stockQuantity),reason:'vendor_manual_adjustment'});
   await VendorActivity.create({restaurantId:item.restaurantId,actorId:req.user._id,type:'inventory_updated',message:`Updated inventory for ${item.name}.`,entityType:'menu',entityId:item._id});
   res.json({success:true, data:updated});
