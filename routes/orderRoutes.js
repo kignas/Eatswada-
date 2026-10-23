@@ -5,7 +5,7 @@ const { body } = require('express-validator');
 const validate = require('../middleware/validateMiddleware');
 
 const {
-  createOrder, getOrders, getOrderById, getOrderReview, submitReview,
+  createOrder, getOrders, getOrderById, getOrderReview, submitReview, reportReview,
   cancelOrder, rateOrder, updateOrderStatus, getAllOrders,
   assignRider,
 } = require('../controllers/orderController');
@@ -81,6 +81,9 @@ router.put('/:id/cancel', protect, cancelOrder);
 router.put('/:id/rate', protect, rateOrder);
 router.post('/:id/review', protect, submitReview);
 router.put('/:id/review', protect, submitReview);
+// Report another customer's review (abuse / fake). Distinct path so it can
+// never be confused with submitting a review for one's own order.
+router.post('/reviews/:reviewId/report', protect, reportReview);
 
 // Rider assignment — ADMIN ONLY.
 router.put('/:id/assign-rider', protect, authorize('admin'), assignRider);

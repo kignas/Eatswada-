@@ -5,6 +5,7 @@ const { protect } = require('../middleware/authMiddleware');
 const role         = require('../middleware/roleMiddleware');
 
 const marketplace = require('../controllers/vendorMarketplaceController');
+const analytics = require('../controllers/analyticsController');
 const { updateRestaurant } = require('../controllers/restaurantController');
 const { uploadVendorMenuImage } = require('../controllers/uploadController');
 const upload = require('../middleware/uploadMiddleware');
@@ -55,6 +56,8 @@ router.put('/restaurant/hours', protect, role('vendor'), updateBusinessHours);
 router.get('/reviews', protect, role('vendor'), getVendorReviews);
 router.post('/reviews/:id/reply', protect, role('vendor'), replyToVendorReview);
 router.get('/analytics', protect, role('vendor'), getVendorAnalytics);
+// Pillar 8 — how many customers opened this restaurant's menu (Zomato-style views).
+router.get('/analytics/visits', protect, role('vendor'), analytics.getVendorMenuAnalytics);
 router.get('/earnings/summary', protect, role('vendor'), getVendorEarningsSummary);
 router.get('/earnings/orders', protect, role('vendor'), getVendorEarningsOrders);
 router.get('/onboarding/config', protect, role('vendor'), marketplace.getVendorOnboardingConfig);

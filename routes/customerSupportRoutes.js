@@ -30,5 +30,6 @@ router.get('/tickets/:id', readLimiter, controller.getMyTicket);
 router.post('/tickets', writeLimiter, controller.createTicket);
 router.post('/tickets/:id/messages', writeLimiter, controller.replyMyTicket);
 router.patch('/tickets/:id/close', writeLimiter, controller.closeMyTicket);
+router.post('/tickets/:id/typing', readLimiter, controller.setTyping);
 
 module.exports = router;

@@ -8,8 +8,10 @@ const {
   adminLogin, getMetrics, getOrders, updateOrderStatus, cancelOrder,
   getRestaurants, toggleRestaurant, getRecentOrders, getPeakHours,
   getCustomers, getRevenueAnalytics, getTopRestaurants,
+  getCustomerTrustOverview, getCustomerTrust, updateCustomerCodPolicy, setCustomerAccountFreeze,
+  getVisitAnalytics,
   getVendors, getVendorById, updateVendor, toggleVendorStatus,
-  getReviews, moderateReview, getPlatformRatings,
+  getReviews, moderateReview, getPlatformRatings, getReviewAnalytics,
   getRestaurantCommission, updateRestaurantCommission, updateRestaurantFssai,
   getRestaurantDeliverySettings, updateRestaurantDeliverySettings,
   getAdminPermissions, updateAdminPermissions,
@@ -59,20 +61,33 @@ router.patch('/restaurants/:id/delivery-settings', protect, authorize('admin'), 
 router.get('/payout-requests', protect, authorize('admin'), adminMarketplace.listPayoutRequests);
 router.get('/payout-requests/:id/reconciliation', protect, authorize('admin'), adminMarketplace.getPayoutReconciliation);
 router.patch('/payout-requests/:id', protect, authorize('admin'), adminMarketplace.updatePayoutRequest);
-router.get('/support/tickets', protect, authorize('admin'), adminMarketplace.listSupportTickets);
-router.get('/support/tickets/:id/resolution', protect, authorize('admin'), adminMarketplace.getSupportResolutionContext);
-router.post('/support/tickets/:id/resolve', protect, authorize('admin'), adminMarketplace.resolveSupportTicket);
-router.patch('/support/tickets/:id/fault', protect, authorize('admin'), adminMarketplace.setSupportFaultAttribution);
-router.post('/support/tickets/:id/reply', protect, authorize('admin'), adminMarketplace.replySupportTicket);
+router.get('/support/tickets', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.listSupportTickets);
+router.get('/support/tickets/:id/resolution', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.getSupportResolutionContext);
+router.post('/support/tickets/:id/resolve', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.resolveSupportTicket);
+router.patch('/support/tickets/:id/fault', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.setSupportFaultAttribution);
+router.post('/support/tickets/:id/reply', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.replySupportTicket);
+// Pillar 4 — agent assignment, live typing and SLA scoreboard.
+router.patch('/support/tickets/:id/assign', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.assignSupportTicket);
+router.post('/support/tickets/:id/typing', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.setSupportTyping);
+router.get('/support/metrics', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.getSupportMetrics);
 router.patch('/restaurants/:id/toggle', protect, authorize('admin'), toggleRestaurant);
 router.get('/customers', protect, authorize('admin'), getCustomers);
 router.get('/customers/:userId/saved-locations', protect, authorize('admin'), getCustomerSavedLocations);
+// Pillar 3 / 7 — COD abuse review queue, per-customer COD terms, account freeze.
+router.get('/customers/trust', protect, authorize('admin'), requirePermission('customers.trust'), getCustomerTrustOverview);
+router.get('/customers/:userId/trust', protect, authorize('admin'), requirePermission('customers.trust'), getCustomerTrust);
+router.patch('/customers/:userId/cod-policy', protect, authorize('admin'), requirePermission('customers.trust'), updateCustomerCodPolicy);
+router.patch('/customers/:userId/freeze', protect, authorize('admin'), requirePermission('customers.trust'), setCustomerAccountFreeze);
+// Pillar 8 — platform + per-restaurant visit analytics.
+router.get('/analytics/visits', protect, authorize('admin'), requirePermission('analytics.view'), getVisitAnalytics);
 router.get('/inventory', protect, authorize('admin'), getAllRestaurantInventory);
 router.patch('/inventory/:itemId', protect, authorize('admin'), updateAnyRestaurantInventory);
 router.get('/analytics/revenue', protect, authorize('admin'), getRevenueAnalytics);
+// Pillar 5 — platform vs restaurant review health and top-rated dishes.
+router.get('/reviews/analytics', protect, authorize('admin'), requirePermission('reviews.moderate'), getReviewAnalytics);
 router.get('/analytics/top-restaurants', protect, authorize('admin'), getTopRestaurants);
-router.get('/reviews', protect, authorize('admin'), getReviews);
-router.patch('/reviews/:id', protect, authorize('admin'), moderateReview);
+router.get('/reviews', protect, authorize('admin'), requirePermission('reviews.moderate'), getReviews);
+router.patch('/reviews/:id', protect, authorize('admin'), requirePermission('reviews.moderate'), moderateReview);
 router.get('/admins/:id/permissions', protect, authorize('admin'), requirePermission('settings.manage'), getAdminPermissions);
 router.patch('/admins/:id/permissions', protect, authorize('admin'), requirePermission('settings.manage'), updateAdminPermissions);
 router.get('/platform-ratings', protect, authorize('admin'), getPlatformRatings);
