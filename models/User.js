@@ -137,6 +137,9 @@ const userSchema = new mongoose.Schema(
       refusedDeliveries: { type: Number, min: 0, default: 0 },
       failedDeliveries: { type: Number, min: 0, default: 0 },
       lastFailedAt: { type: Date, default: null },
+      // Rider delivery-issue reason code for the most recent failure, so an
+      // admin reviewing the queue can see WHY the customer was flagged.
+      lastReasonCode: { type: String, trim: true, maxlength: 60, default: '' },
       autoBlocked: { type: Boolean, default: false },
       autoBlockedAt: { type: Date, default: null },
     },

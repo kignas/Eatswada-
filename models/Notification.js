@@ -21,7 +21,13 @@ const schema = new mongoose.Schema({
 }, { timestamps: true });
 
 schema.index({ user: 1, createdAt: -1 });
-schema.index({ dedupeKey: 1 }, { unique: true, sparse: true });
+// A UNIQUE index only dedupes when a real key is present. `sparse` is not
+// enough here: the field carries `default: null`, so the key exists on every
+// document and a sparse unique index still collides — meaning only the FIRST
+// notification with no dedupeKey could ever be written and every later one was
+// silently dropped (E11000). A partial index on string values keeps the dedupe
+// guarantee for real keys while letting keyless notifications coexist.
+schema.index({ dedupeKey: 1 }, { unique: true, partialFilterExpression: { dedupeKey: { $type: 'string' } } });
 schema.index({ 'ring.active': 1, 'ring.leaseUntil': 1, 'ring.lastSentAt': 1 });
 // PERFORMANCE: backs pushService.stopRing(), which runs on every vendor
 // accept/reject (vendorController) with the filter
