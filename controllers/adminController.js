@@ -16,6 +16,7 @@ const { uploadToCloudinary } = require('../utils/riderUpload');
 const { logAdminAction } = require('../services/auditService');
 const { commissionRateForDeliveryMode, commissionPlanForDeliveryMode } = require('../services/commissionService');
 const { operationalStatus, getLocalContext } = require('../services/restaurantHours');
+const { setAccountFreeze } = require('../services/customerTrustService');
 
 const ADMIN_ROLES = ['admin'];
 const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
@@ -518,7 +519,7 @@ exports.updateRestaurantDeliverySettings = asyncHandler(async (req, res) => {
   if (!restaurant) return res.status(404).json({success:false,message:'Restaurant not found.'});
 
   const body=req.body||{};
-  const before={ businessType:restaurant.businessType||'restaurant', deliveryMode:restaurant.deliveryMode||'eatswada_rider', commissionPlan:restaurant.commissionPlan||'legacy', commissionRate:Number(restaurant.commissionRate)||15, maxActiveOrders:restaurant.maxActiveOrders||20, settlementSchedule:restaurant.settlementSchedule||'weekly' };
+  const before={ businessType:restaurant.businessType||'restaurant', deliveryMode:restaurant.deliveryMode||'eatswada_rider', commissionPlan:restaurant.commissionPlan||'legacy', commissionRate:Number(restaurant.commissionRate)||15, maxActiveOrders:restaurant.maxActiveOrders||10, settlementSchedule:restaurant.settlementSchedule||'weekly' };
 
   if (body.businessType!==undefined) {
     if(!['restaurant','cloud_kitchen'].includes(body.businessType)) return res.status(400).json({success:false,message:'businessType must be restaurant or cloud_kitchen.'});
@@ -1089,8 +1090,11 @@ exports.getReviews = asyncHandler(async (req, res) => {
   if (req.query.restaurantId) filter.restaurant = req.query.restaurantId;
   if (req.query.visible === 'true') filter.isVisible = true;
   if (req.query.visible === 'false') filter.isVisible = false;
+  // Moderation queue: only customer-reported reviews, most-flagged first.
+  if (String(req.query.flagged || '') === 'true') filter.isFlagged = true;
+  if (String(req.query.lowRated || '') === 'true') filter.score = { $lte: 2 };
   const [reviews, total] = await Promise.all([
-    Review.find(filter).populate('user','name phone').populate('restaurant','name').sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Review.find(filter).populate('user','name phone').populate('restaurant','name').sort({ reportedCount: -1, createdAt: -1 }).skip(skip).limit(limit),
     Review.countDocuments(filter)
   ]);
   res.json({ success: true, page, pages: Math.ceil(total/limit), total, data: reviews });
@@ -1100,13 +1104,62 @@ exports.moderateReview = asyncHandler(async (req, res) => {
   if (!assertAdmin(req, res)) return;
   const { isVisible, adminNote = '' } = req.body;
   if (typeof isVisible !== 'boolean') return res.status(400).json({ success: false, message: 'isVisible must be boolean.' });
-  const review = await Review.findByIdAndUpdate(req.params.id, { isVisible, adminNote: String(adminNote).slice(0,300) }, { new: true });
+  const update = { isVisible, adminNote: String(adminNote).slice(0,300), moderatedBy: req.user._id, moderatedAt: new Date() };
+  // Hiding a review also clears its flag so it leaves the moderation queue.
+  if (isVisible === false) update.isFlagged = false;
+  const review = await Review.findByIdAndUpdate(req.params.id, update, { new: true });
   if (!review) return res.status(404).json({ success: false, message: 'Review not found.' });
   // Recalculate the restaurant's verified rating after moderation changes.
   const stats = await Review.aggregate([{ $match: { restaurant: review.restaurant, isVisible: true } }, { $group: { _id: null, avg: { $avg: '$score' }, count: { $sum: 1 } } }]);
   const s = stats[0] || { avg: 0, count: 0 };
   await Restaurant.findByIdAndUpdate(review.restaurant, { rating: s.count ? Math.round(s.avg*10)/10 : 4, ratingCount: s.count, reviewCount: s.count });
+  await logAdminAction(req, { action: 'review.moderate', targetType: 'review', targetId: review._id, targetLabel: String(review._id), newValue: { isVisible, adminNote: update.adminNote } });
   res.json({ success: true, data: review });
+});
+
+// GET /api/admin/reviews/analytics — platform vs restaurant review health.
+exports.getReviewAnalytics = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const days = Math.min(365, Math.max(1, Number(req.query.days) || 30));
+  const since = new Date(Date.now() - days * 86400000);
+  const [restaurantAgg, platformAgg, photoAgg, flaggedCount, itemTop] = await Promise.all([
+    Review.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: { _id: null, avg: { $avg: '$score' }, count: { $sum: 1 }, withPhotos: { $sum: { $cond: [{ $gt: [{ $size: { $ifNull: ['$photos', []] } }, 0] }, 1, 0] } }, riderAvg: { $avg: '$riderScore' } } },
+    ]),
+    PlatformRating.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: { _id: null, avg: { $avg: '$score' }, count: { $sum: 1 } } },
+    ]),
+    Review.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $project: { n: { $add: [{ $size: { $ifNull: ['$photos', []] } }, { $sum: { $map: { input: { $ifNull: ['$itemRatings', []] }, as: 'i', in: { $size: { $ifNull: ['$$i.photos', []] } } } } }] } } },
+      { $group: { _id: null, totalPhotos: { $sum: '$n' } } },
+    ]),
+    Review.countDocuments({ isFlagged: true }),
+    // Best and worst rated dishes from per-item ratings.
+    Review.aggregate([
+      { $match: { createdAt: { $gte: since }, isVisible: true } },
+      { $unwind: '$itemRatings' },
+      { $group: { _id: { name: '$itemRatings.itemName' }, avg: { $avg: '$itemRatings.score' }, count: { $sum: 1 } } },
+      { $match: { count: { $gte: 3 } } },
+      { $sort: { avg: -1 } },
+      { $limit: 5 },
+    ]),
+  ]);
+  const r = restaurantAgg[0] || { avg: 0, count: 0, withPhotos: 0, riderAvg: 0 };
+  const p = platformAgg[0] || { avg: 0, count: 0 };
+  res.json({
+    success: true,
+    data: {
+      period: `${days}d`,
+      restaurantReviews: { average: Math.round((r.avg || 0) * 10) / 10, count: r.count, withPhotos: r.withPhotos, riderAverage: r.riderAvg ? Math.round(r.riderAvg * 10) / 10 : null },
+      platformReviews: { average: Math.round((p.avg || 0) * 10) / 10, count: p.count },
+      totalPhotos: photoAgg[0]?.totalPhotos || 0,
+      flaggedReviews: flaggedCount,
+      topRatedItems: itemTop.map(x => ({ itemName: x._id.name, average: Math.round(x.avg * 10) / 10, count: x.count })),
+    },
+  });
 });
 
 // Platform-level Rate Us feedback (separate from verified restaurant/order reviews).
@@ -1133,7 +1186,10 @@ exports.getPlatformRatings = asyncHandler(async (req, res) => {
 
 
 
-const ADMIN_PERMISSION_SET = ['restaurants.manage','restaurants.delete','vendors.manage','orders.manage','finance.manage','coupons.manage','settings.manage','analytics.view'];
+// Least-privilege admin staff modules. An admin with an empty permission set
+// keeps full access (back-compat); a populated set scopes them to these areas.
+// Support / trust / review modules let a growing team be split by function.
+const ADMIN_PERMISSION_SET = ['restaurants.manage','restaurants.delete','vendors.manage','orders.manage','finance.manage','coupons.manage','settings.manage','analytics.view','support.manage','customers.trust','reviews.moderate'];
 exports.getAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; const u=await User.findById(req.params.id).select('name email role permissions isActive'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); res.json({success:true,data:u}); });
 exports.updateAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(String(req.user._id)===String(req.params.id)) return res.status(400).json({success:false,message:'You cannot change your own admin permissions.'}); const u=await User.findById(req.params.id).select('role permissions'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); const previousPermissions=Array.isArray(u.permissions)?[...u.permissions]:[]; const permissions=Array.isArray(req.body?.permissions)?[...new Set(req.body.permissions.filter(p=>ADMIN_PERMISSION_SET.includes(p)))]:[]; u.permissions=permissions; await u.save(); await logAdminAction(req,{action:'admin.permissions.update',targetType:'admin',targetId:u._id,targetLabel:u.email||String(u._id),oldValue:{permissions:previousPermissions},newValue:{permissions:u.permissions}}); res.json({success:true,data:{adminId:u._id,permissions:u.permissions}}); });
 
@@ -1204,4 +1260,209 @@ exports.getCustomerSavedLocations = asyncHandler(async (req, res) => {
   if (!user) return res.status(404).json({success:false,message:'Customer not found.'});
   const addresses = await Address.find({user:user._id}).select('tag house area landmark city pincode location isDefault createdAt updatedAt').sort({isDefault:-1,updatedAt:-1}).lean();
   res.json({success:true,data:{user:{id:user._id,name:user.name,phone:user.phone,email:user.email||''},addresses:addresses.map(a=>({...a,coordinates:Array.isArray(a.location?.coordinates)?{longitude:a.location.coordinates[0],latitude:a.location.coordinates[1]}:null}))}});
+});
+
+/* ─────────────────────────────────────────────────────────────────────
+ *  COD TRUST + ACCOUNT FREEZE (Pillar 3 / 7)
+ *
+ *  Admin review queue for customers who abuse Cash on Delivery: refuse the
+ *  order at the door, or repeatedly fail delivery through their own fault.
+ *  Each customer's counters, effective COD terms and freeze state are shown
+ *  together so an operator can act in one place.
+ * ───────────────────────────────────────────────────────────────────── */
+
+function serializeCustomerTrust(u) {
+  return {
+    id: u._id,
+    name: u.name || 'Customer',
+    phone: u.phone || '',
+    email: u.email || '',
+    isCodBlocked: u.isCodBlocked === true,
+    accountStatus: u.accountStatus || 'active',
+    frozenReason: u.frozenReason || '',
+    frozenAt: u.frozenAt || null,
+    codTrust: {
+      refusedDeliveries: Number(u.codTrust?.refusedDeliveries || 0),
+      failedDeliveries: Number(u.codTrust?.failedDeliveries || 0),
+      lastFailedAt: u.codTrust?.lastFailedAt || null,
+      autoBlocked: u.codTrust?.autoBlocked === true,
+      autoBlockedAt: u.codTrust?.autoBlockedAt || null,
+    },
+    codPolicy: {
+      advanceRequiredAbove: Number.isFinite(Number(u.codPolicy?.advanceRequiredAbove)) ? Number(u.codPolicy.advanceRequiredAbove) : null,
+      advancePercent: Number.isFinite(Number(u.codPolicy?.advancePercent)) ? Number(u.codPolicy.advancePercent) : null,
+      note: u.codPolicy?.note || '',
+      updatedAt: u.codPolicy?.updatedAt || null,
+    },
+    createdAt: u.createdAt,
+  };
+}
+
+// GET /api/admin/customers/trust?risk=high|blocked|frozen&search=
+exports.getCustomerTrustOverview = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const page = clampPage(req.query.page);
+  const limit = clampLimit(req.query.limit, 20, 100);
+  const filter = { role: 'user' };
+
+  const risk = String(req.query.risk || '').trim();
+  if (risk === 'blocked') filter.isCodBlocked = true;
+  else if (risk === 'frozen') filter.accountStatus = 'frozen';
+  else if (risk === 'high') {
+    filter.$or = [
+      { 'codTrust.refusedDeliveries': { $gte: 1 } },
+      { 'codTrust.failedDeliveries': { $gte: 1 } },
+      { 'codTrust.autoBlocked': true },
+    ];
+  }
+
+  const search = String(req.query.search || '').trim().slice(0, 80);
+  if (search) {
+    const safe = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    filter.$and = [
+      ...(filter.$and || []),
+      { $or: [{ name: { $regex: safe, $options: 'i' } }, { phone: { $regex: safe, $options: 'i' } }, { email: { $regex: safe, $options: 'i' } }] },
+    ];
+  }
+
+  const [rows, total] = await Promise.all([
+    User.find(filter)
+      .select('name phone email isCodBlocked accountStatus frozenReason frozenAt codTrust codPolicy createdAt')
+      .sort({ 'codTrust.lastFailedAt': -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean(),
+    User.countDocuments(filter),
+  ]);
+
+  res.json({
+    success: true,
+    data: rows.map(serializeCustomerTrust),
+    total,
+    page,
+    pages: Math.ceil(total / limit),
+  });
+});
+
+// GET /api/admin/customers/:userId/trust
+exports.getCustomerTrust = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  if (!require('mongoose').Types.ObjectId.isValid(req.params.userId)) return res.status(400).json({ success: false, message: 'Invalid user ID.' });
+  const u = await User.findOne({ _id: req.params.userId, role: 'user' })
+    .select('name phone email isCodBlocked accountStatus frozenReason frozenAt frozenBy codTrust codPolicy createdAt').lean();
+  if (!u) return res.status(404).json({ success: false, message: 'Customer not found.' });
+  res.json({ success: true, data: serializeCustomerTrust(u) });
+});
+
+// PATCH /api/admin/customers/:userId/cod-policy
+// Body: { isCodBlocked?, advanceRequiredAbove?, advancePercent?, resetCounters?, note? }
+exports.updateCustomerCodPolicy = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  if (!require('mongoose').Types.ObjectId.isValid(req.params.userId)) return res.status(400).json({ success: false, message: 'Invalid user ID.' });
+  const user = await User.findOne({ _id: req.params.userId, role: 'user' });
+  if (!user) return res.status(404).json({ success: false, message: 'Customer not found.' });
+
+  const before = serializeCustomerTrust(user);
+  const set = {};
+  const unset = {};
+
+  if (req.body?.isCodBlocked !== undefined) {
+    set.isCodBlocked = req.body.isCodBlocked === true;
+    if (set.isCodBlocked === false) {
+      // Manual unblock clears the automatic-block flag so the counter logic can
+      // re-evaluate from a clean slate rather than instantly re-blocking.
+      set['codTrust.autoBlocked'] = false;
+      set['codTrust.autoBlockedAt'] = null;
+    }
+  }
+
+  const hasThreshold = req.body?.advanceRequiredAbove !== undefined;
+  const hasPercent = req.body?.advancePercent !== undefined;
+  if (hasThreshold) {
+    if (req.body.advanceRequiredAbove === null || req.body.advanceRequiredAbove === '') {
+      set['codPolicy.advanceRequiredAbove'] = null;
+    } else {
+      const n = Number(req.body.advanceRequiredAbove);
+      if (!Number.isFinite(n) || n < 0) return res.status(400).json({ success: false, message: 'advanceRequiredAbove must be a non-negative number or null.' });
+      set['codPolicy.advanceRequiredAbove'] = n;
+    }
+  }
+  if (hasPercent) {
+    if (req.body.advancePercent === null || req.body.advancePercent === '') {
+      set['codPolicy.advancePercent'] = null;
+    } else {
+      const n = Number(req.body.advancePercent);
+      if (!Number.isFinite(n) || n < 0 || n > 100) return res.status(400).json({ success: false, message: 'advancePercent must be between 0 and 100 or null.' });
+      set['codPolicy.advancePercent'] = n;
+    }
+  }
+  if (hasThreshold || hasPercent || req.body?.note !== undefined) {
+    set['codPolicy.note'] = String(req.body?.note || '').slice(0, 200);
+    set['codPolicy.updatedBy'] = req.user._id;
+    set['codPolicy.updatedAt'] = new Date();
+  }
+  if (req.body?.resetCounters === true) {
+    set['codTrust.refusedDeliveries'] = 0;
+    set['codTrust.failedDeliveries'] = 0;
+    set['codTrust.lastFailedAt'] = null;
+    set['codTrust.autoBlocked'] = false;
+    set['codTrust.autoBlockedAt'] = null;
+  }
+
+  if (!Object.keys(set).length && !Object.keys(unset).length) {
+    return res.status(400).json({ success: false, message: 'No COD policy changes were supplied.' });
+  }
+
+  const updated = await User.findByIdAndUpdate(
+    user._id,
+    { $set: set, ...(Object.keys(unset).length ? { $unset: unset } : {}) },
+    { new: true, runValidators: true }
+  ).select('name phone email isCodBlocked accountStatus frozenReason frozenAt codTrust codPolicy createdAt').lean();
+
+  await logAdminAction(req, {
+    action: 'customer.cod-policy.update',
+    targetType: 'user',
+    targetId: user._id,
+    targetLabel: user.phone || String(user._id),
+    oldValue: { isCodBlocked: before.isCodBlocked, codPolicy: before.codPolicy, codTrust: before.codTrust },
+    newValue: { isCodBlocked: updated.isCodBlocked, codPolicy: updated.codPolicy, codTrust: updated.codTrust },
+  });
+
+  res.json({ success: true, data: serializeCustomerTrust(updated) });
+});
+
+// PATCH /api/admin/customers/:userId/freeze  Body: { frozen: true|false, reason? }
+exports.setCustomerAccountFreeze = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  if (!require('mongoose').Types.ObjectId.isValid(req.params.userId)) return res.status(400).json({ success: false, message: 'Invalid user ID.' });
+  if (typeof req.body?.frozen !== 'boolean') return res.status(400).json({ success: false, message: 'frozen must be true or false.' });
+
+  const result = await setAccountFreeze(req.params.userId, {
+    frozen: req.body.frozen,
+    reason: req.body?.reason,
+    adminId: req.user._id,
+  });
+  if (!result.ok) return res.status(result.status || 400).json({ success: false, message: result.message });
+
+  await logAdminAction(req, {
+    action: req.body.frozen ? 'customer.freeze' : 'customer.unfreeze',
+    targetType: 'user',
+    targetId: req.params.userId,
+    targetLabel: String(req.params.userId),
+    newValue: { accountStatus: result.data.accountStatus, reason: result.data.frozenReason },
+  });
+
+  res.json({ success: true, data: result.data });
+});
+
+/* ─────────────────────────────────────────────────────────────────────
+ *  PLATFORM VISIT ANALYTICS (Pillar 8)
+ *  The admin already saw WHO logs in; this adds HOW MANY people browse the
+ *  customer site (unique visitors per day) and the top-viewed restaurants.
+ * ───────────────────────────────────────────────────────────────────── */
+exports.getVisitAnalytics = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const { getPlatformVisitAnalytics } = require('../services/analyticsService');
+  const data = await getPlatformVisitAnalytics({ period: String(req.query.period || '30d') });
+  res.json({ success: true, data });
 });

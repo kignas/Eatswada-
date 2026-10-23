@@ -8,6 +8,8 @@ const { notifyOrderStatus, notifyDeliveryIssue } = require('../services/notifica
 const { ensureOrderLedger, ensureRiderLedger, creditRiderCashForOrder } = require('../services/settlementService');
 const { computeRiderEarning } = require('../services/riderEarningService');
 const { withRequiredTransaction } = require('../services/dbTransaction');
+const { recordCodFailure, isCustomerFaultReason } = require('../services/customerTrustService');
+const { buildPaymentView } = require('../services/orderPaymentView');
 
 /* ── Rider-owned delivery status flow ──
  * unassigned -> assigned -> accepted -> reached_restaurant -> picked_up -> out_for_delivery -> delivered
@@ -39,6 +41,15 @@ const haversineMeters = (a, b) => {
   const h = Math.sin(dLat/2)**2 + Math.cos(rad(lat1))*Math.cos(rad(lat2))*Math.sin(dLng/2)**2;
   return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1-h)));
 };
+
+// Attach the shared payment view to a hydrated order doc before serializing, so
+// the rider app never has to derive cash-due from raw fields itself.
+function withRiderPaymentView(orderDoc) {
+  if (!orderDoc) return orderDoc;
+  const order = typeof orderDoc.toObject === 'function' ? orderDoc.toObject({ virtuals: false }) : orderDoc;
+  order.payment = buildPaymentView(order);
+  return order;
+}
 
 /* GET /api/riders/profile */
 exports.getMyProfile = asyncHandler(async (req, res) => {
@@ -133,7 +144,9 @@ exports.getAssignedOrders = asyncHandler(async (req, res) => {
     Order.countDocuments(filter),
   ]);
 
-  res.json({ success: true, data: { orders, total, page: Number(page), pages: Math.ceil(total / limit) } });
+  // Attach the normalized payment view so the rider app shows exactly how much
+  // cash to collect (advance already paid vs balance due) on every order.
+  res.json({ success: true, data: { orders: orders.map(withRiderPaymentView), total, page: Number(page), pages: Math.ceil(total / limit) } });
 });
 
 /* GET /api/riders/orders/active — the single in-progress order, if any. */
@@ -143,7 +156,7 @@ exports.getActiveOrder = asyncHandler(async (req, res) => {
     riderStatus: { $in: ACTIVE_RIDER_STATUSES },
   }).sort({ riderAssignedAt: -1 }).populate('restaurant', 'name image address location');
 
-  res.json({ success: true, data: order || null });
+  res.json({ success: true, data: order ? withRiderPaymentView(order) : null });
 });
 
 /* GET /api/riders/orders/history — delivered or cancelled orders for this rider. */
@@ -168,7 +181,7 @@ exports.getOrderHistory = asyncHandler(async (req, res) => {
 exports.getAssignedOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, rider: req.user._id }).populate('restaurant', 'name image address location');
   if (!order) return res.status(404).json({ success: false, message: 'Order not found or not assigned to you.' });
-  res.json({ success: true, data: order });
+  res.json({ success: true, data: withRiderPaymentView(order) });
 });
 
 /* GET /api/riders/earnings — earnings summary (all time / today / week / month).
@@ -514,6 +527,14 @@ exports.reportDeliveryIssue = asyncHandler(async (req, res) => {
     riderId: req.user._id,
   });
   await order.save();
+
+  // COD trust: a customer-fault failure on a COD order counts toward the
+  // automatic COD-block threshold. Best-effort — never blocks the response.
+  const isCodOrder = String(order.paymentMethod || '').toLowerCase() === 'cod';
+  if (isCodOrder && order.user && isCustomerFaultReason(reasonCode)) {
+    const kind = reasonCode === 'customer_requested_cancel' ? 'refused' : 'failed';
+    recordCodFailure(order.user, { kind, reasonCode }).catch(() => {});
+  }
 
   try { await notifyDeliveryIssue(order); } catch (_) {}
   res.status(200).json({

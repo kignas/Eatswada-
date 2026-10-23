@@ -28,14 +28,20 @@ exports.updatePlatformConfig=async(req,res)=>{
 };
 /* Customer-facing, read-only snapshot. Whitelisted keys only — rider pay,
  * auto-breaker internals and every admin-only setting stay private. */
-const PUBLIC_STATUS_KEYS=['isUnderMaintenance','maintenanceTitle','maintenanceMessage','maintenanceEta','isDeliveryPausedShortage','shortageBannerMessage','isRainSurgeActive','rainSurgeFee','rainExtraEtaMinutes','isGlobalFreeDelivery','freeDeliveryMinSubtotal','isFirstOrderFreeDelivery','platformHandlingFee','smallCartThreshold','smallCartFee','packagingChargePerItem','taxPercent','isUpiEnabled','isCodEnabled','maxCodOrderAmount'];
+const PUBLIC_STATUS_KEYS=['isUnderMaintenance','maintenanceTitle','maintenanceMessage','maintenanceEta','isDeliveryPausedShortage','shortageBannerMessage','isRainSurgeActive','rainSurgeFee','rainExtraEtaMinutes','isGlobalFreeDelivery','freeDeliveryMinSubtotal','isFirstOrderFreeDelivery','platformHandlingFee','smallCartThreshold','smallCartFee','packagingChargePerItem','taxPercent','isUpiEnabled','isCodEnabled','maxCodOrderAmount','codAdvanceThreshold','codAdvancePercent','codDisplayLabel'];
 exports.getPublicStatus=async(req,res)=>{
   const settings=await getPlatformSettings();
   const data={};for(const k of PUBLIC_STATUS_KEYS)data[k]=settings[k];
   if(req.user&&req.user.role==='user'){
     const Order=require('../models/Order');const User=require('../models/User');
-    const [hasOrder,u]=await Promise.all([Order.exists({user:req.user._id}),User.findById(req.user._id).select('isCodBlocked').lean()]);
+    const [hasOrder,u]=await Promise.all([Order.exists({user:req.user._id}),User.findById(req.user._id).select('isCodBlocked accountStatus codPolicy').lean()]);
     data.isFirstOrder=!hasOrder;data.isCodBlocked=u?.isCodBlocked===true;
+    // A frozen or COD-blocked account still browses, but checkout is refused;
+    // expose the state so the UI can explain why instead of failing at submit.
+    data.isAccountFrozen=u?.accountStatus==='frozen';
+    // Per-customer COD terms override the platform default for this user only.
+    if(Number.isFinite(Number(u?.codPolicy?.advancePercent)))data.codAdvancePercent=Number(u.codPolicy.advancePercent);
+    if(Number.isFinite(Number(u?.codPolicy?.advanceRequiredAbove)))data.codAdvanceThreshold=Number(u.codPolicy.advanceRequiredAbove);
   }
   res.set('Cache-Control','no-store');
   res.json({success:true,data});

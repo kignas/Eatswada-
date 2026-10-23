@@ -5,7 +5,7 @@ const SupportTicket = require('../models/SupportTicket');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const { createNotification } = require('../services/notificationService');
-const { MAX_MESSAGES, REOPEN_MS, cleanAttachments, publicTicket, hasUnread } = require('../utils/supportHelpers');
+const { MAX_MESSAGES, REOPEN_MS, cleanAttachments, publicTicket, hasUnread, slaDueDates } = require('../utils/supportHelpers');
 
 // Issues that only make sense for a specific order.
 const ORDER_CATEGORIES = new Set(['missing_item', 'wrong_item', 'food_quality', 'spilled_order', 'late_order', 'delivery', 'order']);
@@ -85,12 +85,13 @@ exports.createTicket = asyncHandler(async (req, res) => {
 
   const now = new Date();
   const label = order ? ` — order ${order.orderNumber || String(order._id).slice(-6)}` : '';
+  const priority = HIGH_PRIORITY.has(category) ? 'high' : 'normal';
   const ticket = await SupportTicket.create({
     customer: req.user._id,
     order: order ? order._id : null,
     restaurant: (order && order.restaurant) || null,
     category,
-    priority: HIGH_PRIORITY.has(category) ? 'high' : 'normal',
+    priority,
     subject: subject || `${category.replace(/_/g, ' ')}${label}`,
     status: 'open',
     affectedItems,
@@ -98,6 +99,7 @@ exports.createTicket = asyncHandler(async (req, res) => {
     issueCategory,
     evidencePhotos,
     customerLastReadAt: now,
+    ...slaDueDates(priority, now),
     messages: [{ senderRole: 'user', sender: req.user._id, message, attachments, at: now }],
   });
 
@@ -189,4 +191,18 @@ exports.closeMyTicket = asyncHandler(async (req, res) => {
   const ticket = await SupportTicket.findOneAndUpdate({ _id: req.params.id, customer: req.user._id }, { $set: set }, { new: true });
   if (!ticket) return res.status(404).json({ success: false, message: 'Support ticket not found.' });
   res.json({ success: true, data: publicTicket(ticket) });
+});
+
+// POST /api/support/tickets/:id/typing — lightweight presence ping. The client
+// calls this while the customer is composing; the admin inbox reads the flag
+// from the ticket payload. Cheap, fire-and-forget, no message is stored.
+exports.setTyping = asyncHandler(async (req, res) => {
+  if (!idOk(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid ticket ID.' });
+  const typing = req.body?.typing !== false;
+  await SupportTicket.updateOne(
+    { _id: req.params.id, customer: req.user._id, status: { $ne: 'closed' } },
+    { $set: { typingRole: typing ? 'user' : '', typingAt: typing ? new Date() : null } },
+    { timestamps: false }
+  ).catch(() => {});
+  res.json({ success: true, data: { typing: Boolean(typing) } });
 });

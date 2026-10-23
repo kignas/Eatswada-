@@ -13,7 +13,7 @@ const {
   issueResolutionCoupon,
   applyFaultAttributionDeduction,
 } = require('../services/refundService');
-const { MAX_MESSAGES, cleanAttachments, escapeRegex } = require('../utils/supportHelpers');
+const { MAX_MESSAGES, cleanAttachments, escapeRegex, liveTypingRole, slaDueDates, SLA_MINUTES } = require('../utils/supportHelpers');
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
@@ -83,16 +83,32 @@ exports.listSupportTickets=asyncHandler(async(req,res)=>{
   // type=customer | vendor splits the two kinds of tickets.
   if(req.query.type==='customer')filter.customer={$ne:null};
   else if(req.query.type==='vendor')filter.vendor={$ne:null};
+  // Agent inbox: assignedTo=me | unassigned | <userId>. Lets each operator see
+  // only the conversations they own, and a shared unassigned queue.
+  const assignedTo=String(req.query.assignedTo||'').trim();
+  if(assignedTo==='me')filter.assignedTo=req.user._id;
+  else if(assignedTo==='unassigned')filter.assignedTo=null;
+  else if(assignedTo&&/^[a-f\d]{24}$/i.test(assignedTo))filter.assignedTo=assignedTo;
+  // overdue=true surfaces tickets whose first-response SLA has already slipped.
+  if(String(req.query.overdue||'')==='true'){filter.firstResponseAt=null;filter.firstResponseDueAt={$ne:null,$lt:new Date()};}
   // q searches by ticket number (e.g. EW-T-...).
   const q=String(req.query.q||'').trim().slice(0,60);
   if(q)filter.ticketNumber={$regex:escapeRegex(q),$options:'i'};
   const page=Math.max(1,Number(req.query.page)||1),limit=Math.min(100,Math.max(1,Number(req.query.limit)||25));
   const [rows,total]=await Promise.all([
-    SupportTicket.find(filter).populate('vendor','name email phone').populate('customer','name email phone').populate('restaurant','name').populate('order','orderNumber status')
+    SupportTicket.find(filter).populate('vendor','name email phone').populate('customer','name email phone').populate('restaurant','name').populate('order','orderNumber status').populate('assignedTo','name email')
       .sort({updatedAt:-1}).skip((page-1)*limit).limit(limit).lean(),   // newest activity first
     SupportTicket.countDocuments(filter),
   ]);
-  res.json({success:true,data:rows,pagination:{page,limit,total,pages:Math.ceil(total/limit)}});
+  // Stamp SLA state per row so the console can colour the queue without extra calls.
+  const now=Date.now();
+  const withSla=rows.map(r=>{
+    const agent=r.assignedTo&&typeof r.assignedTo==='object'?{id:r.assignedTo._id,name:r.assignedTo.name||'Agent'}:null;
+    const overdueFirst=!r.firstResponseAt&&r.firstResponseDueAt&&new Date(r.firstResponseDueAt).getTime()<now;
+    const overdueResolution=!['resolved','closed'].includes(r.status)&&r.resolutionDueAt&&new Date(r.resolutionDueAt).getTime()<now;
+    return {...r,assignedTo:agent,typingRole:liveTypingRole(r),sla:{overdueFirstResponse:Boolean(overdueFirst),overdueResolution:Boolean(overdueResolution),firstResponseDueAt:r.firstResponseDueAt||null,resolutionDueAt:r.resolutionDueAt||null,firstResponseAt:r.firstResponseAt||null}};
+  });
+  res.json({success:true,data:withSla,pagination:{page,limit,total,pages:Math.ceil(total/limit)}});
 });
 
 exports.replySupportTicket=asyncHandler(async(req,res)=>{
@@ -101,18 +117,22 @@ exports.replySupportTicket=asyncHandler(async(req,res)=>{
   if(!message)return res.status(400).json({success:false,message:'message is required.'});
   if(message.length>2000)return res.status(400).json({success:false,message:'message must be 2,000 characters or fewer.'});
   const attachments=cleanAttachments(req.body?.attachments);
-  const base=await SupportTicket.findById(req.params.id).select('customer status').lean();
+  const base=await SupportTicket.findById(req.params.id).select('customer status firstResponseAt').lean();
   if(!base)return res.status(404).json({success:false,message:'Support ticket not found.'});
   if(base.status==='closed')return res.status(409).json({success:false,message:'Ticket is closed.'});
 
   const resolve=req.body?.resolve===true;
-  const set={status:resolve?'resolved':(base.customer?'waiting_customer':'waiting_vendor'),closedAt:resolve?new Date():null};
+  const now=new Date();
+  const set={status:resolve?'resolved':(base.customer?'waiting_customer':'waiting_vendor'),closedAt:resolve?now:null,typingRole:'',typingAt:null};
   if(['low','normal','high','urgent'].includes(req.body?.priority))set.priority=req.body.priority;
+  // Stamp the first admin response once — this is the SLA clock that matters
+  // most to the customer, so it is only ever set, never overwritten.
+  if(!base.firstResponseAt)set.firstResponseAt=now;
 
   // Atomic push: a customer reply arriving at the same moment is never overwritten.
   const ticket=await SupportTicket.findOneAndUpdate(
     {_id:req.params.id,status:{$ne:'closed'},$expr:{$lt:[{$size:'$messages'},MAX_MESSAGES]}},
-    {$push:{messages:{senderRole:'admin',sender:req.user._id,message,attachments,at:new Date()}},$set:set},
+    {$push:{messages:{senderRole:'admin',sender:req.user._id,message,attachments,at:now}},$set:set},
     {new:true});
   if(!ticket)return res.status(409).json({success:false,message:'Ticket is closed or has reached its message limit.'});
 
@@ -307,4 +327,111 @@ exports.setSupportFaultAttribution = asyncHandler(async (req, res) => {
   if (!ticket) return res.status(404).json({ success: false, message: 'Support ticket not found.' });
   await logAdminAction(req, { action: 'support.ticket.fault', targetType: 'support_ticket', targetId: ticket._id, targetLabel: ticket.ticketNumber || String(ticket._id), newValue: { faultAttribution } });
   res.json({ success: true, data: ticket });
+});
+
+/* ─────────────────────────────────────────────────────────────────────
+ *  SUPPORT OPS (Pillar 4 / req 16)
+ *  Agent assignment, live typing, and an SLA/quality scoreboard so support
+ *  can be run like a real queue instead of a single shared inbox.
+ * ───────────────────────────────────────────────────────────────────── */
+
+// PATCH /api/admin/support/tickets/:id/assign  Body: { adminId|null, priority? }
+exports.assignSupportTicket = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const ticket = await SupportTicket.findById(req.params.id).select('ticketNumber status priority firstResponseAt').lean();
+  if (!ticket) return res.status(404).json({ success: false, message: 'Support ticket not found.' });
+
+  const raw = req.body?.adminId;
+  let assignedTo = null;
+  if (raw && raw !== 'me') {
+    if (!/^[a-f\d]{24}$/i.test(String(raw))) return res.status(400).json({ success: false, message: 'Invalid adminId.' });
+    const agent = await require('../models/User').findOne({ _id: raw, role: 'admin', isActive: { $ne: false } }).select('_id').lean();
+    if (!agent) return res.status(404).json({ success: false, message: 'Admin agent not found.' });
+    assignedTo = agent._id;
+  } else if (raw === 'me') {
+    assignedTo = req.user._id;
+  }
+
+  const set = { assignedTo, assignedAt: assignedTo ? new Date() : null };
+  // Re-prioritising an un-answered ticket re-bases its SLA clocks.
+  if (['low', 'normal', 'high', 'urgent'].includes(req.body?.priority)) {
+    set.priority = req.body.priority;
+    if (!ticket.firstResponseAt) Object.assign(set, slaDueDates(req.body.priority));
+  }
+
+  const updated = await SupportTicket.findByIdAndUpdate(req.params.id, { $set: set }, { new: true })
+    .populate('assignedTo', 'name email').lean();
+  await logAdminAction(req, {
+    action: 'support.ticket.assign', targetType: 'support_ticket', targetId: ticket._id,
+    targetLabel: ticket.ticketNumber || String(ticket._id),
+    newValue: { assignedTo: assignedTo ? String(assignedTo) : null, priority: set.priority || ticket.priority },
+  });
+  res.json({ success: true, data: updated });
+});
+
+// POST /api/admin/support/tickets/:id/typing  Body: { typing?: boolean }
+exports.setSupportTyping = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const typing = req.body?.typing !== false;
+  await SupportTicket.updateOne(
+    { _id: req.params.id, status: { $ne: 'closed' } },
+    { $set: { typingRole: typing ? 'admin' : '', typingAt: typing ? new Date() : null } },
+    { timestamps: false }
+  ).catch(() => {});
+  res.json({ success: true, data: { typing: Boolean(typing) } });
+});
+
+// GET /api/admin/support/metrics?days=30
+exports.getSupportMetrics = asyncHandler(async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+  const days = Math.min(180, Math.max(1, Number(req.query.days) || 30));
+  const since = new Date(Date.now() - days * 86400000);
+  const now = Date.now();
+  const openStatuses = ['open', 'waiting_admin', 'waiting_vendor', 'waiting_customer'];
+
+  const [byStatus, byPriority, totals, firstResponse, ratingAgg, assignedAgg, overdue] = await Promise.all([
+    SupportTicket.aggregate([{ $match: { createdAt: { $gte: since } } }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
+    SupportTicket.aggregate([{ $match: { createdAt: { $gte: since } } }, { $group: { _id: '$priority', count: { $sum: 1 } } }]),
+    SupportTicket.countDocuments({ createdAt: { $gte: since } }),
+    // Median-ish first-response time via average, in minutes, only for answered tickets.
+    SupportTicket.aggregate([
+      { $match: { createdAt: { $gte: since }, firstResponseAt: { $ne: null } } },
+      { $project: { mins: { $divide: [{ $subtract: ['$firstResponseAt', '$createdAt'] }, 60000] } } },
+      { $group: { _id: null, avgMinutes: { $avg: '$mins' }, answered: { $sum: 1 } } },
+    ]),
+    SupportTicket.aggregate([
+      { $match: { createdAt: { $gte: since }, customerRating: { $ne: null } } },
+      { $group: { _id: null, avgRating: { $avg: '$customerRating' }, rated: { $sum: 1 } } },
+    ]),
+    SupportTicket.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: { _id: '$assignedTo', count: { $sum: 1 } } },
+    ]),
+    SupportTicket.countDocuments({ status: { $in: openStatuses }, firstResponseAt: null, firstResponseDueAt: { $ne: null, $lt: new Date(now) } }),
+  ]);
+
+  const statusMap = Object.fromEntries(byStatus.map(r => [r._id, r.count]));
+  const priorityMap = Object.fromEntries(byPriority.map(r => [r._id, r.count]));
+  const openCount = openStatuses.reduce((n, s) => n + (statusMap[s] || 0), 0);
+  const unassigned = await SupportTicket.countDocuments({ status: { $in: openStatuses }, assignedTo: null });
+
+  res.json({
+    success: true,
+    data: {
+      period: `${days}d`,
+      totals: {
+        tickets: totals,
+        open: openCount,
+        unassigned,
+        overdueFirstResponse: overdue,
+        resolved: (statusMap.resolved || 0) + (statusMap.closed || 0),
+      },
+      byStatus: statusMap,
+      byPriority: priorityMap,
+      firstResponse: firstResponse[0] || { avgMinutes: null, answered: 0 },
+      customerSatisfaction: ratingAgg[0] || { avgRating: null, rated: 0 },
+      byAgent: assignedAgg.map(r => ({ agentId: r._id, tickets: r.count })),
+      slaPolicyMinutes: SLA_MINUTES,
+    },
+  });
 });

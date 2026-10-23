@@ -12,7 +12,7 @@ const Review     = require('../models/Review');
 const IdempotencyKey = require('../models/IdempotencyKey');
 const asyncHandler = require('express-async-handler');
 const { releaseOrderInventory, reserveOrderInventory } = require('../services/inventoryReservationService');
-const { calculatePartialCod } = require('../services/partialCodPolicy');
+const { resolveCodTerms } = require('../services/codPolicyService');
 const { autoAssignRider, scheduleRiderTimeout } = require('../services/riderAssignmentService');
 const {
   getMenuRefId,
@@ -602,7 +602,13 @@ const createOrder = asyncHandler(async (req, res) => {
   // COD is only available when the platform enables it, the customer is not
   // COD-blocked, and the checkout total is within the COD cap. All three are
   // validated server-side against the customer document, never the client.
-  const customer = await User.findById(req.user._id).select('name phone isCodBlocked').lean();
+  const customer = await User.findById(req.user._id).select('name phone isCodBlocked accountStatus codPolicy').lean();
+  // A frozen account (fake orders / wasted food) cannot place any new order,
+  // prepaid or COD, until an admin unfreezes it.
+  if (customer?.accountStatus === 'frozen') {
+    const e = new Error('Your account is on hold. Please contact Eatswada support to place an order.');
+    e.statusCode = 403; e.code = 'ACCOUNT_FROZEN'; throw e;
+  }
   if (requestedMethod === 'cod') {
     if (settings.isCodEnabled !== true) {
       const e = new Error('Cash on Delivery is currently unavailable. Please pay online.'); e.statusCode = 400; throw e;
@@ -645,21 +651,30 @@ const createOrder = asyncHandler(async (req, res) => {
 
   const checkoutGrandTotal = bills.reduce((sum, b) => sum + b.grandTotal, 0);
 
-  // Partial COD applies only to a single restaurant. Above ₹1,000 of
-  // discounted food subtotal, charge 10% in advance through Razorpay and collect
-  // the remainder at the door. Money calculations are converted to paise first.
+  // Partial COD applies only to a single restaurant. Above the COD advance
+  // threshold (default ₹1,000) of discounted food subtotal, charge the resolved
+  // advance percent (default 10%, or a per-customer override) through Razorpay
+  // and collect the remainder at the door. Money calculations use integer paise.
   let partialCodAdvance = 0;
   let partialCodCashDue = 0;
   if (requestedMethod === 'cod') {
-    const policy = priced.length === 1
-      ? calculatePartialCod(priced[0]?.subtotal, priced[0]?.discount, checkoutGrandTotal, settings.maxCodOrderAmount)
-      : { required: false, cashDuePaise: Math.round(checkoutGrandTotal * 100), allowed: checkoutGrandTotal <= Number(settings.maxCodOrderAmount || Infinity) };
-    if (policy.required) {
-      partialCodAdvance = policy.advancePaise / 100;
-      partialCodCashDue = policy.cashDuePaise / 100;
+    const terms = priced.length === 1
+      ? resolveCodTerms({
+          subtotalRupees: priced[0]?.subtotal,
+          discountRupees: priced[0]?.discount,
+          grandTotalRupees: checkoutGrandTotal,
+          settings,
+          customer,
+        })
+      : { required: false, advancePaise: 0, cashDuePaise: Math.round(checkoutGrandTotal * 100) };
+    if (terms.required) {
+      partialCodAdvance = terms.advancePaise / 100;
+      partialCodCashDue = terms.cashDuePaise / 100;
     }
-    if (!policy.allowed) {
-      const maxCod = Number(settings.maxCodOrderAmount);
+    // The COD cap limits what the rider must carry in cash at the door.
+    const maxCod = Number(settings.maxCodOrderAmount);
+    const cashDueForCap = terms.required ? terms.cashDuePaise / 100 : checkoutGrandTotal;
+    if (Number.isFinite(maxCod) && maxCod > 0 && cashDueForCap > maxCod) {
       const e = new Error(`Cash due at delivery must not exceed ₹${maxCod}. Please choose full UPI payment.`);
       e.statusCode = 400; throw e;
     }
@@ -993,7 +1008,12 @@ const submitReview = asyncHandler(async (req, res) => {
     const key = String(orderItem.menuItem || orderItem.name).toLowerCase();
     if (seenItemKeys.has(key)) return res.status(400).json({ success:false, message:`Duplicate rating for ${itemName}.` });
     seenItemKeys.add(key);
-    itemRatings.push({ menuItem: orderItem.menuItem || null, itemName: orderItem.name, score: scoreValue, comment: String(raw?.comment || '').trim().slice(0,300) });
+    // Per-item photos: same Cloudinary-only rule as the review-level photos.
+    const itemPhotos = (Array.isArray(raw?.photos) ? raw.photos : [])
+      .slice(0, 3)
+      .map(value => String(value || '').trim())
+      .filter(url => url && url.length <= 1000 && /^https:\/\/res\.cloudinary\.com\//i.test(url));
+    itemRatings.push({ menuItem: orderItem.menuItem || null, itemName: orderItem.name, score: scoreValue, comment: String(raw?.comment || '').trim().slice(0,300), photos: itemPhotos });
   }
   let review = await Review.findOne({ order: order._id });
   const wasNewReview = !review;
@@ -1027,6 +1047,28 @@ const submitReview = asyncHandler(async (req, res) => {
 
 // Backward-compatible alias for the old /rate endpoint.
 const rateOrder = submitReview;
+
+// POST /api/orders/reviews/:reviewId/report — a customer flags an abusive or
+// fake review. One report per customer per review; reports accumulate so the
+// admin queue can sort by most-flagged.
+const reportReview = asyncHandler(async (req, res) => {
+  const Review = require('../models/Review');
+  if (!mongoose.Types.ObjectId.isValid(req.params.reviewId)) return res.status(400).json({ success: false, message: 'Invalid review ID.' });
+  const reason = String(req.body?.reason || '').trim().slice(0, 300);
+  if (!reason) return res.status(400).json({ success: false, message: 'Please describe why you are reporting this review.' });
+  const review = await Review.findById(req.params.reviewId).select('user reportedBy reportedCount isFlagged');
+  if (!review) return res.status(404).json({ success: false, message: 'Review not found.' });
+  if (String(review.user) === String(req.user._id)) return res.status(400).json({ success: false, message: 'You cannot report your own review.' });
+
+  // Atomic single-report-per-user guard: $addToSet only grows when new.
+  const updated = await Review.findOneAndUpdate(
+    { _id: review._id, reportedBy: { $ne: req.user._id } },
+    { $addToSet: { reportedBy: req.user._id }, $inc: { reportedCount: 1 }, $set: { isFlagged: true } },
+    { new: true }
+  );
+  if (!updated) return res.status(200).json({ success: true, message: 'You have already reported this review.' });
+  res.status(201).json({ success: true, message: 'Thanks — our team will review this report.' });
+});
 
 const VENDOR_SETTABLE_STATUSES = ['confirmed', 'preparing', 'waiting_for_rider', 'delivered', 'cancelled'];
 
@@ -1214,6 +1256,7 @@ module.exports = {
   getOrderById,
   getOrderReview,
   submitReview,
+  reportReview,
   cancelOrder, 
   rateOrder, 
   updateOrderStatus, 

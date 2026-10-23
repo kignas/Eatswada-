@@ -15,6 +15,7 @@ const { stopRing } = require('../services/pushService');
 const { getRestaurantCapacity } = require('../services/vendorMarketplaceService');
 const { isRestaurantResponseOverdue } = require('../services/orderCancellationPolicy');
 const { buildOpeningHoursUpdate, operationalStatus, getLocalContext } = require('../services/restaurantHours');
+const { buildPaymentView } = require('../services/orderPaymentView');
 
 function assertVendorPayload(req, res) {
   if (!req.user || req.user.role !== 'vendor' || !req.user.restaurantId) {
@@ -57,6 +58,10 @@ function serializeVendorOrder(orderDoc) {
 
   const rider = order.rider && typeof order.rider === 'object' ? order.rider : null;
   order.riderInfo = rider ? { name: rider.name || 'Rider', phone: rider.phone || '' } : null;
+
+  // Pillar 3 — the restaurant sees exactly what was paid online vs collected in
+  // cash, so a partial-COD order can never be mistaken for fully prepaid.
+  order.payment = buildPaymentView(order);
 
   return order;
 }
