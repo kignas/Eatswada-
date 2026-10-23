@@ -64,6 +64,9 @@ function publicTicket(ticket, { since = null } = {}) {
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
     closedAt: o.closedAt,
+    // Live typing indicator (only the OTHER party matters to the reader; the
+    // client decides which role it is). Stale flags are suppressed on read.
+    typingRole: liveTypingRole(o),
     unread: hasUnread(o),
     messages: msgs.map(publicMessage),
   };
@@ -71,4 +74,34 @@ function publicTicket(ticket, { since = null } = {}) {
 
 function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-module.exports = { MAX_MESSAGES, MAX_ATTACHMENTS, REOPEN_MS, REOPEN_DAYS, cleanAttachments, publicMessage, publicTicket, hasUnread, escapeRegex };
+// ── SLA policy (req 16) ────────────────────────────────────────────────
+// First-response and resolution targets per priority, in minutes. Kept here so
+// both ticket creation and the admin metrics endpoint read one definition.
+const SLA_MINUTES = Object.freeze({
+  urgent: { firstResponse: 10, resolution: 120 },
+  high:   { firstResponse: 20, resolution: 240 },
+  normal: { firstResponse: 60, resolution: 720 },
+  low:    { firstResponse: 180, resolution: 1440 },
+});
+
+function slaDueDates(priority = 'normal', from = new Date()) {
+  const policy = SLA_MINUTES[priority] || SLA_MINUTES.normal;
+  return {
+    firstResponseDueAt: new Date(from.getTime() + policy.firstResponse * 60000),
+    resolutionDueAt: new Date(from.getTime() + policy.resolution * 60000),
+  };
+}
+
+// Typing indicator TTL: a flag older than this is treated as cleared.
+const TYPING_TTL_MS = 8000;
+
+function liveTypingRole(ticket, now = Date.now()) {
+  if (!ticket?.typingRole || !ticket?.typingAt) return '';
+  return now - new Date(ticket.typingAt).getTime() <= TYPING_TTL_MS ? ticket.typingRole : '';
+}
+
+module.exports = {
+  MAX_MESSAGES, MAX_ATTACHMENTS, REOPEN_MS, REOPEN_DAYS,
+  cleanAttachments, publicMessage, publicTicket, hasUnread, escapeRegex,
+  SLA_MINUTES, slaDueDates, TYPING_TTL_MS, liveTypingRole,
+};
