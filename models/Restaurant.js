@@ -122,10 +122,11 @@ const restaurantSchema = new mongoose.Schema(
 
     // Maximum number of active orders the restaurant can have waiting at one
     // time. This is an acceptance guard, not a customer-facing minimum-order
-    // value.
+    // value. Zomato-style partners juggle a steady queue, so the default is 10
+    // concurrent orders; admins raise or lower it per restaurant.
     maxActiveOrders: {
       type: Number,
-      default: 20,
+      default: 10,
       min: 1,
       max: 500,
     },

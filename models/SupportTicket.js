@@ -70,6 +70,25 @@ const supportTicketSchema = new mongoose.Schema({
   customerLastReadAt: { type: Date, default: null },
   customerRating: { type: Number, min: 1, max: 5, default: null },
   customerFeedback: { type: String, trim: true, maxlength: 500, default: '' },
+
+  // ── Production support ops (Pillar 4 / req 16) ─────────────────────
+  // Agent assignment so two admins never answer the same ticket, and so the
+  // "assigned to me" inbox is exact.
+  assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+  assignedAt: { type: Date, default: null },
+  // SLA clocks. firstResponseDueAt is set from the priority when the ticket is
+  // created; firstResponseAt is stamped the first time an admin replies.
+  firstResponseAt: { type: Date, default: null },
+  firstResponseDueAt: { type: Date, default: null, index: true },
+  resolutionDueAt: { type: Date, default: null, index: true },
+  // Live typing indicator. Short TTL checked on read so a stale flag self-clears
+  // without a background job; role is 'user' | 'admin' | 'vendor'.
+  typingRole: { type: String, enum: ['', 'user', 'admin', 'vendor'], default: '' },
+  typingAt: { type: Date, default: null },
+  // Free-form internal tags an agent can attach (e.g. 'refund_processed').
+  tags: { type: [{ type: String, trim: true, maxlength: 40 }], default: [] },
+  // Set when the customer reopens a resolved ticket, for SLA re-evaluation.
+  reopenedCount: { type: Number, min: 0, default: 0 },
 }, { timestamps: true });
 
 supportTicketSchema.pre('validate', function(next) {

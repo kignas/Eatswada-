@@ -117,6 +117,43 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // ── COD trust / penalty policy (Pillar 3) ──────────────────────────
+    // Per-customer override of the platform's partial-COD threshold. When
+    // advanceRequiredAbove is set, a COD order whose discounted food subtotal
+    // exceeds it collects advancePercent of the FOOD subtotal online and the
+    // rest at the door. A customer with a history of refusing COD deliveries
+    // can be put on a stricter policy (e.g. 50% online) without a global change.
+    codPolicy: {
+      advanceRequiredAbove: { type: Number, min: 0, default: null },
+      advancePercent: { type: Number, min: 0, max: 100, default: null },
+      note: { type: String, trim: true, maxlength: 200, default: '' },
+      updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      updatedAt: { type: Date, default: null },
+    },
+    // Rolling trust counters used to flag repeat COD abusers for admin review.
+    // Nothing here blocks an order on its own; enforcement is an explicit admin
+    // action (isCodBlocked) or the automatic rule below, both auditable.
+    codTrust: {
+      refusedDeliveries: { type: Number, min: 0, default: 0 },
+      failedDeliveries: { type: Number, min: 0, default: 0 },
+      lastFailedAt: { type: Date, default: null },
+      autoBlocked: { type: Boolean, default: false },
+      autoBlockedAt: { type: Date, default: null },
+    },
+    // ── Account freeze (Pillar 7) ──────────────────────────────────────
+    // Admin can freeze an account that places fake orders or repeatedly wastes
+    // food. A frozen customer cannot place new orders. Kept separate from
+    // isActive (which authMiddleware treats as a hard login revocation) so a
+    // freeze is reversible without invalidating the session outright.
+    accountStatus: {
+      type: String,
+      enum: ['active', 'frozen'],
+      default: 'active',
+      index: true,
+    },
+    frozenReason: { type: String, trim: true, maxlength: 300, default: '' },
+    frozenAt: { type: Date, default: null },
+    frozenBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     otp: {
       code:      { type: String, select: false },
       expiresAt: { type: Date,   select: false },

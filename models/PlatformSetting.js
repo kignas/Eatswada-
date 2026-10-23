@@ -35,6 +35,16 @@ const schema = new mongoose.Schema({
   isUpiEnabled: { type: Boolean, default: true },
   isCodEnabled: { type: Boolean, default: true },
   maxCodOrderAmount: { type: Number, min: 0, default: 1000 },
+  // Partial-COD default terms: above this discounted food subtotal, collect
+  // codAdvancePercent of the food subtotal online and the rest at the door.
+  codAdvanceThreshold: { type: Number, min: 0, default: 1000 },
+  codAdvancePercent: { type: Number, min: 0, max: 100, default: 10 },
+  // Automatic COD block after N refused/failed COD deliveries. Off by default;
+  // when on, the enforcement is recorded on the customer as codTrust.autoBlocked.
+  codAutoBlockEnabled: { type: Boolean, default: false },
+  codMaxRefusalsBeforeAutoBlock: { type: Number, min: 0, default: 3 },
+  // Label shown on the customer checkout ("Cash on Delivery — Free").
+  codDisplayLabel: { type: String, trim: true, maxlength: 80, default: 'Cash on Delivery — Free' },
 
   // ── Pillar 6: rider pay model ──
   riderBasePay: { type: Number, min: 0, default: 25 },
