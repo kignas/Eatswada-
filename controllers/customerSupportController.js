@@ -47,6 +47,15 @@ exports.createTicket = asyncHandler(async (req, res) => {
   const photos = cleanAttachments(req.body?.photos);
   if (Array.isArray(req.body?.photos) && req.body.photos.length > 4) return res.status(400).json({ success:false, message:'A complaint can include up to 4 photos.' });
   const affectedItems = cleanItems(req.body?.items);
+  // Structured refund-console fields (additive). evidencePhotos must be
+  // trusted-host https images (uploaded via POST /upload/customer-media).
+  const ISSUE_CATEGORIES = ['missing_item', 'wrong_item', 'spilled_packaging', 'quality_issue', 'late_delivery', 'payment_issue'];
+  const issueCategory = ISSUE_CATEGORIES.includes(String(req.body?.issueCategory || '')) ? String(req.body.issueCategory) : null;
+  if (Array.isArray(req.body?.evidencePhotos) && req.body.evidencePhotos.length > 3) return res.status(400).json({ success:false, message:'Up to 3 evidence photos are allowed.' });
+  const evidencePhotos = cleanAttachments(req.body?.evidencePhotos);
+  if (['missing_item', 'wrong_item', 'spilled_packaging'].includes(issueCategory) && !evidencePhotos.length) {
+    return res.status(400).json({ success:false, message:'Please add 1–3 photos of the issue.' });
+  }
 
   if (!ORDER_CATEGORIES.has(category) && !GENERAL_CATEGORIES.has(category)) return res.status(400).json({ success: false, message: 'Invalid support category.' });
   if (ORDER_CATEGORIES.has(category) && !orderIdRaw) return res.status(400).json({ success: false, message: 'An orderId is required for this type of issue.' });
@@ -67,7 +76,7 @@ exports.createTicket = asyncHandler(async (req, res) => {
     const now = new Date();
     const updated = await SupportTicket.findOneAndUpdate(
       { _id: existing._id, customer: req.user._id, status: { $in: OPEN_STATES }, ...sizeUnderCap },
-      { $push: { messages: { senderRole: 'user', sender: req.user._id, message, attachments:[...new Set([...attachments, ...photos])].slice(0,3), at: now } }, $set: { status: 'waiting_admin', customerLastReadAt: now, ...(photos.length ? { photos } : {}) } },
+      { $push: { messages: { senderRole: 'user', sender: req.user._id, message, attachments:[...new Set([...attachments, ...photos])].slice(0,3), at: now } }, $set: { status: 'waiting_admin', customerLastReadAt: now, ...(photos.length ? { photos } : {}), ...(evidencePhotos.length ? { evidencePhotos } : {}), ...(issueCategory ? { issueCategory } : {}) } },
       { new: true }
     );
     if (!updated) return res.status(409).json({ success: false, message: 'This conversation has reached its message limit. Please start a new request.' });
@@ -86,6 +95,8 @@ exports.createTicket = asyncHandler(async (req, res) => {
     status: 'open',
     affectedItems,
     photos,
+    issueCategory,
+    evidencePhotos,
     customerLastReadAt: now,
     messages: [{ senderRole: 'user', sender: req.user._id, message, attachments, at: now }],
   });
@@ -97,14 +108,21 @@ exports.createTicket = asyncHandler(async (req, res) => {
 
 // List view: only the last message per ticket (not whole conversations).
 exports.listMyTickets = asyncHandler(async (req, res) => {
-  const rows = await SupportTicket.find({ customer: req.user._id })
-    .select({ ticketNumber: 1, category: 1, subject: 1, status: 1, priority: 1, order: 1, restaurant: 1, createdAt: 1, updatedAt: 1, customerLastReadAt: 1, messages: { $slice: -1 } })
+  const filter = { customer: req.user._id };
+  if (req.query.orderId) {
+    if (!idOk(String(req.query.orderId))) return res.status(400).json({ success: false, message: 'Invalid orderId.' });
+    filter.order = req.query.orderId;
+  }
+  const rows = await SupportTicket.find(filter)
+    .select({ issueCategory: 1, resolutionType: 1, refundAmount: 1, 'resolution.note': 1, 'resolution.resolvedAt': 1, ticketNumber: 1, category: 1, subject: 1, status: 1, priority: 1, order: 1, restaurant: 1, createdAt: 1, updatedAt: 1, customerLastReadAt: 1, messages: { $slice: -1 } })
     .populate('order', 'orderNumber status').populate('restaurant', 'name image')
     .sort({ updatedAt: -1 }).limit(100).lean();
   const data = rows.map(t => {
     const last = (t.messages || [])[0];
     return {
       _id: t._id, ticketNumber: t.ticketNumber, category: t.category, subject: t.subject, status: t.status,
+      issueCategory: t.issueCategory || null, resolutionType: t.resolutionType || null, refundAmount: t.refundAmount || 0,
+      resolution: t.resolution ? { note: t.resolution.note || '', resolvedAt: t.resolution.resolvedAt || null } : null,
       order: t.order, restaurant: t.restaurant, createdAt: t.createdAt, updatedAt: t.updatedAt,
       unread: hasUnread(t),
       lastMessage: last ? { senderRole: last.senderRole, message: String(last.message).slice(0, 140), at: last.at } : null,

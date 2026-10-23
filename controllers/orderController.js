@@ -461,6 +461,7 @@ const createOrder = asyncHandler(async (req, res) => {
     deliveryInstructions,
     tipAmount = 0,
     couponCode = '',
+    sendCutlery = false,
   } = req.body;
 
   // Pillar 3 — dual payment engine. Both methods are gated by the platform
@@ -737,6 +738,7 @@ const createOrder = asyncHandler(async (req, res) => {
           calculatedAt: new Date(),
         },
         restaurantNote: note,
+        sendCutlery: sendCutlery === true || sendCutlery === 'true',
         deliveryInstructions: sharedDeliveryInstructions,
         tipAmount: tip,
         total: bill.grandTotal,

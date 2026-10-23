@@ -26,6 +26,20 @@ exports.updatePlatformConfig=async(req,res)=>{
   await logAdminAction(req,{action:'platform.config.update',targetType:'platform',targetId:null,targetLabel:'Platform configuration',oldValue:Object.fromEntries(Object.keys(updated).map(k=>[k,before[k]])),newValue:updated});
   res.json({success:true,data:{updated,skipped,settings}});
 };
+/* Customer-facing, read-only snapshot. Whitelisted keys only — rider pay,
+ * auto-breaker internals and every admin-only setting stay private. */
+const PUBLIC_STATUS_KEYS=['isUnderMaintenance','maintenanceTitle','maintenanceMessage','maintenanceEta','isDeliveryPausedShortage','shortageBannerMessage','isRainSurgeActive','rainSurgeFee','rainExtraEtaMinutes','isGlobalFreeDelivery','freeDeliveryMinSubtotal','isFirstOrderFreeDelivery','platformHandlingFee','smallCartThreshold','smallCartFee','packagingChargePerItem','taxPercent','isUpiEnabled','isCodEnabled','maxCodOrderAmount'];
+exports.getPublicStatus=async(req,res)=>{
+  const settings=await getPlatformSettings();
+  const data={};for(const k of PUBLIC_STATUS_KEYS)data[k]=settings[k];
+  if(req.user&&req.user.role==='user'){
+    const Order=require('../models/Order');const User=require('../models/User');
+    const [hasOrder,u]=await Promise.all([Order.exists({user:req.user._id}),User.findById(req.user._id).select('isCodBlocked').lean()]);
+    data.isFirstOrder=!hasOrder;data.isCodBlocked=u?.isCodBlocked===true;
+  }
+  res.set('Cache-Control','no-store');
+  res.json({success:true,data});
+};
 /* Bill/delivery pricing policy view for the Admin pricing controller card. */
 exports.getBillPolicy=async(req,res)=>{
   if(!admin(req,res))return;
