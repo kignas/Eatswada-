@@ -22,7 +22,7 @@ require.cache[paymentServicePath] = {
   id: paymentServicePath, filename: paymentServicePath, loaded: true,
   exports: {
     refundPayment: async (pid, amount, notes) => { refundCalls.push({ pid, amount, notes }); return { id: `rfnd_${refundCalls.length}`, status: 'processed' }; },
-    fetchPayment: async () => ({ fee: 0, tax: 0, amount: Math.round(amountOf(pid) * 100) }),
+    fetchPayment: async (pid) => ({ fee: 0, tax: 0, amount: Math.round(amountOf(pid) * 100) }),
     assertConfigured() {},
   },
 };
@@ -165,7 +165,7 @@ async function runCheckout({ fundedBy, restaurantSharePercent = 0, value = 200, 
     assert.equal(persisted.riderCashCreditedAt, null, 'failed credit must not leave a claimed marker');
   });
 
-  await test('X6: COD cash limit excludes a rider from COD dispatch but not prepaid', async () => {
+  await test('X6a: COD cash limit excludes a rider from COD dispatch but not prepaid', async () => {
     seq += 1;
     const atLimit = await User.create({
       name: 'Full', phone: `9900000${String(seq).padStart(3, '0')}`, role: 'rider', password: 'x'.repeat(12),
@@ -180,7 +180,7 @@ async function runCheckout({ fundedBy, restaurantSharePercent = 0, value = 200, 
   });
 
   // ── Refund integrity ─────────────────────────────────────────────────
-  await test('X6: a repeated cancellation refund is issued only once', async () => {
+  await test('X6b: a repeated cancellation refund is issued only once', async () => {
     refundCalls.length = 0;
     const { order } = await seed({ paymentMethod: 'upi', total: 400, status: 'cancelled', paymentStatus: 'paid' });
     await Order.updateOne({ _id: order._id }, { $set: { razorpayPaymentId: 'pay_X6', refund: { status: 'none' } } });

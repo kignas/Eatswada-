@@ -8,8 +8,7 @@
 
 const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
-const { makeRes, makeReq, makeReporter } = require('./helpers/replset');
+const { startStandalone, stopStandalone, makeRes, makeReq, makeReporter } = require('./helpers/replset');
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
@@ -22,13 +21,13 @@ const { payRider, getRiderBalance } = require('../services/settlementService');
 const { withOptionalTransaction, isTransactionUnsupported } = require('../services/dbTransaction');
 
 const { test, finish } = makeReporter('Standalone (no-transaction) fallback');
-let mongod = null;
 let seq = 0;
 
 (async () => {
-  mongod = await MongoMemoryServer.create();
-  await mongoose.connect(mongod.getUri()); // standalone: NO replica set
-  await Promise.all(Object.values(mongoose.models).map(m => m.init().catch(() => {})));
+  // Disposable STANDALONE mongod (NO replica set). The helper verifies the
+  // topology (no setName) and applies the same timeout/teardown guards as the
+  // replica-set suites.
+  await startStandalone();
 
   await test('T1: withOptionalTransaction degrades gracefully on a standalone mongod', async () => {
     const Probe = mongoose.models.Probe || mongoose.model('Probe', new mongoose.Schema({ a: Number }));
@@ -76,7 +75,12 @@ let seq = 0;
       Promise.resolve(riderController.updateAssignedOrderStatus(req, res, reject)).then(resolve, reject);
     });
     const results = await Promise.allSettled([run(mk(), r1), run(mk(), r2)]);
-    assert.ok(results.some(r => r.status === 'rejected'), 'transaction-required delivery must fail closed on standalone MongoDB');
+    assert.ok(results.every(r => r.status === 'rejected'), 'transaction-required delivery must fail closed on standalone MongoDB (every attempt rejected)');
+    // It must fail closed for the RIGHT reason, not because of an unrelated error.
+    for (const r of results) {
+      assert.equal(r.reason && r.reason.code, 'TRANSACTION_REQUIRED', `unexpected rejection: ${r.reason && r.reason.message}`);
+      assert.equal(r.reason.statusCode, 503);
+    }
     const freshOrder = await Order.findById(order._id).lean();
     assert.notEqual(freshOrder.status, 'delivered', 'order must not be marked delivered without transaction support');
     const cash = Number((await User.findById(rider._id).select('riderDetails.cashInHand').lean()).riderDetails.cashInHand || 0);
@@ -96,12 +100,10 @@ let seq = 0;
   });
 
   const code = finish();
-  await mongoose.disconnect();
-  if (mongod) await mongod.stop();
+  await stopStandalone();
   process.exit(code);
 })().catch(async (err) => {
   console.error('HARNESS ERROR', err);
-  await mongoose.disconnect().catch(() => {});
-  if (mongod) await mongod.stop().catch(() => {});
+  await stopStandalone().catch(() => {});
   process.exit(1);
 });

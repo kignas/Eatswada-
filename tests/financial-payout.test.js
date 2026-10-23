@@ -88,6 +88,24 @@ const payoutSum = async (riderId) => {
     assert.equal(await payoutSum(rider._id), -400, 'only one payout row');
   });
 
+  // C4 above drains the whole balance, so its retry is refused by the balance
+  // check alone and never reaches the idempotency-token guard. This variant
+  // leaves a remaining balance, so ONLY the unique payoutToken can stop the retry.
+  await test('C4b: a retried payout with the same idempotency key is refused by the token guard even while balance remains', async () => {
+    const rider = await seedRider({ earnings: 1000 });
+    const body = { amount: 400, reference: 'UTR-RETRY-B', idempotencyKey: 'payout-key-remaining-balance' };
+    const r1 = makeRes();
+    await settlementController.settleRiderPayout(makeReq({ user: { _id: adminId(), role: 'admin' }, params: { id: String(rider._id) }, body }), r1);
+    assert.equal(r1.statusCode, 201, JSON.stringify(r1.body));
+    assert.equal((await getRiderBalance(rider._id)).netPayable, 600, 'balance remains after the first payout');
+    const r2 = makeRes();
+    await settlementController.settleRiderPayout(makeReq({ user: { _id: adminId(), role: 'admin' }, params: { id: String(rider._id) }, body }), r2);
+    assert.equal(r2.statusCode, 409, JSON.stringify(r2.body));
+    assert.match(String(r2.body && r2.body.message), /duplicate/i, 'must be refused as a duplicate, not for another reason');
+    assert.equal(await payoutSum(rider._id), -400, 'only one payout row');
+    assert.equal((await getRiderBalance(rider._id)).netPayable, 600, 'balance untouched by the retry');
+  });
+
   await test('C5: malformed / non-positive amounts are rejected', async () => {
     const rider = await seedRider({ earnings: 100 });
     // (null/omitted is the documented "pay the full balance" case, covered in C2.)
