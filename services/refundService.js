@@ -40,11 +40,44 @@ function syncInMemory(order, fresh) {
   try {
     order.set('refund', fresh.refund ? (fresh.refund.toObject ? fresh.refund.toObject() : fresh.refund) : undefined);
     order.set('paymentStatus', fresh.paymentStatus);
+    if (fresh.partialCodAdvanceStatus) order.set('partialCodAdvanceStatus', fresh.partialCodAdvanceStatus);
   } catch (_) { /* response-only convenience; never fail the request */ }
 }
 
 async function initiateOrderRefund(order, reason = '') {
   if (!order) return { refunded: false, skipped: 'no_order' };
+  // Partial COD has a captured Razorpay advance but the remainder is cash at
+  // delivery. Refund only the advance, and only when the customer cancelled
+  // before restaurant acceptance (eligibility is snapshotted by cancelOrder).
+  if (order.paymentMethod === 'cod' && Number(order.partialCodAdvanceAmount || 0) > 0) {
+    if (!order.partialCodRefundEligible || order.partialCodAdvanceStatus !== 'paid' || !order.razorpayPaymentId) {
+      return { refunded: false, skipped: 'partial_cod_refund_not_eligible' };
+    }
+    const now = new Date();
+    const claimed = await Order.findOneAndUpdate({
+      _id: order._id, status: 'cancelled', partialCodRefundEligible: true,
+      partialCodAdvanceStatus: 'paid', razorpayPaymentId: { $nin: ['', null] },
+      $or: CLAIMABLE_REFUND_STATE,
+    }, { $set: { partialCodAdvanceStatus: 'refund_processing', 'refund.status': 'processing', 'refund.reason': String(reason || '').slice(0, 200), 'refund.initiatedAt': now, 'refund.razorpayRefundId': '', 'refund.completedAt': null, 'refund.amount': Number(order.partialCodAdvanceAmount || 0) } }, { new: true });
+    if (!claimed) return { refunded: false, skipped: 'already_started' };
+    try {
+      const refund = await refundPayment(claimed.razorpayPaymentId, Number(claimed.partialCodAdvanceAmount || 0), { orderId: String(claimed._id), reason: String(reason || 'Pre-acceptance partial COD cancellation').slice(0, 200) });
+      const set = { 'refund.razorpayRefundId': String((refund && refund.id) || '') };
+      if (refund && refund.status === 'processed') {
+        set['refund.status'] = 'completed';
+        set['refund.completedAt'] = new Date();
+        set.partialCodAdvanceStatus = 'refunded';
+      }
+      await Order.updateOne({ _id: claimed._id, 'refund.status': 'processing' }, { $set: set });
+      const fresh = await Order.findById(claimed._id).select('paymentStatus refund partialCodAdvanceStatus').lean();
+      syncInMemory(order, fresh);
+      return { refunded: true, status: fresh?.refund?.status, refundId: set['refund.razorpayRefundId'] };
+    } catch (err) {
+      const message = err && (err.error?.description || err.message) ? (err.error?.description || err.message) : 'unknown error';
+      await Order.updateOne({ _id: claimed._id, 'refund.status': 'processing' }, { $set: { partialCodAdvanceStatus: 'refund_failed', 'refund.status': 'failed', 'refund.reason': `refund initiation failed: ${message}`.slice(0, 200) } }).catch(() => {});
+      return { refunded: false, error: message };
+    }
+  }
   if (order.paymentMethod === 'cod') {
     // COD orders were paid in cash at the door, so a gateway refund is not the
     // correct instrument. If the rider has already collected the cash
@@ -153,7 +186,7 @@ async function initiateOrderRefund(order, reason = '') {
     // that may already have marked this refund completed.
     await Order.updateOne({ _id: claimed._id, 'refund.status': 'processing' }, { $set: set });
 
-    const fresh = await Order.findById(claimed._id).select('paymentStatus refund').lean();
+    const fresh = await Order.findById(claimed._id).select('paymentStatus refund partialCodAdvanceStatus').lean();
     syncInMemory(order, fresh);
     return { refunded: true, status: fresh?.refund?.status, refundId: set['refund.razorpayRefundId'] };
   } catch (err) {
