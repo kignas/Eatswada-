@@ -270,4 +270,4 @@ async function getZoneDeliveryCapacity(zone = '') {
   return { zone: normalized, onlineRiders, activeOrders, activeOrdersPerRider: onlineRiders ? Number(ratio.toFixed(2)) : null };
 }
 
-module.exports = { autoAssignRider, findBestAvailableRider, resolveOrderZone, handleReassignment, scheduleRiderTimeout, recoverStuckAssignments, recoverUnassignedOrders, startAssignmentRecovery, getZoneDeliveryCapacity, haversineKm, resolveMaxActiveOrdersPerRider, MAX_ACTIVE_ORDERS_PER_RIDER };
+module.exports = { autoAssignRider, findBestAvailableRider, resolveOrderZone, handleReassignment, scheduleRiderTimeout, recoverStuckAssignments, recoverUnassignedOrders, startAssignmentRecovery, getZoneDeliveryCapacity, haversineKm, resolveMaxActiveOrdersPerRider, MAX_ACTIVE_ORDERS_PER_RIDER, ACTIVE_RIDER_STATUSES };
