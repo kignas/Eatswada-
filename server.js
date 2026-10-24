@@ -145,25 +145,6 @@ if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
 // middleware on the matched route has populated req.user.
 app.use(requestLogger);
 
-// ── OTP diagnostic logging ────────────────────────────────────
-// Keep this lightweight and production-safe: log request flow and a masked phone,
-// while the OTP utility itself logs the mock OTP when OTP_PROVIDER=mock.
-const maskPhone = (phone) => {
-  const value = String(phone || '');
-  if (value.length <= 4) return '****';
-  return `${value.slice(0, 3)}****${value.slice(-3)}`;
-};
-
-if (process.env.NODE_ENV === 'development') {
-  app.use('/api/users/send-otp', (req, res, next) => {
-    console.log(`[OTP-DEBUG] request ${req.method} ${req.originalUrl} origin=${req.get('origin') || 'none'} phone=${maskPhone(req.body?.phone)}`);
-    res.on('finish', () => {
-      console.log(`[OTP-DEBUG] response status=${res.statusCode} success=${res.statusCode >= 200 && res.statusCode < 300}`);
-    });
-    next();
-  });
-}
-
 // Endpoint-specific password-reset diagnostics. Never logs passwords, tokens, or SMTP secrets.
 app.use('/api/users/forgot-password/email', (req, res, next) => {
   console.log(`[PASSWORD-RESET-HTTP] request ${req.method} ${req.originalUrl} origin=${req.get('origin') || 'none'} email=${req.body?.email ? 'provided' : 'missing'}`);
