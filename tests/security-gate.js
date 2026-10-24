@@ -38,7 +38,7 @@ const uploadRoutes = read('routes/uploadRoutes.js');
 
 check('Helmet enabled', /app\.use\(helmet\(\)\)/.test(server));
 check('Mongo operator sanitization enabled', /app\.use\(mongoSanitize\(\)\)/.test(server));
-check('XSS middleware enabled', /app\.use\(xssClean\(\)\)/.test(server));
+check('XSS middleware enabled', /app\.use\(sanitizeInput\)/.test(server));
 check('HPP protection enabled', /app\.use\(hpp\(/.test(server));
 check('JSON body size capped', /express\.json\(\{\s*limit:\s*['"]10kb['"]/.test(server));
 check('Rate limiter sees proxy client IP', /app\.set\(['"]trust proxy['"],\s*1\)/.test(server));
