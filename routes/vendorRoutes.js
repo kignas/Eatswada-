@@ -105,8 +105,6 @@ router.post('/orders/:id/verify-delivery-otp', protect, role('vendor'), marketpl
 router.get('/menu', protect, role('vendor'), getVendorMenu);
 router.post('/menu/upload-image', protect, role('vendor'), handleMenuImageUpload, uploadVendorMenuImage);
 router.post('/menu', protect, role('vendor'), marketplace.createVendorMenuItem);
-router.put('/menu/:id', protect, role('vendor'), marketplace.updateVendorMenuItem);
-router.delete('/menu/:id', protect, role('vendor'), marketplace.deleteVendorMenuItem);
 router.put('/menu/:id/inventory', protect, role('vendor'), marketplace.setVendorInventory);
 
 
