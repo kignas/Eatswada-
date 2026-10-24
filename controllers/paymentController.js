@@ -84,11 +84,13 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
 
   const liveOrders = orders.filter(o => o.status !== 'cancelled');
   const liveUnpaid = liveOrders.filter(o => !isSettledPayment(o));
-  // Idempotent webhook/verify retry: if every live child is already settled by
-  // this exact payment, there is nothing left to claim and no refund is due.
-  if (liveOrders.length && liveUnpaid.length === 0 && liveOrders.every(o => o.razorpayPaymentId === pid)) {
-    return { liveOrderIds: liveOrders.map(o => o._id), refundedOrderIds: [], duplicate: false };
-  }
+  // A repeated event for the SAME settled payment must still resume the
+  // post-capture work below (coupon claim, cart clear, and notification enqueue).
+  // Otherwise a process crash after setting paymentStatus='paid' can permanently
+  // skip those effects. Notification service dedupe keys make replay safe.
+  const alreadySettledBySamePayment = liveOrders.length > 0
+    && liveUnpaid.length === 0
+    && liveOrders.every(o => o.razorpayPaymentId === pid);
 
   // Atomically elect exactly one captured payment as the owner of this checkout.
   // This closes the webhook/verify race where payment A and payment B both read
@@ -96,14 +98,8 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
   // A retry of the SAME payment id is allowed to continue an interrupted claim.
   const liveLeader = liveUnpaid[0] || liveOrders[0];
   if (!liveLeader) {
-    // Every order in this checkout is already cancelled (customer cancel inside
-    // the 30s window, or an earlier failed attempt cancelled it) but Razorpay
-    // has now CAPTURED money. Record the payment against the cancelled orders
-    // and refund it. Never return silently: that would keep the customer's
-    // money with no order and no refund.
-    // The conditional update makes this safe against a webhook/verify race and
-    // against Razorpay webhook retries (a second call finds nothing to claim,
-    // and initiateOrderRefund itself claims the refund atomically).
+    // Every order in this checkout is already cancelled but Razorpay has captured
+    // money. Record it for traceability and refund it; never silently acknowledge.
     await Order.updateMany(
       { _id: { $in: ids }, status: 'cancelled', paymentStatus: { $nin: ['paid', 'refunded'] } },
       { $set: { paymentStatus: 'paid', razorpayPaymentId: pid } }
@@ -115,41 +111,31 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
     }
     return { liveOrderIds: [], refundedOrderIds: deadOrders.map(o => o._id), duplicate: false };
   }
-  const claim = await Order.findOneAndUpdate(
-    {
-      _id: liveLeader._id,
-      paymentStatus: { $nin: ['paid', 'refunded'] },
-      $or: [
-        { paymentClaimId: { $exists: false } },
-        { paymentClaimId: null },
-        { paymentClaimId: '' },
-      ],
-    },
-    { $set: { paymentClaimId: pid } },
-    { new: true }
-  );
 
-  // Only the request that actually elects a fresh payment claim should emit
-  // vendor/admin notifications. A same-payment retry may still finish a
-  // partially committed checkout, but must not ring the vendor twice.
-  let shouldNotify = !!claim;
+  if (!alreadySettledBySamePayment) {
+    const claim = await Order.findOneAndUpdate(
+      {
+        _id: liveLeader._id,
+        paymentStatus: { $nin: ['paid', 'refunded'] },
+        $or: [
+          { paymentClaimId: { $exists: false } },
+          { paymentClaimId: null },
+          { paymentClaimId: '' },
+        ],
+      },
+      { $set: { paymentClaimId: pid } },
+      { new: true }
+    );
 
-  if (!claim) {
-    // IMPORTANT: a webhook and /payments/verify can race for the SAME captured
-    // payment. If the other request already claimed this exact payment id, it
-    // is NOT a duplicate payment and must never be refunded. The old code
-    // treated every failed claim as a duplicate, which could refund the real
-    // checkout while leaving the customer order in `placed` and hiding it from
-    // the vendor queue.
-    const currentLeader = await Order.findById(liveLeader._id).select('paymentClaimId paymentStatus razorpayPaymentId');
-    if (currentLeader && String(currentLeader.paymentClaimId || '') !== pid) {
-      await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
-      return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
+    if (!claim) {
+      // A same-payment claimant may have won the race and then been interrupted;
+      // resume its work. A different payment ID means this capture is duplicate.
+      const currentLeader = await Order.findById(liveLeader._id).select('paymentClaimId paymentStatus razorpayPaymentId');
+      if (currentLeader && String(currentLeader.paymentClaimId || '') !== pid) {
+        await refundDuplicatePayment(ids, pid, Number(amountPaise || 0) / 100);
+        return { liveOrderIds: [], refundedOrderIds: [], duplicate: true };
+      }
     }
-    // Same payment id already owns the claim. Continue idempotently and let
-    // this request finish the shared checkout state if the original claimant
-    // was interrupted. It does not become the notification owner.
-    shouldNotify = false;
   }
 
   const unpaid = { $nin: ['paid', 'refunded'] };
@@ -195,16 +181,12 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
       { $set: { items: [], restaurant: null, restaurantName: '', subtotal: 0, deliveryFee: 0, total: 0, paymentMethod: 'upi' } }
     );
 
-    // Order is now paid → visible to the vendor. Ring their device(s) until they act.
-    // If this is a concurrent retry of the SAME payment after another request
-    // already committed the checkout, do not ring the restaurant a second time.
-    if (shouldNotify) {
-      for (const o of live) {
-        // Vendor + admin notifications are emitted only after payment is verified.
-        // Both functions are idempotent and never block a successful checkout.
-        pushService.notifyRestaurantNewOrder(o).catch((err) => console.error('[PUSH] vendor new-order:', err.message));
-        pushService.notifyAdminsNewOrder(o).catch((err) => console.error('[PUSH] admin-new-order:', err.message));
-      }
+    // Re-enqueue notifications on a same-payment retry as well: the first worker
+    // may have crashed after persisting payment state. These functions use durable
+    // dedupe keys, so this repairs the crash window without duplicate delivery.
+    for (const o of live) {
+      pushService.notifyRestaurantNewOrder(o).catch((err) => console.error('[PUSH] vendor new-order:', err.message));
+      pushService.notifyAdminsNewOrder(o).catch((err) => console.error('[PUSH] admin-new-order:', err.message));
     }
   }
 
@@ -489,7 +471,13 @@ exports.paymentStatus = asyncHandler(async (req, res) => {
 });
 
 exports.handleWebhook = asyncHandler(async (req, res) => {
-  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
+  // HMAC must cover the exact provider bytes. Re-serializing parsed JSON is not
+  // equivalent and can make signature handling inconsistent; fail closed when
+  // the raw parser did not run.
+  if (!Buffer.isBuffer(req.body)) {
+    return res.status(400).json({ success: false, message: 'Raw webhook body is required.' });
+  }
+  const rawBody = req.body;
   const signature = req.get('x-razorpay-signature');
   if (!verifyWebhookSignature(rawBody, signature)) {
     return res.status(400).json({ success: false, message: 'Invalid webhook signature.' });
@@ -499,43 +487,152 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
   try { event = JSON.parse(rawBody.toString('utf8')); }
   catch (_) { return res.status(400).json({ success: false, message: 'Invalid webhook payload.' }); }
 
-  // ── Refund lifecycle events ──────────────────────────────────────────
-  // refund.processed / refund.failed carry a refund entity (not a payment
-  // entity). Handle and return here so the payment.* amount checks below never
-  // run against a refund event. Orders are matched by the orderId we stamped
-  // into the refund notes at initiation (exact even for a partial refund of one
-  // order in a multi-restaurant checkout), falling back to the stored refund id.
+  // Refund lifecycle events are independent of the payment.captured flow. The
+  // refund type stamped in provider notes selects the corresponding order state;
+  // we never infer a full-order cancellation from a support partial refund.
   if (typeof event.event === 'string' && event.event.startsWith('refund.')) {
     const refundEntity = event?.payload?.refund?.entity;
     if (!refundEntity) return res.json({ success: true, ignored: true });
 
     const refundId = String(refundEntity.id || '');
-    const notesOrderId = refundEntity.notes && refundEntity.notes.orderId ? String(refundEntity.notes.orderId) : '';
+    const providerPaymentId = String(refundEntity.payment_id || '');
+    const notes = refundEntity.notes && typeof refundEntity.notes === 'object' ? refundEntity.notes : {};
+    const notesOrderId = String(notes.orderId || '');
+    let refundType = String(notes.refundType || '');
+    const amountPaise = Number(refundEntity.amount);
+    const terminalState = event.event === 'refund.processed' || refundEntity.status === 'processed'
+      ? 'processed'
+      : (event.event === 'refund.failed' || refundEntity.status === 'failed' ? 'failed' : '');
+
+    if (!refundId || !Number.isSafeInteger(amountPaise) || amountPaise <= 0 || !terminalState) {
+      return res.json({ success: true, ignored: true });
+    }
 
     let targets = [];
-    if (notesOrderId) targets = await Order.find({ _id: notesOrderId });
-    if (!targets.length && refundId) targets = await Order.find({ 'refund.razorpayRefundId': refundId });
+    if (notesOrderId) {
+      try { targets = await Order.find({ _id: notesOrderId }); }
+      catch (err) { console.warn('[PAYMENT] refund webhook has invalid orderId note'); }
+    }
+    if (!targets.length) {
+      const alternatives = [{ 'refund.razorpayRefundId': refundId }, { 'supportRefund.razorpayRefundId': refundId }, { 'duplicatePayments.refundId': refundId }];
+      if (providerPaymentId) alternatives.push({ 'duplicatePayments.paymentId': providerPaymentId });
+      targets = await Order.find({ $or: alternatives });
+    }
     if (!targets.length) return res.json({ success: true, ignored: true });
 
-    const ids = targets.map(o => o._id);
-    if (event.event === 'refund.processed' || refundEntity.status === 'processed') {
-      await Order.updateMany(
-        { _id: { $in: ids }, partialCodAdvanceAmount: { $gt: 0 }, 'refund.status': 'processing' },
-        { $set: { partialCodAdvanceStatus: 'refunded', 'refund.status': 'completed', 'refund.razorpayRefundId': refundId, 'refund.completedAt': new Date() } }
-      );
-      await Order.updateMany(
-        { _id: { $in: ids }, $or: [{ partialCodAdvanceAmount: { $exists: false } }, { partialCodAdvanceAmount: { $lte: 0 } }] },
-        { $set: { paymentStatus: 'refunded', 'refund.status': 'completed', 'refund.razorpayRefundId': refundId, 'refund.completedAt': new Date() } }
-      );
-      for (const id of ids) {
-        const updated = await Order.findById(id);
-        if (updated) await applyRefundAdjustment(updated);
+    // Backwards compatibility for already-issued refunds whose Razorpay notes
+    // predate refundType. Only infer a lifecycle when the matching stored refund
+    // ID, or exactly one active matching amount/lifecycle, disambiguates it.
+    if (!refundType) {
+      const stored = targets.find(o => String(o.supportRefund?.razorpayRefundId || '') === refundId
+        || String(o.refund?.razorpayRefundId || '') === refundId
+        || (o.duplicatePayments || []).some(d => String(d.refundId || '') === refundId));
+      if (stored) {
+        if (String(stored.supportRefund?.razorpayRefundId || '') === refundId) refundType = 'support';
+        else if ((stored.duplicatePayments || []).some(d => String(d.refundId || '') === refundId)) refundType = 'duplicate_payment';
+        else refundType = Number(stored.partialCodAdvanceAmount || 0) > 0 ? 'partial_cod_cancellation' : 'order_cancellation';
+      } else {
+        const candidates = targets.flatMap(o => {
+          const possible = [];
+          if (o.supportRefund?.status === 'processing' && Math.round(Number(o.supportRefund.amount || 0) * 100) === amountPaise) possible.push('support');
+          if (o.refund?.status === 'processing' && Math.round(Number(o.refund.amount || 0) * 100) === amountPaise) possible.push(Number(o.partialCodAdvanceAmount || 0) > 0 ? 'partial_cod_cancellation' : 'order_cancellation');
+          if ((o.duplicatePayments || []).some(d => d.status === 'processing' && Math.round(Number(d.amount || 0) * 100) === amountPaise && (!providerPaymentId || String(d.paymentId) === providerPaymentId))) possible.push('duplicate_payment');
+          return possible.map(type => ({ order: o, type }));
+        });
+        const uniqueTypes = [...new Set(candidates.map(c => c.type))];
+        if (uniqueTypes.length === 1) refundType = uniqueTypes[0];
+        else {
+          console.warn(`[PAYMENT] refund webhook ${refundId} lacks refundType and cannot be safely disambiguated`);
+          return res.json({ success: true, ignored: true, reason: 'ambiguous_legacy_refund' });
+        }
       }
-    } else if (event.event === 'refund.failed' || refundEntity.status === 'failed') {
-      await Order.updateMany(
-        { _id: { $in: ids } },
-        { $set: { 'refund.status': 'failed', 'refund.razorpayRefundId': refundId, ...(targets.some(o => Number(o.partialCodAdvanceAmount || 0) > 0) ? { partialCodAdvanceStatus: 'refund_failed' } : {}) } }
-      );
+    }
+
+    if (refundType === 'duplicate_payment') {
+      const duplicatePaymentId = String(notes.paymentId || providerPaymentId || '');
+      if (!duplicatePaymentId) return res.json({ success: true, ignored: true });
+      for (const target of targets) {
+        const entry = (target.duplicatePayments || []).find(d => String(d.paymentId) === duplicatePaymentId);
+        if (!entry || Math.round(Number(entry.amount || 0) * 100) !== amountPaise) continue;
+        if (entry.status === 'completed') continue; // Never downgrade a completed refund.
+        if (entry.status !== 'processing') continue;
+        await Order.updateOne(
+          { _id: target._id, duplicatePayments: { $elemMatch: { paymentId: duplicatePaymentId, status: 'processing' } } },
+          { $set: {
+            'duplicatePayments.$.status': terminalState === 'processed' ? 'completed' : 'failed',
+            'duplicatePayments.$.refundId': refundId,
+            'duplicatePayments.$.error': terminalState === 'failed' ? 'Razorpay reported refund.failed' : '',
+          } }
+        );
+      }
+      return res.json({ success: true });
+    }
+
+    if (!['support', 'order_cancellation', 'partial_cod_cancellation'].includes(refundType)) {
+      console.warn(`[PAYMENT] refund webhook ${refundId} has unknown refundType`);
+      return res.json({ success: true, ignored: true, reason: 'unknown_refund_type' });
+    }
+
+    for (const target of targets) {
+      const isSupport = refundType === 'support';
+      const isPartialCod = refundType === 'partial_cod_cancellation';
+      const lifecycle = isSupport ? target.supportRefund : target.refund;
+      if (!lifecycle || Math.round(Number(lifecycle.amount || 0) * 100) !== amountPaise) continue;
+      if (providerPaymentId && target.razorpayPaymentId && String(target.razorpayPaymentId) !== providerPaymentId) continue;
+      const matchingStoredRefundId = String(lifecycle.razorpayRefundId || '');
+      if (matchingStoredRefundId && matchingStoredRefundId !== refundId) continue;
+
+      if (terminalState === 'failed') {
+        if (lifecycle.status !== 'processing') continue;
+        const filter = isSupport
+          ? { _id: target._id, 'supportRefund.status': 'processing', 'supportRefund.amount': lifecycle.amount }
+          : { _id: target._id, 'refund.status': 'processing', 'refund.amount': lifecycle.amount };
+        const set = isSupport
+          ? { 'supportRefund.status': 'failed', 'supportRefund.razorpayRefundId': refundId, 'supportRefund.error': 'Razorpay reported refund.failed' }
+          : { 'refund.status': 'failed', 'refund.razorpayRefundId': refundId, 'refund.reason': 'Razorpay reported refund.failed', ...(isPartialCod ? { partialCodAdvanceStatus: 'refund_failed' } : {}) };
+        await Order.updateOne(filter, { $set: set });
+        continue;
+      }
+
+      if (lifecycle.status === 'completed' && matchingStoredRefundId === refundId) {
+        // The synchronous Razorpay response may have completed the refund before
+        // this webhook arrives. Re-running the ledger adjustment is safe because
+        // the settlement ledger has a unique order/source key.
+        if (isSupport && Number(target.supportRefund.amount || 0) >= Number(target.total || 0) - 0.01) {
+          await applyRefundAdjustment(target).catch(err => console.error(`[REFUND] ledger adjustment retry failed order=${target._id}: ${err.message}`));
+        } else if (!isSupport && !isPartialCod) {
+          await applyRefundAdjustment(target).catch(err => console.error(`[REFUND] ledger adjustment retry failed order=${target._id}: ${err.message}`));
+        }
+        continue;
+      }
+      if (lifecycle.status !== 'processing') continue;
+      if (matchingStoredRefundId && matchingStoredRefundId !== refundId) continue;
+
+      const filter = isSupport
+        ? { _id: target._id, paymentStatus: 'paid', 'supportRefund.status': 'processing', 'supportRefund.amount': lifecycle.amount }
+        : { _id: target._id, status: 'cancelled', 'refund.status': 'processing', 'refund.amount': lifecycle.amount };
+      if (providerPaymentId) filter.razorpayPaymentId = providerPaymentId;
+      const set = isSupport
+        ? {
+            'supportRefund.status': 'completed',
+            'supportRefund.razorpayRefundId': refundId,
+            'supportRefund.completedAt': new Date(),
+            'supportRefund.error': '',
+            ...(Number(target.supportRefund.amount || 0) >= Number(target.total || 0) - 0.01 ? { paymentStatus: 'refunded' } : {}),
+          }
+        : {
+            'refund.status': 'completed',
+            'refund.razorpayRefundId': refundId,
+            'refund.completedAt': new Date(),
+            ...(isPartialCod ? { partialCodAdvanceStatus: 'refunded' } : { paymentStatus: 'refunded' }),
+          };
+      const result = await Order.updateOne(filter, { $set: set });
+      if (result?.matchedCount || result?.modifiedCount) {
+        const updated = await Order.findById(target._id);
+        if (updated && (isPartialCod === false) && (!isSupport || Number(updated.supportRefund?.amount || 0) >= Number(updated.total || 0) - 0.01)) {
+          await applyRefundAdjustment(updated).catch(err => console.error(`[REFUND] ledger adjustment failed order=${target._id}: ${err.message}`));
+        }
+      }
     }
     return res.json({ success: true });
   }
