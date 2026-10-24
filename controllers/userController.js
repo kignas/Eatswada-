@@ -10,6 +10,12 @@ const normalizePhone = (phone) => String(phone || '').trim();
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const isValidEmail = (email) => /^\S+@\S+\.\S+$/.test(email);
 
+// Phone-OTP sign-in/registration is a CUSTOMER flow. A 4-digit SMS code must never be enough
+// to get a token for an admin, vendor or rider account: those sign in through their own
+// endpoints (password + their own limiters/approval checks). Staff phones are treated exactly
+// like unknown phones so these endpoints do not reveal which numbers belong to staff.
+const isCustomerAccount = (user) => (user.role || 'user') === 'user';
+
 const issueOTP = async (user, purpose) => {
   if (user.otp?.lockedUntil && user.otp.lockedUntil > new Date()) {
     const error = new Error('Too many incorrect attempts. Please wait before requesting a new OTP.');
@@ -44,6 +50,10 @@ const sendOTPHandler = asyncHandler(async (req, res) => {
   let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
   if (!user) {
     user = new User({ phone, isPhoneVerified: false });
+  } else if (!isCustomerAccount(user)) {
+    // Same reply as a normal send, but no SMS and nothing stored.
+    console.warn('[OTP] customer OTP requested for a non-customer account; ignored');
+    return res.json({ success: true, message: 'OTP sent successfully' });
   }
 
   await issueOTP(user, 'login');
@@ -55,7 +65,7 @@ const verifyOTPHandler = asyncHandler(async (req, res) => {
   const otp = String(req.body.otp || '').trim();
   console.log(`[OTP-VERIFY] handler phone=${phone.replace(/(\+91|\+?91)?(\d{2})\d{6}(\d{2})$/, '$1$2******$3')} otpLength=${otp.length}`);
   const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
-  if (!user) {
+  if (!user || !isCustomerAccount(user)) {
     console.log('[OTP-VERIFY] user not found');
     return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
   }
@@ -96,7 +106,7 @@ const register = asyncHandler(async (req, res) => {
   // lockout below never triggers (an attacker could keep guessing the OTP here
   // even after /verify-otp locked the account). Same projection as verify-otp.
   let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt +password');
-  if (!user) return res.status(400).json({ success:false, message:'Please verify your mobile number first.' });
+  if (!user || !isCustomerAccount(user)) return res.status(400).json({ success:false, message:'Please verify your mobile number first.' });
   if (user.isPhoneVerified && user.password) return res.status(409).json({ success:false, message:'This account already exists. Please log in.' });
   const otpResult = user.checkOTP(otp, 'login');
   if (!otpResult.ok) {
