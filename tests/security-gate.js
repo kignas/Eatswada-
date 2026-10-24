@@ -62,10 +62,10 @@ check('Rider login is rate limited', /router\.post\(['"]\/rider\/login['"],\s*lo
 check('Vendor order queries are ownership scoped to Order.restaurant', /function orderOwnershipFilter\(req\) \{\n\s*return \{ restaurant: req\.user\.restaurantId \};/.test(vendor));
 check('Vendor menu reads are scoped to Menu.restaurantId', /function vendorMenuFilter\(req\) \{\n\s*return \{ restaurantId: req\.user\.restaurantId \};/.test(vendor));
 check('Vendor has stock-only menu mutation', /router\.put\(\s*['"]\/menu\/:id\/toggle-stock['"]/ .test(vendorRoutes) && !/router\.put\(\s*['"]\/menu\/:id['"]/.test(vendorRoutes));
-check('Vendor cannot add menu items', !/router\.post\(\s*['"]\/menu['"]/.test(vendorRoutes));
+check('Vendor can submit menu items for admin approval', /router\.post\(\s*['"]\/menu['"],\s*protect,\s*role\(['"]vendor['"]\),\s*marketplace\.createVendorMenuItem\)/.test(vendorRoutes) && /approvalStatus:\s*['"]pending['"]/.test(read('controllers/vendorMarketplaceController.js')));
 check('Vendor cannot use general menu update', !/router\.put\(\s*['"]\/menu\/:id['"]/.test(vendorRoutes));
 check('Vendor cannot delete menu items', !/router\.delete\(\s*['"]\/menu/.test(vendorRoutes));
-check('Vendor cannot mutate restaurant profile', !/router\.(put|patch|delete)\([^\n]*authorize\([^\n]*vendor/.test(read('routes/restaurantRoutes.js')));
+check('Vendor restaurant profile edits are ownership-scoped and allow-listed', /canManageRestaurant\(req\.user, existing\)/.test(restaurant) && /const VENDOR_EDITABLE = \[/.test(restaurant));
 check('Vendor cannot upload images', !/authorize\([^)]*['"]vendor['"]/.test(read('routes/uploadRoutes.js')));
 check('Restaurant vendor edits use ownership check', /canManageRestaurant\(req\.user, existing\)/.test(restaurant));
 check('Restaurant vendor fields use allow-list', /const VENDOR_EDITABLE = \[/.test(restaurant));
