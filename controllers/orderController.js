@@ -27,6 +27,7 @@ const { notifyOrderStatus } = require('../services/notificationService');
 const { initiateOrderRefund } = require('../services/refundService');
 const { releaseOrderToRestaurant } = require('../services/restaurantHandoffService');
 const { resolveCheckoutKey, replayFilter, claimCheckoutLock } = require('../services/checkoutIdempotencyService');
+const { assignRiderByAdmin } = require('../services/manualRiderAssignmentService');
 const { cancelOrderByStaff } = require('../services/orderCancellationService');
 const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE } = require('../services/commissionService');
 const { ensureOrderLedger } = require('../services/settlementService');
@@ -1212,61 +1213,34 @@ const createGuestOrder = asyncHandler(async (req, res) => {
   });
 });
 
-const RIDER_LOCKED_FOR_REASSIGN = ['reached_restaurant', 'picked_up', 'out_for_delivery'];
-
 const assignRider = asyncHandler(async (req, res) => {
   const { riderId } = req.body;
   if (!riderId) {
     return res.status(400).json({ success: false, message: 'riderId is required' });
   }
 
-  const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-
-  if (['delivered', 'cancelled'].includes(order.status)) {
-    return res.status(409).json({
-      success: false,
-      message: `Cannot assign a rider — order is already ${order.status}.`,
-    });
-  }
-
-  if (order.rider && RIDER_LOCKED_FOR_REASSIGN.includes(order.riderStatus)) {
-    return res.status(409).json({
-      success: false,
-      message: 'Cannot reassign — this order is already being delivered by a rider.',
-    });
-  }
-
-  const rider = await User.findOne({ _id: riderId, role: 'rider' });
-  if (!rider) return res.status(404).json({ success: false, message: 'Rider not found' });
-  if (!rider.isActive) {
-    return res.status(409).json({ success: false, message: 'This rider is disabled and cannot be assigned.' });
-  }
-
-  order.rider = rider._id;
-  order.riderAssignedAt = new Date();
-  order.riderStatus = 'assigned';
-  order.dispatchStatus = 'assigned';
-  order.dispatchStartedAt = order.dispatchStartedAt || new Date();
-  // Tip belongs to the rider. Set the earning once at assignment so
-  // reassignment cannot double-count the same tip.
-  const baseRiderFee = Number(order.deliveryFee) || 0;
-  const verifiedTip = Number(order.tipAmount) || 0;
-  order.riderEarning = order.riderEarning || (baseRiderFee + verifiedTip);
-  order.riderStatusHistory = order.riderStatusHistory || [];
-  order.riderStatusHistory.push({
-    status: 'assigned',
-    note: `Assigned to ${rider.name} by admin`,
-    at: new Date(),
+  // All order/rider safety checks and the atomic claim live in the service so the
+  // admin override follows the same rules as automatic dispatch.
+  const result = await assignRiderByAdmin({
+    orderId: req.params.id,
+    riderId,
+    adminName: 'admin',
   });
+  if (!result.ok) {
+    return res.status(result.status).json({ success: false, code: result.code, message: result.message });
+  }
 
-  await order.save();
+  const order = result.order;
   await order.populate(ORDER_POPULATE_PATHS);
 
-  // If manually assigned by admin, schedule the 60-second acceptance timeout check
-  scheduleRiderTimeout(order._id, order.rider);
+  // Manually assigned: start the rider-acceptance timeout (not for a no-op repeat).
+  if (!result.alreadyAssigned) scheduleRiderTimeout(order._id, order.rider);
 
-  res.json({ success: true, message: 'Rider assigned successfully.', data: withLiveDisplayData(order) });
+  res.json({
+    success: true,
+    message: result.alreadyAssigned ? 'This rider is already assigned.' : 'Rider assigned successfully.',
+    data: withLiveDisplayData(order),
+  });
 });
 
 module.exports = {
