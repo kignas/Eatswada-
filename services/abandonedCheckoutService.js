@@ -25,6 +25,15 @@ const { notifyOrderStatus } = require('./notificationService');
  *  4. If money still arrives AFTER the cancel, markCheckoutPaid's cancelled-order
  *     path records and refunds it (see tests/payment-fixes.js L and M).
  *
+ * The same sweep also expires a partial-COD order whose ADVANCE was never paid: it
+ * sits `placed` with stock reserved and the restaurant is never told (the handoff only
+ * happens after the advance is captured), so nothing else would ever free it. A late
+ * advance capture is settled through markPartialCodAdvancePaid; if money turns up after
+ * the cancel, the order is marked refund-eligible so the refund path returns it.
+ *
+ * A single failed payment attempt does NOT cancel an order any more (see
+ * paymentController): this sweeper is the one place an unpaid order is expired.
+ *
  * The expiry clock is `updatedAt`, not `createdAt`: retryPayment rewrites the
  * order (new Razorpay order id), which gives the customer a fresh window.
  * Anything that touches the order only ever delays expiry, never hastens it.
@@ -33,6 +42,7 @@ const { notifyOrderStatus } = require('./notificationService');
 const DEFAULT_EXPIRY_MINUTES = 15;
 const MAX_PER_SWEEP = 50;
 const EXPIRY_REASON = 'Payment not completed in time';
+const ADVANCE_EXPIRY_REASON = 'Advance payment not completed in time';
 
 function expiryMs() {
   const minutes = Number(process.env.UNPAID_CHECKOUT_EXPIRY_MINUTES);
@@ -45,12 +55,22 @@ const razorpayIdsOf = (order) => [...new Set([order.razorpayOrderId, ...(order.r
 // order does not spam the log every sweep.
 const warnedMismatch = new Set();
 
+// Two kinds of unpaid order are expired here. Each has its own filter (kept separate so
+// each stays a plain query): a full online checkout, and a partial-COD advance.
+function eligibleFilter(kind, orderId, cutoff) {
+  const base = { status: 'placed', updatedAt: { $lte: cutoff }, ...(orderId ? { _id: orderId } : {}) };
+  if (kind === 'advance') {
+    return { ...base, paymentMethod: 'cod', paymentStatus: 'cod_pending', partialCodAdvanceAmount: { $gt: 0 }, partialCodAdvanceStatus: 'pending' };
+  }
+  return { ...base, paymentStatus: 'pending', paymentMethod: { $ne: 'cod' } };
+}
+
 /**
  * Has any Razorpay order of this checkout actually been paid?
  * Returns 'paid' (checkout settled), 'none' (safe to cancel) or 'hold'
  * (cannot be sure: do not cancel). Throws are caught and turned into 'hold'.
  */
-async function settleLateCapture(order) {
+async function settleLateCapture(order, kind) {
   const ids = razorpayIdsOf(order);
   for (const razorpayOrderId of ids) {
     let attempts;
@@ -62,9 +82,16 @@ async function settleLateCapture(order) {
     const captured = attempts.find(p => p.status === 'captured');
     if (!captured) continue;
 
-    // Same amount rule as the webhook: the sum of every order in this Razorpay order.
-    const group = await Order.find({ $or: [{ razorpayOrderId }, { razorpayOrderIdHistory: razorpayOrderId }] }).sort({ createdAt: 1 });
-    const expected = Math.round(group.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+    // Same amount rule as the webhook: the advance for a partial-COD order, otherwise
+    // the sum of every order in this Razorpay order.
+    let group = [order];
+    let expected;
+    if (kind === 'advance') {
+      expected = Math.round(Number(order.partialCodAdvanceAmount || 0) * 100);
+    } else {
+      group = await Order.find({ $or: [{ razorpayOrderId }, { razorpayOrderIdHistory: razorpayOrderId }] }).sort({ createdAt: 1 });
+      expected = Math.round(group.reduce((sum, o) => sum + Number(o.total || 0), 0) * 100);
+    }
     if (Number(captured.amount) !== expected || String(captured.currency || '') !== 'INR') {
       if (!warnedMismatch.has(captured.id)) {
         warnedMismatch.add(captured.id);
@@ -73,8 +100,13 @@ async function settleLateCapture(order) {
       return 'hold';
     }
     // Lazy require: the controller pulls in most of the app and itself uses services.
-    const { markCheckoutPaid } = require('../controllers/paymentController');
-    await markCheckoutPaid(group, captured.id, captured.amount);
+    const pc = require('../controllers/paymentController');
+    if (kind === 'advance') {
+      const result = await pc.markPartialCodAdvancePaid(order, captured.id);
+      // Anything but a clean "advance paid" (duplicate, already cancelled...) needs a human.
+      return result && result.paid ? 'paid' : 'hold';
+    }
+    await pc.markCheckoutPaid(group, captured.id, captured.amount);
     return 'paid';
   }
   return 'none';
@@ -86,27 +118,35 @@ async function settleLateCapture(order) {
  */
 async function expireAbandonedCheckout(orderId) {
   const cutoff = new Date(Date.now() - expiryMs());
-  const eligible = {
-    _id: orderId,
-    status: 'placed',
-    paymentStatus: 'pending',
-    paymentMethod: { $ne: 'cod' },
-    updatedAt: { $lte: cutoff },
-  };
-  const order = await Order.findOne(eligible).select('_id user total razorpayOrderId razorpayOrderIdHistory').lean();
+  const select = '_id user total paymentMethod partialCodAdvanceAmount razorpayOrderId razorpayOrderIdHistory';
+  let kind = 'online';
+  let eligible = eligibleFilter('online', orderId, cutoff);
+  let order = await Order.findOne(eligible).select(select).lean();
+  if (!order) {
+    kind = 'advance';
+    eligible = eligibleFilter('advance', orderId, cutoff);
+    order = await Order.findOne(eligible).select(select).lean();
+  }
   if (!order) return 'none';
 
-  const verdict = await settleLateCapture(order);
+  const verdict = await settleLateCapture(order, kind);
   if (verdict === 'paid') return 'paid';
   if (verdict === 'hold') return 'hold';
 
-  const expired = await Order.findOneAndUpdate(
-    {
-      ...eligible,
-      // A payment that is being claimed this very moment wins over the sweeper.
-      $or: [{ paymentClaimId: { $exists: false } }, { paymentClaimId: null }, { paymentClaimId: '' }],
-    },
-    {
+  const update = kind === 'advance'
+    ? {
+      $set: {
+        status: 'cancelled',
+        cancelReason: ADVANCE_EXPIRY_REASON,
+        isCancellable: false,
+        // Nobody is at fault for money that never came, but if a late advance capture
+        // lands after this cancel it must be refunded, not kept (see markPartialCodAdvancePaid).
+        partialCodRefundEligible: true,
+      },
+      $inc: { __v: 1 },
+      $push: { statusHistory: { status: 'cancelled', note: 'Automatically cancelled: the COD advance was not paid in time', at: new Date() } },
+    }
+    : {
       $set: {
         status: 'cancelled',
         paymentStatus: 'failed',
@@ -115,7 +155,14 @@ async function expireAbandonedCheckout(orderId) {
       },
       $inc: { __v: 1 },
       $push: { statusHistory: { status: 'cancelled', note: 'Automatically cancelled: online payment was not completed in time', at: new Date() } },
-    },
+    };
+  const expired = await Order.findOneAndUpdate(
+    kind === 'advance'
+      // The advance status is re-checked atomically: an advance captured this very moment wins.
+      ? eligible
+      // A payment that is being claimed this very moment wins over the sweeper.
+      : { ...eligible, $or: [{ paymentClaimId: { $exists: false } }, { paymentClaimId: null }, { paymentClaimId: '' }] },
+    update,
     { new: true },
   );
   if (!expired) return 'none';
@@ -134,12 +181,11 @@ async function recoverAbandonedCheckouts() {
     const cutoff = new Date(Date.now() - expiryMs());
     let stale = [];
     try {
-      stale = await Order.find({
-        status: 'placed',
-        paymentStatus: 'pending',
-        paymentMethod: { $ne: 'cod' },
-        updatedAt: { $lte: cutoff },
-      }).select('_id updatedAt').sort({ updatedAt: 1 }).lean();
+      for (const kind of ['online', 'advance']) {
+        const rows = await Order.find(eligibleFilter(kind, null, cutoff)).select('_id updatedAt').sort({ updatedAt: 1 }).lean();
+        stale.push(...rows);
+      }
+      stale.sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
     } catch (err) {
       console.error('[abandoned-checkout] scan failed:', err.message);
       return result;
@@ -171,4 +217,4 @@ function startAbandonedCheckoutRecovery(intervalMs = 60 * 1000) {
   return recoveryTimer;
 }
 
-module.exports = { expireAbandonedCheckout, recoverAbandonedCheckouts, startAbandonedCheckoutRecovery, EXPIRY_REASON };
+module.exports = { expireAbandonedCheckout, recoverAbandonedCheckouts, startAbandonedCheckoutRecovery, EXPIRY_REASON, ADVANCE_EXPIRY_REASON };
