@@ -37,6 +37,8 @@ function matchesCondition(actual, condition, exists) {
     for (const [op, expected] of Object.entries(condition)) {
       if (op === '$exists') {
         if (exists !== Boolean(expected)) return false;
+      } else if (op === '$elemMatch') {
+        if (!Array.isArray(actual) || !actual.some(item => matches(item, expected))) return false;
       } else if (op === '$nin') {
         if (expected.some(v => valuesEqual(actual, v) || (Array.isArray(actual) && actual.some(x => valuesEqual(x, v))))) return false;
       } else if (op === '$ne') {
@@ -167,9 +169,10 @@ function makeOrderModel() {
       const matched = this.docs.filter(d => matches(d, filter));
       matched.forEach(d => {
         const positionalPayment = filter['duplicatePayments.paymentId'];
-        const paymentId = positionalPayment && typeof positionalPayment === 'object' && positionalPayment.$ne !== undefined
+        const elemPaymentId = filter.duplicatePayments && filter.duplicatePayments.$elemMatch && filter.duplicatePayments.$elemMatch.paymentId;
+        const paymentId = elemPaymentId || (positionalPayment && typeof positionalPayment === 'object' && positionalPayment.$ne !== undefined
           ? null
-          : (typeof positionalPayment === 'string' ? positionalPayment : null);
+          : (typeof positionalPayment === 'string' ? positionalPayment : null));
         applyUpdate(d, { ...update, __positionalPaymentId: paymentId });
       });
       return Promise.resolve({ matchedCount: matched.length, modifiedCount: matched.length });
@@ -177,7 +180,10 @@ function makeOrderModel() {
     updateOne(filter, update) {
       const doc = this.docs.find(d => matches(d, filter));
       if (!doc) return Promise.resolve({ matchedCount: 0, modifiedCount: 0 });
-      applyUpdate(doc, update);
+      const positionalPayment = filter['duplicatePayments.paymentId'];
+      const elemPaymentId = filter.duplicatePayments && filter.duplicatePayments.$elemMatch && filter.duplicatePayments.$elemMatch.paymentId;
+      const paymentId = elemPaymentId || (typeof positionalPayment === 'string' ? positionalPayment : null);
+      applyUpdate(doc, { ...update, __positionalPaymentId: paymentId });
       return Promise.resolve({ matchedCount: 1, modifiedCount: 1 });
     },
   };
