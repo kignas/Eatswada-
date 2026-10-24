@@ -24,6 +24,14 @@ const login = asyncHandler(async (req, res) => {
   if (!user || !user.password || !(await user.matchPassword(password))) {
     return res.status(401).json({ success: false, message: 'Invalid email/mobile number or password.' });
   }
+  // Customer login only. Admin / vendor / rider sign in through their own endpoints (approval
+  // checks + their own limiters), so their credentials must not mint a token here. Same reply as
+  // a wrong password so this endpoint does not reveal which accounts are staff, and it runs
+  // before the disabled-account reply for the same reason.
+  if ((user.role || 'user') !== 'user') {
+    console.warn(`[LOGIN] staff credentials rejected on customer login role=${user.role} id=${user._id}`);
+    return res.status(401).json({ success: false, message: 'Invalid email/mobile number or password.' });
+  }
   if (!user.isActive) return res.status(403).json({ success:false, message:'Your account has been disabled.' });
 
   // Phone is a delivery/contact field in the new customer system. It is no
