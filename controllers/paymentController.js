@@ -95,7 +95,26 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
   // an unpaid checkout before either request writes paymentStatus='paid'.
   // A retry of the SAME payment id is allowed to continue an interrupted claim.
   const liveLeader = liveUnpaid[0] || liveOrders[0];
-  if (!liveLeader) return { liveOrderIds: [], refundedOrderIds: [], duplicate: false };
+  if (!liveLeader) {
+    // Every order in this checkout is already cancelled (customer cancel inside
+    // the 30s window, or an earlier failed attempt cancelled it) but Razorpay
+    // has now CAPTURED money. Record the payment against the cancelled orders
+    // and refund it. Never return silently: that would keep the customer's
+    // money with no order and no refund.
+    // The conditional update makes this safe against a webhook/verify race and
+    // against Razorpay webhook retries (a second call finds nothing to claim,
+    // and initiateOrderRefund itself claims the refund atomically).
+    await Order.updateMany(
+      { _id: { $in: ids }, status: 'cancelled', paymentStatus: { $nin: ['paid', 'refunded'] } },
+      { $set: { paymentStatus: 'paid', razorpayPaymentId: pid } }
+    );
+    const deadOrders = (await Order.find({ _id: { $in: ids } }))
+      .filter(o => o.status === 'cancelled' && o.razorpayPaymentId === pid);
+    for (const o of deadOrders) {
+      await initiateOrderRefund(o, 'Payment received after the order was cancelled');
+    }
+    return { liveOrderIds: [], refundedOrderIds: deadOrders.map(o => o._id), duplicate: false };
+  }
   const claim = await Order.findOneAndUpdate(
     {
       _id: liveLeader._id,
@@ -377,7 +396,10 @@ exports.retryPayment = asyncHandler(async (req, res) => {
           await markPartialCodAdvancePaid(all[0], captured.id);
           return res.status(409).json({ success: false, alreadyPaid: true, partialCodAdvanceStatus: 'paid', message: 'Your earlier advance payment went through. No need to pay again.' });
         }
-        await markCheckoutPaid(all, captured.id, captured.amount);
+        const settled = await markCheckoutPaid(all, captured.id, captured.amount);
+        if (!settled.liveOrderIds.length && settled.refundedOrderIds.length) {
+          return res.status(409).json({ success: false, refunded: true, paymentStatus: 'refunded', message: 'This order was cancelled, so your payment is being refunded. Please place a new order.' });
+        }
         return res.status(409).json({ success: false, alreadyPaid: true, paymentStatus: 'paid', message: 'Your earlier payment went through. No need to pay again.' });
       }
     }
