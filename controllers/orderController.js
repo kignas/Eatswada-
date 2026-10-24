@@ -26,6 +26,7 @@ const { operationalStatus } = require('../services/restaurantHours');
 const { notifyOrderStatus } = require('../services/notificationService');
 const { initiateOrderRefund } = require('../services/refundService');
 const { releaseOrderToRestaurant } = require('../services/restaurantHandoffService');
+const { resolveCheckoutKey, replayFilter, claimCheckoutLock } = require('../services/checkoutIdempotencyService');
 const { cancelOrderByStaff } = require('../services/orderCancellationService');
 const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE } = require('../services/commissionService');
 const { ensureOrderLedger } = require('../services/settlementService');
@@ -490,9 +491,12 @@ const createOrder = asyncHandler(async (req, res) => {
   // of creating a second set. Covers the whole checkout (possibly several
   // restaurant orders). NOTE: this closes sequential retries; the frontend
   // button-lock covers the rarer truly-concurrent double POST.
-  const idempotencyKey = String(req.headers['idempotency-key'] || req.body.idempotencyKey || '').trim().slice(0, 100);
-  if (idempotencyKey) {
-    const existing = await Order.find({ user: req.user._id, idempotencyKey })
+  // When the client sends no key (older builds, double-tap), the server derives one
+  // from user + cart + address + payment details and dedupes inside a short window.
+  const checkoutKey = resolveCheckoutKey(req.user._id, req);
+  const idempotencyKey = checkoutKey.key;
+  {
+    const existing = await Order.find(replayFilter(req.user._id, checkoutKey))
       .select('+deliveryOtp')
       .populate(ORDER_POPULATE_PATHS)
       .sort({ createdAt: 1 });
@@ -693,28 +697,22 @@ const createOrder = asyncHandler(async (req, res) => {
   // order set. The order-replay read near the top of createOrder still handles
   // ordinary sequential retries; this only closes the concurrent double-tap
   // window the old check-then-write left open.
-  const idempotencyLockId = idempotencyKey ? `${req.user._id}:${idempotencyKey}` : null;
-  if (idempotencyLockId) {
-    try {
-      await IdempotencyKey.create({ _id: idempotencyLockId, user: req.user._id, key: idempotencyKey });
-    } catch (err) {
-      if (err && err.code === 11000) {
-        // Another request already claimed this key. If it has finished creating
-        // the orders, replay them; otherwise tell the client to wait rather than
-        // duplicating the checkout.
-        const inFlight = await Order.find({ user: req.user._id, idempotencyKey })
-          .select('+deliveryOtp')
-          .populate(ORDER_POPULATE_PATHS)
-          .sort({ createdAt: 1 });
-        if (inFlight.length) {
-          return res.status(200).json(buildCheckoutResponse(inFlight, true));
-        }
-        const e = new Error('This order is already being placed. Please wait a moment, then check My Orders.');
-        e.statusCode = 409;
-        throw e;
-      }
-      throw err;
+  const idempotencyLockId = `${req.user._id}:${idempotencyKey}`;
+  const lockClaimed = await claimCheckoutLock(IdempotencyKey, { userId: req.user._id, ...checkoutKey });
+  if (!lockClaimed) {
+    // Another request already claimed this checkout. If it has finished creating
+    // the orders, replay them; otherwise tell the client to wait rather than
+    // duplicating the checkout.
+    const inFlight = await Order.find(replayFilter(req.user._id, checkoutKey))
+      .select('+deliveryOtp')
+      .populate(ORDER_POPULATE_PATHS)
+      .sort({ createdAt: 1 });
+    if (inFlight.length) {
+      return res.status(200).json(buildCheckoutResponse(inFlight, true));
     }
+    const e = new Error('This order is already being placed. Please wait a moment, then check My Orders.');
+    e.statusCode = 409;
+    throw e;
   }
 
   // ── Create one order per restaurant ─────────────────────────────────
