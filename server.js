@@ -123,7 +123,10 @@ const globalLimiter = rateLimit({
 app.use(globalLimiter);
 
 // Razorpay webhooks need the exact raw request bytes for HMAC verification.
-app.post('/api/payments/webhook', express.raw({ type: 'application/json', limit: '1mb' }), handleWebhook);
+// Both supported API prefixes must use the raw parser BEFORE express.json().
+const razorpayWebhookRawBody = express.raw({ type: 'application/json', limit: '1mb' });
+app.post('/api/payments/webhook', razorpayWebhookRawBody, handleWebhook);
+app.post('/api/v1/payments/webhook', razorpayWebhookRawBody, handleWebhook);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
