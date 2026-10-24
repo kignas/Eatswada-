@@ -43,6 +43,14 @@ function matchesCondition(actual, condition, exists) {
         if (valuesEqual(actual, expected)) return false;
       } else if (op === '$in') {
         if (!(expected.some(v => valuesEqual(actual, v) || (Array.isArray(actual) && actual.some(x => valuesEqual(x, v)))))) return false;
+      } else if (['$gt', '$gte', '$lt', '$lte'].includes(op)) {
+        const toNum = (v) => (v instanceof Date ? v.getTime() : (typeof v === 'string' && !isNaN(Date.parse(v)) && isNaN(Number(v)) ? Date.parse(v) : Number(v)));
+        const a = toNum(actual), b = toNum(expected);
+        if (actual == null || Number.isNaN(a) || Number.isNaN(b)) return false;
+        if (op === '$gt' && !(a > b)) return false;
+        if (op === '$gte' && !(a >= b)) return false;
+        if (op === '$lt' && !(a < b)) return false;
+        if (op === '$lte' && !(a <= b)) return false;
       } else {
         return false;
       }
