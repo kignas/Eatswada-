@@ -260,6 +260,7 @@ let server;
 
 const { startAssignmentRecovery } = require('./services/riderAssignmentService');
 const { startRestaurantResponseRecovery } = require('./services/restaurantOrderTimeoutService');
+const { startAbandonedCheckoutRecovery } = require('./services/abandonedCheckoutService');
 const { startMenuStockScheduler } = require('./services/menuStockScheduler');
 
 connectDB().then(() => {
@@ -269,6 +270,9 @@ connectDB().then(() => {
   startAssignmentRecovery();
   // Durable safety net for the restaurant's 5-minute response window.
   startRestaurantResponseRecovery();
+  // Expire unpaid online checkouts (after a Razorpay late-capture check) so
+  // abandoned UPI orders do not hold reserved stock forever.
+  startAbandonedCheckoutRecovery();
   // Recover scheduled automatic menu restocks after restarts and every minute.
   startMenuStockScheduler();
 
