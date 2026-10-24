@@ -7,27 +7,37 @@ const { makeOrderModel } = require('./helpers/fakeOrderModel');
 const ROOT = path.join(__dirname, '..');
 
 const Order = makeOrderModel();
-const calls = { refunds: [], notified: [], coupons: [], rzpOrders: 0 };
+const calls = { refunds: [], notified: [], coupons: [], cartClears: 0, adjustments: [], rzpOrders: 0 };
 let orderPayments = [];
 let paymentToFetch = null;
+let refundFailure = null;
 const paymentService = {
   assertConfigured() {},
   async createRazorpayOrder(amount) { calls.rzpOrders++; return { id: 'order_NEW' + calls.rzpOrders, amount: Math.round(amount * 100), currency: 'INR' }; },
   async fetchPayment() { return paymentToFetch; },
   async fetchOrderPayments() { return orderPayments; },
-  async refundPayment(pid, amount, notes) { await new Promise(r => setTimeout(r, 5)); calls.refunds.push({ pid, amount, notes }); return { id: 'rfnd_' + calls.refunds.length, status: 'pending' }; },
+  async refundPayment(pid, amount, notes) { await new Promise(r => setTimeout(r, 5)); if (refundFailure) throw refundFailure; calls.refunds.push({ pid, amount, notes }); return { id: 'rfnd_' + calls.refunds.length, status: 'pending' }; },
   verifyRazorpaySignature: () => true,
   verifyWebhookSignature: () => true,
   toPaise: (n) => Math.round(n * 100),
 };
 const stubs = {
   [path.join(ROOT, 'models/Order.js')]: Order,
-  [path.join(ROOT, 'models/Cart.js')]: { async findOneAndUpdate() {} },
+  [path.join(ROOT, 'models/Cart.js')]: { async findOneAndUpdate() { calls.cartClears++; } },
   [path.join(ROOT, 'models/Coupon.js')]: {},
+  [path.join(ROOT, 'models/SettlementLedger.js')]: {},
+  [path.join(ROOT, 'models/RiderLedger.js')]: {},
+  [path.join(ROOT, 'models/User.js')]: {},
   [path.join(ROOT, 'services/paymentService.js')]: paymentService,
-  [path.join(ROOT, 'services/settlementService.js')]: { async applyRefundAdjustment() {} },
+  [path.join(ROOT, 'services/settlementService.js')]: {
+    async applyRefundAdjustment(order) { const id = String(order?._id); if (id && !calls.adjustments.includes(id)) calls.adjustments.push(id); },
+    async recordRestaurantPaymentFeeCharge() {},
+  },
   [path.join(ROOT, 'services/couponUsageService.js')]: { async claimCouponUsage(x) { calls.coupons.push(x); } },
-  [path.join(ROOT, 'services/pushService.js')]: { notifyRestaurantNewOrder: async (o) => calls.notified.push(o._id), notifyAdminsNewOrder: async () => {} },
+  [path.join(ROOT, 'services/pushService.js')]: {
+    notifyRestaurantNewOrder: async (o) => { if (!calls.notified.includes(String(o._id))) calls.notified.push(String(o._id)); },
+    notifyAdminsNewOrder: async () => {},
+  },
   'express-async-handler': (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)),
 };
 const origResolve = Module._resolveFilename;
@@ -42,13 +52,75 @@ const { initiateOrderRefund } = require(path.join(ROOT, 'services/refundService.
 const pc = require(path.join(ROOT, 'controllers/paymentController.js'));
 
 const base = (o) => ({ user: 'u1', paymentMethod: 'upi', paymentStatus: 'pending', status: 'placed', razorpayOrderId: 'order_O1', razorpayOrderIdHistory: [], razorpayPaymentId: '', paymentClaimId: '', refund: { status: 'none' }, duplicatePayments: [], total: 100, ...o });
-const reset = () => { Order.docs.length = 0; calls.refunds.length = 0; calls.notified.length = 0; calls.coupons.length = 0; calls.rzpOrders = 0; orderPayments = []; };
+const reset = () => { Order.docs.length = 0; calls.refunds.length = 0; calls.notified.length = 0; calls.coupons.length = 0; calls.cartClears = 0; calls.adjustments.length = 0; calls.rzpOrders = 0; orderPayments = []; paymentToFetch = null; refundFailure = null; };
 const res = () => { const r = { code: 200 }; r.status = (c) => { r.code = c; return r; }; r.json = (b) => { r.body = b; return r; }; return r; };
 const webhook = (event, entity) => pc.handleWebhook({ body: Buffer.from(JSON.stringify({ event, payload: { payment: { entity } } })), get: () => 'sig' }, res(), (e) => { throw e; });
+const refundWebhook = (event, entity) => pc.handleWebhook({ body: Buffer.from(JSON.stringify({ event, payload: { refund: { entity } } })), get: () => 'sig' }, res(), (e) => { throw e; });
 
 (async () => {
   let pass = 0;
   const t = async (name, fn) => { reset(); await fn(); pass++; console.log('PASS', name); };
+
+  await t('P2-A: a same-payment webhook retry resumes coupon/cart/notification side effects', async () => {
+    Order.insert(base({ _id: 'REPLAY1', paymentStatus: 'paid', razorpayPaymentId: 'pay_same', paymentClaimId: '', coupon: { couponId: 'c1', discount: 5 } }));
+    await webhook('payment.captured', { id: 'pay_same', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'captured' });
+    assert.strictEqual(Order.get('REPLAY1').paymentStatus, 'paid');
+    assert.strictEqual(calls.coupons.length, 1, 'coupon finalization must be replayed');
+    assert.strictEqual(calls.cartClears, 1, 'cart cleanup must be replayed');
+    assert.deepStrictEqual(calls.notified, ['REPLAY1'], 'notification enqueue must be replayed');
+  });
+
+  await t('P2-B: missing raw Buffer fails closed before webhook signature verification', async () => {
+    const r = res();
+    await pc.handleWebhook({ body: { event: 'payment.captured' }, get: () => 'sig' }, r, (e) => { throw e; });
+    assert.strictEqual(r.code, 400);
+    assert.match(r.body.message, /Raw webhook body/);
+  });
+
+  await t('P2-C: partial support refund webhook does not mark whole order refunded or claw back full settlement', async () => {
+    Order.insert(base({ _id: 'SUPPORT_PARTIAL', status: 'delivered', paymentStatus: 'paid', razorpayPaymentId: 'pay_support', supportRefund: { status: 'processing', amount: 20, razorpayRefundId: '' } }));
+    await refundWebhook('refund.processed', { id: 'rfnd_support_partial', payment_id: 'pay_support', amount: 2000, currency: 'INR', status: 'processed', notes: { orderId: 'SUPPORT_PARTIAL', refundType: 'support', amountPaise: '2000' } });
+    assert.strictEqual(Order.get('SUPPORT_PARTIAL').supportRefund.status, 'completed');
+    assert.strictEqual(Order.get('SUPPORT_PARTIAL').paymentStatus, 'paid');
+    assert.strictEqual(Order.get('SUPPORT_PARTIAL').refund.status, 'none');
+    assert.deepStrictEqual(calls.adjustments, []);
+  });
+
+  await t('P2-D: completed full support refund applies one idempotent settlement adjustment', async () => {
+    Order.insert(base({ _id: 'SUPPORT_FULL', status: 'delivered', paymentStatus: 'paid', razorpayPaymentId: 'pay_support_full', supportRefund: { status: 'processing', amount: 100, razorpayRefundId: '' } }));
+    const entity = { id: 'rfnd_support_full', payment_id: 'pay_support_full', amount: 10000, currency: 'INR', status: 'processed', notes: { orderId: 'SUPPORT_FULL', refundType: 'support', amountPaise: '10000' } };
+    await refundWebhook('refund.processed', entity);
+    assert.strictEqual(Order.get('SUPPORT_FULL').paymentStatus, 'refunded');
+    assert.strictEqual(Order.get('SUPPORT_FULL').supportRefund.status, 'completed');
+    await refundWebhook('refund.failed', { ...entity, status: 'failed' });
+    assert.strictEqual(Order.get('SUPPORT_FULL').supportRefund.status, 'completed', 'late failure must not downgrade completed state');
+    assert.deepStrictEqual(calls.adjustments, ['SUPPORT_FULL']);
+  });
+
+  await t('P2-E: partial-COD refund webhook refunds only advance state, not COD order payment status', async () => {
+    Order.insert(base({ _id: 'PCOD_REFUND', paymentMethod: 'cod', paymentStatus: 'cod_pending', status: 'cancelled', razorpayPaymentId: 'pay_advance', partialCodAdvanceAmount: 100, partialCodAdvanceStatus: 'refund_processing', refund: { status: 'processing', amount: 100, razorpayRefundId: '' } }));
+    await refundWebhook('refund.processed', { id: 'rfnd_advance', payment_id: 'pay_advance', amount: 10000, currency: 'INR', status: 'processed', notes: { orderId: 'PCOD_REFUND', refundType: 'partial_cod_cancellation', amountPaise: '10000' } });
+    assert.strictEqual(Order.get('PCOD_REFUND').partialCodAdvanceStatus, 'refunded');
+    assert.strictEqual(Order.get('PCOD_REFUND').paymentStatus, 'cod_pending');
+    assert.strictEqual(Order.get('PCOD_REFUND').refund.status, 'completed');
+  });
+
+  await t('P2-F: duplicate payment refund webhook updates only the matching payment record', async () => {
+    Order.insert(base({ _id: 'DUP_REFUND', paymentStatus: 'paid', razorpayPaymentId: 'pay_original', duplicatePayments: [{ paymentId: 'pay_duplicate', amount: 100, status: 'processing', refundId: '' }] }));
+    await refundWebhook('refund.processed', { id: 'rfnd_duplicate', payment_id: 'pay_duplicate', amount: 10000, currency: 'INR', status: 'processed', notes: { orderId: 'DUP_REFUND', refundType: 'duplicate_payment', paymentId: 'pay_duplicate', amountPaise: '10000' } });
+    assert.strictEqual(Order.get('DUP_REFUND').duplicatePayments[0].status, 'completed');
+    assert.strictEqual(Order.get('DUP_REFUND').duplicatePayments[0].refundId, 'rfnd_duplicate');
+    assert.strictEqual(Order.get('DUP_REFUND').paymentStatus, 'paid');
+  });
+
+  await t('P2-G: timeout after refund submission remains processing for reconciliation', async () => {
+    Order.insert(base({ _id: 'REFUND_TIMEOUT', status: 'cancelled', paymentStatus: 'paid', razorpayPaymentId: 'pay_timeout' }));
+    refundFailure = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    const result = await initiateOrderRefund({ ...Order.get('REFUND_TIMEOUT') }, 'timeout test');
+    assert.strictEqual(result.outcomeUnknown, true);
+    assert.strictEqual(Order.get('REFUND_TIMEOUT').refund.status, 'processing');
+    assert.match(Order.get('REFUND_TIMEOUT').refund.reason, /outcome unknown/i);
+  });
 
   await t('A: two simultaneous refunds for one order → Razorpay called once', async () => {
     Order.insert(base({ _id: 'A', status: 'cancelled', paymentStatus: 'paid', razorpayPaymentId: 'pay_1' }));

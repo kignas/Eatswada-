@@ -14,8 +14,8 @@ const restaurantController = read('controllers/restaurantController.js');
 const reservationService = read('services/inventoryReservationService.js');
 const vendorController = read('controllers/vendorController.js');
 
-assert.match(adminRoutes, /router\.get\('\/inventory',\s*protect,\s*authorize\('admin'\),\s*getAllRestaurantInventory\)/);
-assert.match(adminRoutes, /router\.patch\('\/inventory\/:itemId',\s*protect,\s*authorize\('admin'\),\s*updateAnyRestaurantInventory\)/);
+assert.match(adminRoutes, /router\.get\('\/inventory',\s*protect,\s*authorize\('admin'\),\s*requirePermission\('restaurants\.manage'\),\s*getAllRestaurantInventory\)/);
+assert.match(adminRoutes, /router\.patch\('\/inventory\/:itemId',\s*protect,\s*authorize\('admin'\),\s*requirePermission\('restaurants\.manage'\),\s*updateAnyRestaurantInventory\)/);
 assert.match(adminRoutes, /customers\/:userId\/saved-locations/);
 assert.match(adminController, /exports\.getCustomerSavedLocations/);
 assert.match(adminController, /Address\.find\(\{user:user\._id\}\)/);
@@ -26,7 +26,7 @@ assert.match(menuModel, /manualAvailability:\s*\{\s*type:\s*Boolean,\s*default:\
 assert.match(orderController, /menuItem\.trackStock === true && Number\(menuItem\.stockQuantity \|\| 0\) <= 0/);
 assert.match(orderController, /p\.restaurant\?\.codEnabled !== true/);
 assert.match(restaurantController, /payload\.inStock = payload\.manualAvailability && quantity > 0/);
-assert.match(reservationService, /stockQuantity:\{\$gte:quantity\}/);
+assert.match(reservationService, /stockQuantity:\s*\{\s*\$gte:\s*quantity\s*\}/);
 assert.match(reservationService, /checkout_stock_reserved/);
 assert.match(orderController, /reserveOrderInventory\(order, req\.user\._id\)/);
 assert.match(vendorController, /order\.inventoryReservedAt && !order\.inventoryReleasedAt/);
