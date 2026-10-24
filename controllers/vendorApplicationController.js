@@ -344,8 +344,11 @@ exports.getVendorApplicationStatus = asyncHandler(async (req, res) => {
     return res.status(410).json({ success: false, message: 'Application status token has expired.' });
   }
 
-  const hash = crypto.createHash('sha256').update(token).digest('hex');
-  if (!crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(application.statusTokenHash))) {
+  // Customer-owned applications are created with no status token, and timingSafeEqual throws on a missing
+  // value or a length mismatch. Compare only equal-length buffers; every non-match is the same plain 404.
+  const hash = Buffer.from(crypto.createHash('sha256').update(token).digest('hex'));
+  const stored = Buffer.from(typeof application.statusTokenHash === 'string' ? application.statusTokenHash : '');
+  if (hash.length !== stored.length || !crypto.timingSafeEqual(hash, stored)) {
     return res.status(404).json({ success: false, message: 'Application not found.' });
   }
 
