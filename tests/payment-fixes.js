@@ -101,6 +101,36 @@ const webhook = (event, entity) => pc.handleWebhook({ body: Buffer.from(JSON.str
     assert.deepStrictEqual(calls.notified, ['R1']);
   });
 
+  await t('L: payment.failed then SUCCESS on same Razorpay order (cancelled checkout) → captured money is refunded, never kept', async () => {
+    Order.insert(base({ _id: 'J1', total: 100 }));
+    await webhook('payment.failed', { id: 'pay_try1', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'failed' });
+    assert.strictEqual(Order.get('J1').status, 'cancelled');
+    await webhook('payment.captured', { id: 'pay_try2', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'captured' });
+    assert.strictEqual(calls.refunds.length, 1, 'captured money on a cancelled checkout must be refunded');
+    assert.strictEqual(calls.refunds[0].pid, 'pay_try2');
+    assert.strictEqual(calls.refunds[0].amount, 100);
+    assert.deepStrictEqual(calls.notified, [], 'vendor must not be notified for a cancelled order');
+    assert.strictEqual(Order.get('J1').status, 'cancelled');
+    // Razorpay retries the webhook → still exactly one refund
+    await webhook('payment.captured', { id: 'pay_try2', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'captured' });
+    assert.strictEqual(calls.refunds.length, 1);
+  });
+
+  await t('M: customer cancels inside 30s window, UPI captures late → refunded once (webhook + verify race)', async () => {
+    Order.insert(base({ _id: 'K1', total: 60, status: 'cancelled', cancelReason: 'Cancelled by customer' }));
+    paymentToFetch = { id: 'pay_k', order_id: 'order_O1', amount: 6000, currency: 'INR', status: 'captured' };
+    const req = { body: { orderId: 'K1', razorpayPaymentId: 'pay_k', razorpayOrderId: 'order_O1', razorpaySignature: 's' }, user: { _id: 'u1' } };
+    const r = res();
+    await Promise.all([
+      pc.verifyPayment(req, r, (e) => { throw e; }),
+      webhook('payment.captured', { id: 'pay_k', order_id: 'order_O1', amount: 6000, currency: 'INR', status: 'captured' }),
+    ]);
+    assert.strictEqual(calls.refunds.length, 1);
+    assert.strictEqual(calls.refunds[0].amount, 60);
+    assert.deepStrictEqual(calls.notified, []);
+    assert.ok(Array.isArray(r.body?.refundedOrderIds) && r.body.refundedOrderIds.length === 1, 'verify must tell the app the money is being refunded');
+  });
+
   await t('E: retry detects that the earlier payment already went through', async () => {
     Order.insert(base({ _id: 'E1', total: 90 }));
     orderPayments = [{ id: 'pay_LATE', status: 'captured', amount: 9000, currency: 'INR' }];
@@ -163,5 +193,5 @@ const webhook = (event, entity) => pc.handleWebhook({ body: Buffer.from(JSON.str
     assert.strictEqual(calls.notified.length, 1);
   });
 
-  console.log(`\n${pass}/10 scenarios passed`);
+  console.log(`\n${pass} scenarios passed`);
 })().catch(e => { console.error('FAIL', e); process.exit(1); });
