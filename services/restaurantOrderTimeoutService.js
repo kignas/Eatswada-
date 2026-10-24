@@ -26,6 +26,8 @@ async function expireUnrespondedOrder(orderId) {
         cancellationResponsibility: 'restaurant',
         isCancellable: false,
         restaurantChargeReason: 'Restaurant did not respond within the 5-minute order acceptance window',
+        // Restaurant fault: a captured partial-COD advance is refundable.
+        partialCodRefundEligible: true,
       },
       $inc: { __v: 1 },
       $push: { statusHistory: { status: 'cancelled', note: 'Automatically cancelled: restaurant did not respond within 5 minutes' } },
