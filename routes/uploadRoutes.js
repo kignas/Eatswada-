@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/permissionMiddleware');
 const upload = require('../middleware/uploadMiddleware');
 const { uploadImage, uploadCustomerMedia } = require('../controllers/uploadController');
 const customerMediaUpload = require('../middleware/customerMediaUpload');
@@ -43,6 +44,6 @@ router.post('/customer-media', protect, authorize('user'), handleCustomerMediaUp
 // @route   POST /api/upload/:type
 // @desc    Upload an image to Cloudinary. :type is one of restaurants | menu | categories | banners | restaurantDelivery
 // @access  Private (admin)
-router.post('/:type', protect, authorize('admin'), handleUpload, uploadImage);
+router.post('/:type', protect, authorize('admin'), requirePermission('content.manage'), handleUpload, uploadImage);
 
 module.exports = router;

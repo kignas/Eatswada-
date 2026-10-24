@@ -23,7 +23,7 @@ const {
 
 // 2. Import Auth Middleware
 const { protect, authorize } = require('../middleware/authMiddleware');
-const { requirePermission } = require('../middleware/permissionMiddleware');
+const { requirePermission, requirePermissionForAdmin } = require('../middleware/permissionMiddleware');
 
 // ==========================================
 // 🌐 PUBLIC ROUTES (Visible to Customers)
@@ -48,20 +48,20 @@ router.get('/:id/menu', getMenu); // This uses the Swiggy-style formatter we bui
 
 // Restaurant Management
 // createRestaurant stays admin-only — vendor self-onboarding wasn't in scope here.
-router.post('/', protect, authorize('admin'), createRestaurant);
+router.post('/', protect, authorize('admin'), requirePermission('restaurants.manage'), createRestaurant);
 // updateRestaurant/deleteRestaurant/updateRestaurantAvailability now also allow
 // 'vendor' — the controller enforces that a vendor can only touch their own
 // restaurant (canManageRestaurant), so admin-or-owner is the real gate.
-router.put('/:id', protect, authorize('admin', 'vendor'), updateRestaurant);
+router.put('/:id', protect, authorize('admin', 'vendor'), requirePermissionForAdmin('restaurants.manage'), updateRestaurant);
 router.delete('/:id', protect, authorize('admin'), requirePermission('restaurants.delete'), deleteRestaurant);
-router.patch('/:id/availability', protect, authorize('admin'), updateRestaurantAvailability);
+router.patch('/:id/availability', protect, authorize('admin'), requirePermission('restaurants.manage'), updateRestaurantAvailability);
 
 // Menu Item Management
 // Same admin-or-owner pattern: route allows both roles, controller checks
 // ownership of the item's parent restaurant.
-router.post('/:id/menu', protect, authorize('admin'), addMenuItem);
-router.put('/:id/menu/:itemId', protect, authorize('admin'), updateMenuItem);
-router.delete('/:id/menu/:itemId', protect, authorize('admin'), deleteMenuItem);
-router.patch('/:id/menu/:itemId/availability', protect, authorize('admin'), updateMenuItemAvailability);
+router.post('/:id/menu', protect, authorize('admin'), requirePermission('catalog.manage'), addMenuItem);
+router.put('/:id/menu/:itemId', protect, authorize('admin'), requirePermission('catalog.manage'), updateMenuItem);
+router.delete('/:id/menu/:itemId', protect, authorize('admin'), requirePermission('catalog.manage'), deleteMenuItem);
+router.patch('/:id/menu/:itemId/availability', protect, authorize('admin'), requirePermission('catalog.manage'), updateMenuItemAvailability);
 
 module.exports = router;

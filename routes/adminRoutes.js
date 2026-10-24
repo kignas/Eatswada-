@@ -1,4 +1,4 @@
-const { requirePermission } = require('../middleware/permissionMiddleware');
+const { requirePermission, requireFullAdmin } = require('../middleware/permissionMiddleware');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const adminMarketplace = require('../controllers/adminMarketplaceController');
@@ -36,29 +36,29 @@ const adminLoginLimiter = rateLimit({
 });
 
 router.post('/login', adminLoginLimiter, adminLogin);
-router.get('/metrics', protect, authorize('admin'), getMetrics);
-router.get('/dashboard/recent-orders', protect, authorize('admin'), getRecentOrders);
-router.get('/dashboard/peak-hours', protect, authorize('admin'), getPeakHours);
-router.get('/orders', protect, authorize('admin'), getOrders);
-router.patch('/orders/:id/status', protect, authorize('admin'), updateOrderStatus);
-router.patch('/orders/:id/cancel', protect, authorize('admin'), cancelOrder);
+router.get('/metrics', protect, authorize('admin'), requirePermission('analytics.view'), getMetrics);
+router.get('/dashboard/recent-orders', protect, authorize('admin'), requirePermission('orders.manage'), getRecentOrders);
+router.get('/dashboard/peak-hours', protect, authorize('admin'), requirePermission('analytics.view'), getPeakHours);
+router.get('/orders', protect, authorize('admin'), requirePermission('orders.manage'), getOrders);
+router.patch('/orders/:id/status', protect, authorize('admin'), requirePermission('orders.manage'), updateOrderStatus);
+router.patch('/orders/:id/cancel', protect, authorize('admin'), requirePermission('orders.manage'), cancelOrder);
 // Pillar 7 — live order war-room overrides.
 router.put('/orders/:id/force-accept', protect, authorize('admin'), requirePermission('orders.manage'), forceAcceptOrder);
 router.put('/orders/:id/force-dispatch', protect, authorize('admin'), requirePermission('orders.manage'), forceDispatchOrder);
 router.put('/orders/:id/force-deliver', protect, authorize('admin'), requirePermission('orders.manage'), forceDeliverOrder);
 // Pillar 1 — live delivery capacity for the dashboard shortage circuit breaker.
-router.get('/delivery-capacity', protect, authorize('admin'), getDeliveryCapacity);
-router.get('/restaurants', protect, authorize('admin'), getRestaurants);
+router.get('/delivery-capacity', protect, authorize('admin'), requirePermission('orders.manage'), getDeliveryCapacity);
+router.get('/restaurants', protect, authorize('admin'), requirePermission('restaurants.manage'), getRestaurants);
 // Reuse the restaurant settings reader so admin UI can inspect FSSAI data (it is already asyncHandler-wrapped).
-router.get('/restaurants/:id/fssai', protect, authorize('admin'), getRestaurantDeliverySettings);
-router.patch('/restaurants/:id/fssai', protect, authorize('admin'), updateRestaurantFssai);
-router.get('/restaurants/:id/commission', protect, authorize('admin'), getRestaurantCommission);
-router.patch('/restaurants/:id/commission', protect, authorize('admin'), updateRestaurantCommission);
-router.get('/restaurants/:id/delivery-settings', protect, authorize('admin'), getRestaurantDeliverySettings);
-router.patch('/restaurants/:id/delivery-settings', protect, authorize('admin'), updateRestaurantDeliverySettings);
+router.get('/restaurants/:id/fssai', protect, authorize('admin'), requirePermission('restaurants.manage'), getRestaurantDeliverySettings);
+router.patch('/restaurants/:id/fssai', protect, authorize('admin'), requirePermission('restaurants.manage'), updateRestaurantFssai);
+router.get('/restaurants/:id/commission', protect, authorize('admin'), requirePermission('finance.manage'), getRestaurantCommission);
+router.patch('/restaurants/:id/commission', protect, authorize('admin'), requirePermission('finance.manage'), updateRestaurantCommission);
+router.get('/restaurants/:id/delivery-settings', protect, authorize('admin'), requirePermission('restaurants.manage'), getRestaurantDeliverySettings);
+router.patch('/restaurants/:id/delivery-settings', protect, authorize('admin'), requirePermission('restaurants.manage'), updateRestaurantDeliverySettings);
 // Vendor payouts move real money (mark paid / reject releases or settles ledger
 // entries), so they need the finance permission like every /settlements route.
-// Admins with an empty permissions list keep full access.
+// Full access requires the explicit '*' permission; an empty list grants nothing.
 router.get('/payout-requests', protect, authorize('admin'), requirePermission('finance.manage'), adminMarketplace.listPayoutRequests);
 router.get('/payout-requests/:id/reconciliation', protect, authorize('admin'), requirePermission('finance.manage'), adminMarketplace.getPayoutReconciliation);
 router.patch('/payout-requests/:id', protect, authorize('admin'), requirePermission('finance.manage'), adminMarketplace.updatePayoutRequest);
@@ -71,9 +71,9 @@ router.post('/support/tickets/:id/reply', protect, authorize('admin'), requirePe
 router.patch('/support/tickets/:id/assign', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.assignSupportTicket);
 router.post('/support/tickets/:id/typing', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.setSupportTyping);
 router.get('/support/metrics', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.getSupportMetrics);
-router.patch('/restaurants/:id/toggle', protect, authorize('admin'), toggleRestaurant);
-router.get('/customers', protect, authorize('admin'), getCustomers);
-router.get('/customers/:userId/saved-locations', protect, authorize('admin'), getCustomerSavedLocations);
+router.patch('/restaurants/:id/toggle', protect, authorize('admin'), requirePermission('restaurants.manage'), toggleRestaurant);
+router.get('/customers', protect, authorize('admin'), requirePermission('customers.view'), getCustomers);
+router.get('/customers/:userId/saved-locations', protect, authorize('admin'), requirePermission('customers.view'), getCustomerSavedLocations);
 // Pillar 3 / 7 — COD abuse review queue, per-customer COD terms, account freeze.
 router.get('/customers/trust', protect, authorize('admin'), requirePermission('customers.trust'), getCustomerTrustOverview);
 router.get('/customers/:userId/trust', protect, authorize('admin'), requirePermission('customers.trust'), getCustomerTrust);
@@ -81,30 +81,30 @@ router.patch('/customers/:userId/cod-policy', protect, authorize('admin'), requi
 router.patch('/customers/:userId/freeze', protect, authorize('admin'), requirePermission('customers.trust'), setCustomerAccountFreeze);
 // Pillar 8 — platform + per-restaurant visit analytics.
 router.get('/analytics/visits', protect, authorize('admin'), requirePermission('analytics.view'), getVisitAnalytics);
-router.get('/inventory', protect, authorize('admin'), getAllRestaurantInventory);
-router.patch('/inventory/:itemId', protect, authorize('admin'), updateAnyRestaurantInventory);
-router.get('/analytics/revenue', protect, authorize('admin'), getRevenueAnalytics);
+router.get('/inventory', protect, authorize('admin'), requirePermission('restaurants.manage'), getAllRestaurantInventory);
+router.patch('/inventory/:itemId', protect, authorize('admin'), requirePermission('restaurants.manage'), updateAnyRestaurantInventory);
+router.get('/analytics/revenue', protect, authorize('admin'), requirePermission('analytics.view'), getRevenueAnalytics);
 // Pillar 5 — platform vs restaurant review health and top-rated dishes.
 router.get('/reviews/analytics', protect, authorize('admin'), requirePermission('reviews.moderate'), getReviewAnalytics);
-router.get('/analytics/top-restaurants', protect, authorize('admin'), getTopRestaurants);
+router.get('/analytics/top-restaurants', protect, authorize('admin'), requirePermission('analytics.view'), getTopRestaurants);
 router.get('/reviews', protect, authorize('admin'), requirePermission('reviews.moderate'), getReviews);
 router.patch('/reviews/:id', protect, authorize('admin'), requirePermission('reviews.moderate'), moderateReview);
-router.get('/admins/:id/permissions', protect, authorize('admin'), requirePermission('settings.manage'), getAdminPermissions);
-router.patch('/admins/:id/permissions', protect, authorize('admin'), requirePermission('settings.manage'), updateAdminPermissions);
-router.get('/platform-ratings', protect, authorize('admin'), getPlatformRatings);
+router.get('/admins/:id/permissions', protect, authorize('admin'), requireFullAdmin, getAdminPermissions);
+router.patch('/admins/:id/permissions', protect, authorize('admin'), requireFullAdmin, updateAdminPermissions);
+router.get('/platform-ratings', protect, authorize('admin'), requirePermission('reviews.moderate'), getPlatformRatings);
 
 // Vendor account management (vendor *creation* is POST /api/auth/admin/create-vendor)
-router.get('/vendors', protect, authorize('admin'), getVendors);
+router.get('/vendors', protect, authorize('admin'), requirePermission('vendors.manage'), getVendors);
 // Vendor onboarding review. Applications are separate from existing admin
 // vendor provisioning so the legacy create-vendor workflow remains intact.
-router.get('/vendor-applications', protect, authorize('admin'), getVendorApplications);
-router.get('/vendor-applications/:id', protect, authorize('admin'), getVendorApplicationById);
-router.patch('/vendor-applications/:id/approve', protect, authorize('admin'), approveVendorApplication);
-router.patch('/vendor-applications/:id/reject', protect, authorize('admin'), rejectVendorApplication);
-router.patch('/vendor-applications/:id/request-changes', protect, authorize('admin'), requestVendorApplicationChanges);
+router.get('/vendor-applications', protect, authorize('admin'), requirePermission('vendors.manage'), getVendorApplications);
+router.get('/vendor-applications/:id', protect, authorize('admin'), requirePermission('vendors.manage'), getVendorApplicationById);
+router.patch('/vendor-applications/:id/approve', protect, authorize('admin'), requirePermission('vendors.manage'), approveVendorApplication);
+router.patch('/vendor-applications/:id/reject', protect, authorize('admin'), requirePermission('vendors.manage'), rejectVendorApplication);
+router.patch('/vendor-applications/:id/request-changes', protect, authorize('admin'), requirePermission('vendors.manage'), requestVendorApplicationChanges);
 
-router.get('/vendors/:id', protect, authorize('admin'), getVendorById);
-router.put('/vendors/:id', protect, authorize('admin'), updateVendor);
-router.patch('/vendors/:id/toggle', protect, authorize('admin'), toggleVendorStatus);
+router.get('/vendors/:id', protect, authorize('admin'), requirePermission('vendors.manage'), getVendorById);
+router.put('/vendors/:id', protect, authorize('admin'), requirePermission('vendors.manage'), updateVendor);
+router.patch('/vendors/:id/toggle', protect, authorize('admin'), requirePermission('vendors.manage'), toggleVendorStatus);
 
 module.exports = router;

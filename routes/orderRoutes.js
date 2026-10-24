@@ -11,6 +11,7 @@ const {
 } = require('../controllers/orderController');
 
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/permissionMiddleware');
 
 // Authenticated-account limiter: avoids penalizing customers who share a
 // household/mobile-carrier IP, and adds no database lookup beyond `protect`.
@@ -28,7 +29,7 @@ const createOrderLimiter = rateLimit({
 // 1. ADMIN ROUTE (Must be at the top!)
 // ==========================================
 // We changed this to '/all' and removed the admin-lock for now so you can test it!
-router.get('/all', protect, authorize('admin'), getAllOrders);
+router.get('/all', protect, authorize('admin'), requirePermission('orders.manage'), getAllOrders);
 
 // ==========================================
 // 2. STANDARD ROUTES
@@ -76,7 +77,7 @@ router.get('/', protect, getOrders);
 // ==========================================
 router.get('/:id/review', protect, getOrderReview);
 router.get('/:id', protect, getOrderById);
-router.put('/:id/status', protect, authorize('admin'), updateOrderStatus);
+router.put('/:id/status', protect, authorize('admin'), requirePermission('orders.manage'), updateOrderStatus);
 router.put('/:id/cancel', protect, cancelOrder);
 router.put('/:id/rate', protect, rateOrder);
 router.post('/:id/review', protect, submitReview);
@@ -86,6 +87,6 @@ router.put('/:id/review', protect, submitReview);
 router.post('/reviews/:reviewId/report', protect, reportReview);
 
 // Rider assignment — ADMIN ONLY.
-router.put('/:id/assign-rider', protect, authorize('admin'), assignRider);
+router.put('/:id/assign-rider', protect, authorize('admin'), requirePermission('orders.manage'), assignRider);
 
 module.exports = router;

@@ -5,6 +5,7 @@ const rateLimit = require("express-rate-limit");
 const { vendorLogin, createVendor, riderLogin } = require("../controllers/authController");
 const { setupAdmin } = require("../controllers/setupController");
 const { protect, authorize } = require("../middleware/authMiddleware");
+const { requirePermission } = require("../middleware/permissionMiddleware");
 
 // SECURITY FIX: Rate Limiter to prevent brute-force attacks on login
 const loginLimiter = rateLimit({
@@ -27,7 +28,7 @@ router.post("/rider/login", loginLimiter, riderLogin);
 // forgotten, and the forgotten one was the unprotected one.
 
 // ADMIN ONLY — no public vendor signup exists or should exist.
-router.post("/admin/create-vendor", protect, authorize("admin"), createVendor);
+router.post("/admin/create-vendor", protect, authorize("admin"), requirePermission("vendors.manage"), createVendor);
 
 // FIRST-ADMIN BOOTSTRAP — disabled unless explicitly switched on.
 //

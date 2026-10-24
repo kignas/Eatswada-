@@ -13,18 +13,19 @@ const {
 } = require('../controllers/adminController');
 
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/permissionMiddleware');
 const { upload } = require('../utils/riderUpload');
 const { listApplications, reviewApplication } = require('../controllers/riderApplicationController');
 
 router.use(protect, authorize('admin'));
 
-router.get('/applications', listApplications);
-router.patch('/applications/:id/review', reviewApplication);
-router.post('/', upload.single('photo'), createRider);
-router.get('/', getRiders);
-router.get('/:id', getRiderById);
-router.put('/:id', upload.single('photo'), updateRider);
-router.patch('/:id/status', toggleRiderStatus);
-router.delete('/:id', deleteRider);
+router.get('/applications', requirePermission('riders.manage'), listApplications);
+router.patch('/applications/:id/review', requirePermission('riders.manage'), reviewApplication);
+router.post('/', requirePermission('riders.manage'), upload.single('photo'), createRider);
+router.get('/', requirePermission('riders.manage'), getRiders);
+router.get('/:id', requirePermission('riders.manage'), getRiderById);
+router.put('/:id', requirePermission('riders.manage'), upload.single('photo'), updateRider);
+router.patch('/:id/status', requirePermission('riders.manage'), toggleRiderStatus);
+router.delete('/:id', requirePermission('riders.manage'), deleteRider);
 
 module.exports = router;

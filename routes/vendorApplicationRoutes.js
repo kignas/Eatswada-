@@ -4,6 +4,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/permissionMiddleware');
 const {
   submitVendorApplication,
   getVendorApplicationStatus,
@@ -35,10 +36,10 @@ router.patch('/mine', protect, authorize('user'), applicationLimiter, updateMyVe
 router.get('/:id/status', applicationLimiter, getVendorApplicationStatus);
 
 // Admin review workflow.
-router.get('/', protect, authorize('admin'), getVendorApplications);
-router.get('/:id', protect, authorize('admin'), getVendorApplicationById);
-router.patch('/:id/approve', protect, authorize('admin'), approveVendorApplication);
-router.patch('/:id/reject', protect, authorize('admin'), rejectVendorApplication);
-router.patch('/:id/request-changes', protect, authorize('admin'), requestVendorApplicationChanges);
+router.get('/', protect, authorize('admin'), requirePermission('vendors.manage'), getVendorApplications);
+router.get('/:id', protect, authorize('admin'), requirePermission('vendors.manage'), getVendorApplicationById);
+router.patch('/:id/approve', protect, authorize('admin'), requirePermission('vendors.manage'), approveVendorApplication);
+router.patch('/:id/reject', protect, authorize('admin'), requirePermission('vendors.manage'), rejectVendorApplication);
+router.patch('/:id/request-changes', protect, authorize('admin'), requirePermission('vendors.manage'), requestVendorApplicationChanges);
 
 module.exports = router;

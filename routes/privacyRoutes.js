@@ -6,6 +6,7 @@ const router = express.Router();
 
 const privacy = require('../controllers/privacyController');
 const { protect, authorize } = require('../middleware/authMiddleware');
+const { requirePermission } = require('../middleware/permissionMiddleware');
 const validate = require('../middleware/validateMiddleware');
 
 const privacyLimiter = rateLimit({
@@ -33,10 +34,11 @@ router.post('/requests',
   privacy.createPrivacyRequest
 );
 
-router.get('/admin/requests', protect, authorize('admin'), privacy.listAdminRequests);
+router.get('/admin/requests', protect, authorize('admin'), requirePermission('privacy.manage'), privacy.listAdminRequests);
 router.patch('/admin/requests/:id',
   protect,
   authorize('admin'),
+  requirePermission('privacy.manage'),
   [
     body('status').isIn(['open','in_progress','resolved','rejected']).withMessage('Invalid status'),
     body('adminNote').optional().isString().isLength({ max: 2000 }).withMessage('Admin note is too long'),
