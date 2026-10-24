@@ -25,6 +25,7 @@
     "test:payment-fixes": "node tests/payment-fixes.js",
     "test:staff-cancel": "node tests/staff-cancel.js",
     "test:abandoned-checkout": "node tests/abandoned-checkout.js",
+    "test:payment-failure-stock": "node tests/payment-failure-stock.js",
     "test:order-cancellation-policy": "node tests/order-cancellation-policy.js",
     "test:error-handling": "node tests/error-middleware-security.js",
     "test:otp-lockout": "node tests/otp-lockout.js",
