@@ -220,7 +220,7 @@ const getProfile = asyncHandler(async (req, res) => {
 });
 
 const updateProfile = asyncHandler(async (req, res) => {
-  const { name, email, phone, password, vegOnly, avatar, adultConfirmed } = req.body;
+  const { name, email, phone, password, currentPassword, vegOnly, avatar, adultConfirmed } = req.body;
   const user = await User.findById(req.user._id).select('+password +googleUid');
   if (!user) return res.status(404).json({ success:false, message:'User profile not found.' });
   if (name !== undefined) user.name = String(name).trim();
@@ -250,6 +250,19 @@ const updateProfile = asyncHandler(async (req, res) => {
   if (adultConfirmed === true && !user.adultConfirmedAt) user.adultConfirmedAt = new Date();
   if (password !== undefined) {
     if (typeof password !== 'string' || password.length < 8) return res.status(400).json({ success:false, message:'Password must be at least 8 characters.' });
+    // A valid token alone must not be enough to set a new password (a stolen session would become a
+    // permanent takeover). If the account already has a password, the current one must be proven.
+    // Accounts with no password yet (first-time onboarding) can still set one; a forgotten password
+    // goes through the email-OTP reset flow instead. Nothing has been saved at this point, so a
+    // refusal here also discards any other edits sent in the same request.
+    if (user.password) {
+      if (typeof currentPassword !== 'string' || currentPassword === '') {
+        return res.status(400).json({ success:false, code:'CURRENT_PASSWORD_REQUIRED', message:'Enter your current password to set a new one.' });
+      }
+      if (!(await user.matchPassword(currentPassword))) {
+        return res.status(403).json({ success:false, code:'CURRENT_PASSWORD_INCORRECT', message:'Your current password is incorrect.' });
+      }
+    }
     user.password = password;
     user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
   }
