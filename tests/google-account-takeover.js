@@ -55,7 +55,6 @@ const stubs = {
   [path.join(ROOT, 'models/Address.js')]: {},
   [path.join(ROOT, 'models/firebaseAdmin.js')]: { verifyFirebaseIdToken: async (t) => { if (!idTokens[t]) throw Object.assign(new Error('bad token'), { statusCode: 401 }); return idTokens[t]; } },
   [path.join(ROOT, 'utils/generateToken.js')]: (id, role, tv) => { tokens.push({ id, role, tv }); return `jwt-${id}-v${tv}`; },
-  [path.join(ROOT, 'utils/sendOTP.js')]: { sendOTP: async () => {}, generateOTPCode: () => '1234' },
   'express-async-handler': (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next),
 };
 const anything = new Proxy(function () {}, { get: (t, p) => (p === 'then' ? undefined : anything), apply: () => anything, construct: () => anything });

@@ -49,9 +49,8 @@ check('Deactivated accounts rejected', /if \(!req\.user\.isActive\)/.test(auth))
 check('Role middleware requires authenticated user', /if \(!req\.user\)/.test(roles));
 check('Role middleware enforces exact DB role', /roles\.includes\(req\.user\.role\)/.test(roles));
 
-check('Customer OTP has IP rate limit', /otpLimiter/.test(read('routes/userRoutes.js')));
-check('Customer OTP has per-account resend throttle', /otpRequestedTooRecently/.test(users));
-check('Customer OTP has per-account failed-attempt lockout', /checkOTP\(otp, ['"]login['"]\)/.test(users));
+check('Phone-OTP login/register endpoints are removed (no SMS cost abuse, no 4-digit brute force)', !/['"]\/(send-otp|verify-otp|register)['"]/.test(read('routes/userRoutes.js')) && !/sendOTPHandler|verifyOTPHandler|\.checkOTP\(/.test(users));
+check('Password-reset email OTP has IP rate limit', /router\.post\('\/forgot-password\/email',\s*otpLimiter/.test(read('routes/userRoutes.js')));
 check('Password reset OTP has dedicated state and verifier', /checkPasswordResetOtp\(otp\)/.test(users) && /passwordResetOtpHash/.test(users));
 check('Password reset token is hashed server-side', /createHash\(['"]sha256['"]\)/.test(users));
 check('Password reset token expires', /passwordResetExpiresAt.*new Date\(Date\.now\(\) \+ 10 \* 60 \* 1000\)/s.test(read('models/User.js')));
