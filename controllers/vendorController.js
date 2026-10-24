@@ -249,7 +249,14 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
     const acceptedAt = new Date();
     order.dispatchNotBefore = new Date(acceptedAt.getTime() + Math.max(0, Number(order.prepMinutes) - 12) * 60000);
   }
-  if (reserved.length) order.inventoryReservedAt = new Date();
+  if (reserved.length) {
+    // Stock was (re)taken at accept time, e.g. for an order revived after a payment
+    // failure whose earlier reservation had been released. Mark the reservation
+    // ACTIVE again; otherwise a later cancel sees the old release marker and can
+    // never put the stock back.
+    order.inventoryReservedAt = new Date();
+    order.inventoryReleasedAt = null;
+  }
   try { await order.save(); } catch (err) {
     for (const line of reserved) { await Menu.updateOne({_id:line.itemId,restaurantId:req.user.restaurantId},{$inc:{stockQuantity:line.quantity},$set:{inStock:true}}); }
     await InventoryMovement.deleteMany({orderId:order._id,reason:'order_accepted'});

@@ -488,7 +488,11 @@ exports.paymentStatus = asyncHandler(async (req, res) => {
 
       const failed = attempts.find(p => p.status === 'failed');
       if (failed && attempts.length > 0 && attempts.every(p => p.status === 'failed')) {
-        await Order.updateOne(
+        // findOneAndUpdate returns the FULL order (items, restaurant, reservation
+        // markers). The `order` above was loaded with a narrow .select(), so
+        // releasing stock from it silently did nothing. Only the request that
+        // actually wins this cancel releases; release itself is also idempotent.
+        const cancelledNow = await Order.findOneAndUpdate(
           { _id: order._id, razorpayOrderId: order.razorpayOrderId, paymentStatus: 'pending', status: { $ne: 'cancelled' } },
           {
             $set: {
@@ -505,9 +509,13 @@ exports.paymentStatus = asyncHandler(async (req, res) => {
                 at: new Date(),
               },
             },
-          }
+          },
+          { new: true }
         );
-        await releaseOrderInventory(order, req.user?._id || null).catch(() => {});
+        if (cancelledNow) {
+          await releaseOrderInventory(cancelledNow, req.user?._id || null)
+            .catch((err) => console.error(`[PAYMENT] stock release failed for ${cancelledNow._id}:`, err.message));
+        }
       }
     } catch (err) {
       console.warn(`[PAYMENT] status reconciliation failed for ${order.razorpayOrderId}: ${err.message}`);
@@ -634,6 +642,21 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
         },
       }
     );
+    // The cancelled order no longer needs its reserved stock. Re-read the orders
+    // THIS event just failed (matched by the payment id it stamped) so we hold the
+    // full documents. Release is idempotent: a Razorpay webhook retry, the status
+    // reconciliation above, or an earlier customer cancel can never restore twice.
+    const failedNow = await Order.find({
+      _id: { $in: orders.map(o => o._id) },
+      razorpayOrderId,
+      status: 'cancelled',
+      paymentStatus: 'failed',
+      razorpayPaymentId: paymentId,
+    });
+    for (const failedOrder of failedNow) {
+      await releaseOrderInventory(failedOrder, null)
+        .catch((err) => console.error(`[PAYMENT] stock release failed for ${failedOrder._id}:`, err.message));
+    }
   }
 
   return res.json({ success: true });
