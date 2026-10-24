@@ -1,11 +1,13 @@
 'use strict';
 
+const { CLOUDINARY_HOST, normalizeOwnCloudinaryUrl } = require('./cloudinaryUrl');
+
 const MAX_MESSAGES = 200;          // per ticket, keeps the document small
 const MAX_ATTACHMENTS = 3;
 const REOPEN_DAYS = 7;             // customer may reply to a resolved ticket this long
 const REOPEN_MS = REOPEN_DAYS * 24 * 60 * 60 * 1000;
 
-// Attachments must be https images on a trusted host (default: Cloudinary).
+// Attachments must be https images on a trusted host (default: Cloudinary, our own cloud only).
 // Override with SUPPORT_ATTACHMENT_HOSTS=res.cloudinary.com,cdn.example.com
 const ATTACHMENT_HOSTS = String(process.env.SUPPORT_ATTACHMENT_HOSTS || 'res.cloudinary.com')
   .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
@@ -21,6 +23,10 @@ function cleanAttachments(input) {
       if (u.protocol !== 'https:') continue;
       if (!ATTACHMENT_HOSTS.some(h => host === h || host.endsWith('.' + h))) continue;
       if (u.href.length > 1000) continue;
+      // Cloudinary is shared by every customer of the service: only OUR cloud is trusted, not the whole host.
+      if (host === CLOUDINARY_HOST || host.endsWith('.' + CLOUDINARY_HOST)) {
+        if (!normalizeOwnCloudinaryUrl(u.href)) continue;
+      }
       out.push(u.href);
     } catch (_) { /* ignore malformed URL */ }
   }
