@@ -1,8 +1,11 @@
-// Regression test: when an online payment FAILS the order is cancelled, so its
-// reserved stock must go back on the shelf — via the payment.failed webhook AND
-// via GET /payments/status reconciliation. A customer who then retries and the
-// restaurant accepts must end with a stock reservation that a later cancel can
-// restore. Runs with no database and no Razorpay. Usage: npm run test:payment-failure-stock
+// Regression test: ONE failed payment attempt must never cancel an online order.
+// A customer who fails a UPI attempt and retries in the same Razorpay modal (or via
+// retryPayment) must still end up with a paid, live order — not a refund and no order.
+// The order stays placed/pending with its stock reserved; the abandoned-checkout
+// sweeper expires it (and returns the stock) if the customer never pays.
+// Also: a revived legacy order that the restaurant accepts must re-reserve stock in a way a
+// later cancel can restore. Runs with no database and no Razorpay.
+// Usage: npm run test:payment-failure-stock
 const Module = require('module');
 const path = require('path');
 const assert = require('assert');
@@ -10,8 +13,9 @@ const { makeOrderModel } = require('./helpers/fakeOrderModel');
 const ROOT = path.join(__dirname, '..');
 
 const Order = makeOrderModel();
-const calls = { released: [], decrements: [] };
+const calls = { released: [], decrements: [], refunds: [] };
 let orderPayments = [];
+let paymentToFetch = null;
 
 // Realistic .select(): production only returns the listed fields. The shared fake
 // ignores projections, which hid the "releaseOrderInventory silently no-ops" bug.
@@ -62,8 +66,8 @@ const stubs = {
   [path.join(ROOT, 'models/Review.js')]: {},
   [path.join(ROOT, 'models/InventoryMovement.js')]: { create: noop, deleteMany: noop },
   [path.join(ROOT, 'services/paymentService.js')]: {
-    assertConfigured() {}, async createRazorpayOrder() { return { id: 'order_NEW' }; }, async fetchPayment() { return null; },
-    async fetchOrderPayments() { return orderPayments; }, async refundPayment() { return { id: 'rfnd_1', status: 'pending' }; },
+    assertConfigured() {}, async createRazorpayOrder() { return { id: 'order_NEW' }; }, async fetchPayment() { return paymentToFetch; },
+    async fetchOrderPayments() { return orderPayments; }, async refundPayment(pid, amount) { calls.refunds.push({ pid, amount }); return { id: 'rfnd_' + calls.refunds.length, status: 'pending' }; },
     verifyRazorpaySignature: () => true, verifyWebhookSignature: () => true, toPaise: (n) => Math.round(n * 100),
   },
   [path.join(ROOT, 'services/settlementService.js')]: { async applyRefundAdjustment() {} },
@@ -87,7 +91,7 @@ const base = (o) => ({
   razorpayOrderIdHistory: [], razorpayPaymentId: '', paymentClaimId: '', refund: { status: 'none' }, duplicatePayments: [], total: 100,
   items: [{ menuItem: 'm1', quantity: 2 }], inventoryReservedAt: new Date().toISOString(), inventoryReleasedAt: null, ...o,
 });
-const reset = () => { Order.docs.length = 0; calls.released.length = 0; calls.decrements.length = 0; orderPayments = []; for (const k of Object.keys(menu.items)) delete menu.items[k]; };
+const reset = () => { Order.docs.length = 0; calls.released.length = 0; calls.decrements.length = 0; calls.refunds.length = 0; orderPayments = []; paymentToFetch = null; for (const k of Object.keys(menu.items)) delete menu.items[k]; };
 const res = () => { const r = { code: 200 }; r.status = (c) => { r.code = c; return r; }; r.json = (b) => { r.body = b; return r; }; return r; };
 const webhook = (event, entity) => pc.handleWebhook({ body: Buffer.from(JSON.stringify({ event, payload: { payment: { entity } } })), get: () => 'sig' }, res(), (e) => { throw e; });
 const failedEvt = (id, order_id, amount) => ({ id, order_id, amount, currency: 'INR', status: 'failed' });
@@ -96,19 +100,22 @@ const failedEvt = (id, order_id, amount) => ({ id, order_id, amount, currency: '
   let pass = 0;
   const t = async (name, fn) => { reset(); await fn(); pass++; console.log('PASS', name); };
 
-  await t('A: payment.failed webhook cancels the order AND returns its stock (once, even if Razorpay retries the webhook)', async () => {
+  await t('A: payment.failed webhook does NOT cancel the order or release its stock (customer may still retry and pay)', async () => {
     Order.insert(base({ _id: 'A1' }));
     await webhook('payment.failed', failedEvt('pay_f1', 'order_O1', 10000));
-    assert.strictEqual(Order.get('A1').status, 'cancelled');
-    assert.deepStrictEqual(calls.released, ['A1'], 'stock must be released when the order is cancelled for payment failure');
+    assert.strictEqual(Order.get('A1').status, 'placed', 'one failed attempt must not cancel the order');
+    assert.strictEqual(Order.get('A1').paymentStatus, 'pending');
+    assert.strictEqual(calls.released.length, 0, 'stock stays reserved until the sweeper expires the order');
     await webhook('payment.failed', failedEvt('pay_f1', 'order_O1', 10000));
-    assert.deepStrictEqual(calls.released, ['A1'], 'webhook retry must not release twice');
+    assert.strictEqual(Order.get('A1').status, 'placed');
+    assert.strictEqual(calls.released.length, 0);
   });
 
-  await t('B: multi-restaurant checkout → every cancelled order gets its stock back', async () => {
+  await t('B: multi-restaurant checkout → a failed attempt cancels none of the orders', async () => {
     Order.insert(base({ _id: 'B1', total: 60 })); Order.insert(base({ _id: 'B2', total: 40, restaurant: 'r2' }));
     await webhook('payment.failed', failedEvt('pay_f2', 'order_O1', 10000));
-    assert.deepStrictEqual(calls.released.sort(), ['B1', 'B2']);
+    assert.strictEqual(Order.get('B1').status, 'placed'); assert.strictEqual(Order.get('B2').status, 'placed');
+    assert.strictEqual(calls.released.length, 0);
   });
 
   await t('C: failure event for an OLD Razorpay attempt (after a retry) neither cancels nor releases the live order', async () => {
@@ -118,21 +125,23 @@ const failedEvt = (id, order_id, amount) => ({ id, order_id, amount, currency: '
     assert.strictEqual(calls.released.length, 0);
   });
 
-  await t('D: GET /payments/status reconciliation (all attempts failed, webhook missed) cancels AND returns stock', async () => {
+  await t('D: GET /payments/status with every attempt failed → order is NOT cancelled, still placed/pending and retryable', async () => {
     Order.insert(base({ _id: 'D1' }));
     orderPayments = [{ id: 'pay_x', status: 'failed', amount: 10000, currency: 'INR' }];
     const r = res();
     await pc.paymentStatus({ params: { id: 'D1' }, user: { _id: 'u1' } }, r, (e) => { throw e; });
-    assert.strictEqual(r.body.data.orderStatus, 'cancelled');
-    assert.deepStrictEqual(calls.released, ['D1'], 'status reconciliation must release the reserved stock');
+    assert.strictEqual(r.body.data.orderStatus, 'placed');
+    assert.strictEqual(Order.get('D1').paymentStatus, 'pending');
+    assert.strictEqual(calls.released.length, 0);
   });
 
-  await t('E: status reconciliation + webhook both fire for the same failure → stock returned exactly once', async () => {
+  await t('E: status check + webhook both see the failure → still nothing cancelled or released', async () => {
     Order.insert(base({ _id: 'E1' }));
     orderPayments = [{ id: 'pay_x', status: 'failed', amount: 10000, currency: 'INR' }];
     await pc.paymentStatus({ params: { id: 'E1' }, user: { _id: 'u1' } }, res(), (e) => { throw e; });
     await webhook('payment.failed', failedEvt('pay_x', 'order_O1', 10000));
-    assert.deepStrictEqual(calls.released, ['E1']);
+    assert.strictEqual(Order.get('E1').status, 'placed');
+    assert.strictEqual(calls.released.length, 0);
   });
 
   await t('F: payment still open (no failed attempt yet) → order and stock untouched', async () => {
@@ -172,6 +181,47 @@ const failedEvt = (id, order_id, amount) => ({ id, order_id, amount, currency: '
     assert.strictEqual(r.code, 200, JSON.stringify(r.body));
     assert.strictEqual(calls.decrements.length, 0);
     assert.strictEqual(menu.items.m1.stockQuantity, 10);
+  });
+
+  await t('I: THE BUG — attempt 1 fails, attempt 2 in the same modal succeeds → order is PAID and live, nothing refunded', async () => {
+    Order.insert(base({ _id: 'I1', total: 100 }));
+    await webhook('payment.failed', failedEvt('pay_try1', 'order_O1', 10000));
+    await webhook('payment.captured', { id: 'pay_try2', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'captured' });
+    const o = Order.get('I1');
+    assert.strictEqual(o.paymentStatus, 'paid');
+    assert.strictEqual(o.status, 'placed', 'order must stay live for the restaurant');
+    assert.strictEqual(o.razorpayPaymentId, 'pay_try2');
+    assert.strictEqual(calls.refunds.length, 0, 'a customer who paid must not be refunded');
+    assert.strictEqual(calls.released.length, 0);
+  });
+
+  await t('J: /payments/verify reporting a FAILED payment → 409 but the order stays live and retryable', async () => {
+    Order.insert(base({ _id: 'J1', total: 100 }));
+    paymentToFetch = { id: 'pay_bad', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'failed' };
+    const r = res();
+    await pc.verifyPayment({ body: { orderId: 'J1', razorpayPaymentId: 'pay_bad', razorpayOrderId: 'order_O1', razorpaySignature: 's' }, user: { _id: 'u1' } }, r, (e) => { throw e; });
+    assert.strictEqual(r.code, 409);
+    assert.strictEqual(r.body.success, false);
+    assert.strictEqual(r.body.retryable, true);
+    assert.notStrictEqual(r.body.orderStatus, 'cancelled');
+    assert.strictEqual(Order.get('J1').status, 'placed');
+    assert.strictEqual(calls.released.length, 0);
+  });
+
+  await t('K: after a failed attempt the customer can start a fresh payment on the same live order', async () => {
+    Order.insert(base({ _id: 'K1', total: 100 }));
+    await webhook('payment.failed', failedEvt('pay_try1', 'order_O1', 10000));
+    const r = res();
+    await pc.retryPayment({ body: { orderId: 'K1' }, user: { _id: 'u1' } }, r, (e) => { throw e; });
+    assert.strictEqual(r.body.success, true, JSON.stringify(r.body));
+    assert.strictEqual(Order.get('K1').razorpayOrderId, 'order_NEW');
+    assert.strictEqual(Order.get('K1').status, 'placed');
+  });
+
+  await t('L: wiring — no payment-failure path in paymentController cancels the order any more', async () => {
+    const src = require('fs').readFileSync(path.join(ROOT, 'controllers/paymentController.js'), 'utf8');
+    assert.ok(!/\$set:\s*\{[^}]*cancelReason:\s*'Payment failed'/.test(src), "no code may SET cancelReason 'Payment failed' (retryPayment still matches it to revive legacy orders)");
+    assert.ok(!/Payment failed; order cancelled automatically/.test(src), 'no automatic cancel note for failed attempts');
   });
 
   console.log(`\n${pass} scenarios passed`);

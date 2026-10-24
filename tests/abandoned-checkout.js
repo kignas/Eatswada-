@@ -1,5 +1,5 @@
-// Regression test: an unpaid online (UPI/card/wallet) checkout must not hold
-// stock forever. After the expiry window the sweeper first asks Razorpay whether
+// Regression test: an unpaid online (UPI/card/wallet) checkout — and a partial-COD
+// order whose advance was never paid — must not hold stock forever. After the expiry window the sweeper first asks Razorpay whether
 // the money actually arrived late (then it settles the checkout), and only
 // otherwise cancels the orders and releases their stock.
 // Runs with no database and no Razorpay (in-memory fakes). Usage: npm run test:abandoned-checkout
@@ -11,13 +11,16 @@ const { makeOrderModel } = require('./helpers/fakeOrderModel');
 const ROOT = path.join(__dirname, '..');
 
 const Order = makeOrderModel();
-const calls = { released: [], notified: [], paid: [], fetched: [] };
+const calls = { released: [], notified: [], paid: [], fetched: [], advancePaid: [] };
 let razorpay = {}; // razorpayOrderId -> attempts[] | Error
+let advanceResult = null; // test hook: force markPartialCodAdvancePaid's answer
+let onFetch = null; // test hook: runs while the sweeper is talking to Razorpay
 const stubs = {
   [path.join(ROOT, 'models/Order.js')]: Order,
   [path.join(ROOT, 'services/paymentService.js')]: {
     async fetchOrderPayments(id) {
       calls.fetched.push(id);
+      if (onFetch) await onFetch(id);
       const r = razorpay[id];
       if (r instanceof Error) throw r;
       return r || [];
@@ -26,6 +29,7 @@ const stubs = {
   [path.join(ROOT, 'services/inventoryReservationService.js')]: { async releaseOrderInventory(o) { calls.released.push(String(o._id)); return { released: true }; } },
   [path.join(ROOT, 'services/notificationService.js')]: { async notifyOrderStatus(u, o) { calls.notified.push(String(o._id)); } },
   [path.join(ROOT, 'controllers/paymentController.js')]: {
+    async markPartialCodAdvancePaid(order, paymentId) { calls.advancePaid.push({ id: String(order._id), paymentId }); if (advanceResult) return advanceResult; const d = Order.get(order._id); d.partialCodAdvanceStatus = 'paid'; d.razorpayPaymentId = paymentId; return { paid: true, order: d }; },
     async markCheckoutPaid(orders, paymentId, amountPaise) { calls.paid.push({ ids: orders.map(o => String(o._id)).sort(), paymentId, amountPaise }); for (const o of orders) { const d = Order.get(o._id); d.paymentStatus = 'paid'; d.razorpayPaymentId = paymentId; } /* like the real one */ return { liveOrderIds: orders.map(o => o._id), refundedOrderIds: [], duplicate: false }; },
   },
 };
@@ -45,7 +49,8 @@ const make = (o) => Order.insert({
   inventoryReservedAt: minutesAgo(30), inventoryReleasedAt: null, items: [{ menuItem: 'm1', quantity: 1 }],
   createdAt: minutesAgo(30), updatedAt: minutesAgo(30), statusHistory: [], ...o,
 });
-const reset = () => { Order.docs.length = 0; razorpay = {}; for (const k of Object.keys(calls)) calls[k].length = 0; };
+const makeAdvance = (o) => make({ paymentMethod: 'cod', paymentStatus: 'cod_pending', total: 500, razorpayOrderId: 'rzp_adv', partialCodAdvanceAmount: 100, partialCodAdvanceStatus: 'pending', partialCodRefundEligible: false, ...o });
+const reset = () => { Order.docs.length = 0; razorpay = {}; onFetch = null; advanceResult = null; for (const k of Object.keys(calls)) calls[k].length = 0; };
 
 (async () => {
   let pass = 0;
@@ -108,10 +113,10 @@ const reset = () => { Order.docs.length = 0; razorpay = {}; for (const k of Obje
     assert.strictEqual(calls.released.length, 0);
   });
 
-  await t('F: COD, already-paid, partial-COD and non-placed orders are never touched', async () => {
+  await t('F: COD, already-paid, partial-COD (advance PAID) and non-placed orders are never touched', async () => {
     make({ _id: 'F1', paymentMethod: 'cod', paymentStatus: 'cod_pending', razorpayOrderId: '' });
     make({ _id: 'F2', paymentStatus: 'paid', razorpayPaymentId: 'pay_ok' });
-    make({ _id: 'F3', paymentMethod: 'cod', paymentStatus: 'cod_pending', partialCodAdvanceAmount: 100, partialCodAdvanceStatus: 'pending' });
+    make({ _id: 'F3', paymentMethod: 'cod', paymentStatus: 'cod_pending', partialCodAdvanceAmount: 100, partialCodAdvanceStatus: 'paid', razorpayPaymentId: 'pay_adv' });
     make({ _id: 'F4', status: 'cancelled', paymentStatus: 'failed' });
     make({ _id: 'F5', status: 'confirmed', paymentStatus: 'pending' });
     make({ _id: 'F6', paymentMethod: 'cod', paymentStatus: 'pending', razorpayOrderId: '' }); // defence in depth: COD is never an online checkout
@@ -187,6 +192,101 @@ const reset = () => { Order.docs.length = 0; razorpay = {}; for (const k of Obje
     const pc = fs.readFileSync(path.join(ROOT, 'controllers/paymentController.js'), 'utf8');
     assert.ok(/exports\.markCheckoutPaid\s*=\s*markCheckoutPaid/.test(pc), 'paymentController must export markCheckoutPaid');
     assert.ok(typeof svc.startAbandonedCheckoutRecovery === 'function');
+  });
+
+  await t('N: partial-COD order whose advance was never paid, no capture on Razorpay → cancelled, stock released, customer told, refund-eligible if money shows up later', async () => {
+    makeAdvance({ _id: 'N1' });
+    razorpay.rzp_adv = [{ id: 'pay_x', status: 'failed', amount: 10000, currency: 'INR' }];
+    const r = await recoverAbandonedCheckouts();
+    const o = Order.get('N1');
+    assert.strictEqual(o.status, 'cancelled');
+    assert.strictEqual(o.cancelReason, 'Advance payment not completed in time');
+    assert.strictEqual(o.isCancellable, false);
+    assert.strictEqual(o.partialCodRefundEligible, true, 'a late advance capture after this cancel must be refundable');
+    assert.strictEqual(o.partialCodAdvanceStatus, 'pending');
+    assert.deepStrictEqual(calls.released, ['N1']);
+    assert.deepStrictEqual(calls.notified, ['N1']);
+    assert.strictEqual(calls.advancePaid.length, 0); assert.strictEqual(calls.paid.length, 0);
+    assert.strictEqual(r.cancelled, 1);
+  });
+
+  await t('O: partial-COD advance captured late on Razorpay → settled through the advance-paid path, NOT cancelled', async () => {
+    makeAdvance({ _id: 'O1' });
+    razorpay.rzp_adv = [{ id: 'pay_late', status: 'captured', amount: 10000, currency: 'INR' }];
+    const r = await recoverAbandonedCheckouts();
+    assert.deepStrictEqual(calls.advancePaid, [{ id: 'O1', paymentId: 'pay_late' }]);
+    assert.strictEqual(calls.paid.length, 0, 'must not use the full-checkout paid path');
+    assert.strictEqual(Order.get('O1').status, 'placed');
+    assert.strictEqual(calls.released.length, 0);
+    assert.strictEqual(r.paid, 1); assert.strictEqual(r.cancelled, 0);
+  });
+
+  await t('P: partial-COD advance captured with the WRONG amount → left for review, never cancelled', async () => {
+    makeAdvance({ _id: 'P1' });
+    razorpay.rzp_adv = [{ id: 'pay_odd', status: 'captured', amount: 50000, currency: 'INR' }]; // full total, not the advance
+    const r = await recoverAbandonedCheckouts();
+    assert.strictEqual(Order.get('P1').status, 'placed');
+    assert.strictEqual(calls.released.length, 0); assert.strictEqual(calls.advancePaid.length, 0);
+    assert.strictEqual(r.held, 1);
+  });
+
+  await t('Q: partial-COD + Razorpay unreachable → not cancelled; cancelled on a later sweep', async () => {
+    makeAdvance({ _id: 'Q1' });
+    razorpay.rzp_adv = new Error('network down');
+    await recoverAbandonedCheckouts();
+    assert.strictEqual(Order.get('Q1').status, 'placed');
+    razorpay.rzp_adv = [];
+    await recoverAbandonedCheckouts();
+    assert.strictEqual(Order.get('Q1').status, 'cancelled');
+  });
+
+  await t('R: partial-COD younger than the window (or refreshed by a payment retry) is left alone', async () => {
+    makeAdvance({ _id: 'R1', createdAt: minutesAgo(40), updatedAt: minutesAgo(2) });
+    const r = await recoverAbandonedCheckouts();
+    assert.strictEqual(r.scanned, 0);
+    assert.strictEqual(await expireAbandonedCheckout('R1'), 'none');
+    assert.strictEqual(Order.get('R1').status, 'placed');
+  });
+
+  await t('S: the advance gets paid WHILE the sweeper is checking Razorpay → order is not cancelled', async () => {
+    makeAdvance({ _id: 'S1' });
+    razorpay.rzp_adv = [];
+    onFetch = async () => { const d = Order.get('S1'); d.partialCodAdvanceStatus = 'paid'; d.razorpayPaymentId = 'pay_now'; };
+    await recoverAbandonedCheckouts();
+    assert.strictEqual(Order.get('S1').status, 'placed');
+    assert.strictEqual(calls.released.length, 0);
+  });
+
+  await t('T: two simultaneous expiries of one partial-COD order → cancelled and released exactly once', async () => {
+    makeAdvance({ _id: 'T1' });
+    razorpay.rzp_adv = [];
+    const out = await Promise.all([expireAbandonedCheckout('T1'), expireAbandonedCheckout('T1')]);
+    assert.strictEqual(out.filter(x => x === 'cancelled').length, 1);
+    assert.deepStrictEqual(calls.released, ['T1']);
+    assert.deepStrictEqual(calls.notified, ['T1']);
+  });
+
+  await t('U: partial-COD with a cancelled / non-placed status or paid advance is never scanned', async () => {
+    makeAdvance({ _id: 'U1', status: 'cancelled' });
+    makeAdvance({ _id: 'U2', status: 'confirmed' });
+    makeAdvance({ _id: 'U3', partialCodAdvanceStatus: 'refunded' });
+    const r = await recoverAbandonedCheckouts();
+    assert.strictEqual(r.scanned, 0);
+  });
+
+  await t('V: wiring — paymentController exports markPartialCodAdvancePaid for the sweeper', async () => {
+    const pcSrc = fs.readFileSync(path.join(ROOT, 'controllers/paymentController.js'), 'utf8');
+    assert.ok(/exports\.markPartialCodAdvancePaid\s*=\s*markPartialCodAdvancePaid/.test(pcSrc));
+  });
+
+  await t('W: advance captured but markPartialCodAdvancePaid cannot apply it (duplicate / odd state) → held for review, not counted paid, not cancelled', async () => {
+    makeAdvance({ _id: 'W1' });
+    razorpay.rzp_adv = [{ id: 'pay_dup', status: 'captured', amount: 10000, currency: 'INR' }];
+    advanceResult = { paid: false, duplicate: true };
+    const r = await recoverAbandonedCheckouts();
+    assert.strictEqual(r.held, 1); assert.strictEqual(r.paid, 0); assert.strictEqual(r.cancelled, 0);
+    assert.strictEqual(Order.get('W1').status, 'placed');
+    assert.strictEqual(calls.released.length, 0);
   });
 
   console.log(`\n${pass} scenarios passed`);

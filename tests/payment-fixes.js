@@ -101,19 +101,18 @@ const webhook = (event, entity) => pc.handleWebhook({ body: Buffer.from(JSON.str
     assert.deepStrictEqual(calls.notified, ['R1']);
   });
 
-  await t('L: payment.failed then SUCCESS on same Razorpay order (cancelled checkout) → captured money is refunded, never kept', async () => {
+  await t('L: payment.failed then SUCCESS on the same Razorpay order → order is paid and live (not cancelled, not refunded); a duplicate webhook changes nothing', async () => {
     Order.insert(base({ _id: 'J1', total: 100 }));
     await webhook('payment.failed', { id: 'pay_try1', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'failed' });
-    assert.strictEqual(Order.get('J1').status, 'cancelled');
+    assert.strictEqual(Order.get('J1').status, 'placed', 'a failed attempt must not cancel the order');
     await webhook('payment.captured', { id: 'pay_try2', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'captured' });
-    assert.strictEqual(calls.refunds.length, 1, 'captured money on a cancelled checkout must be refunded');
-    assert.strictEqual(calls.refunds[0].pid, 'pay_try2');
-    assert.strictEqual(calls.refunds[0].amount, 100);
-    assert.deepStrictEqual(calls.notified, [], 'vendor must not be notified for a cancelled order');
-    assert.strictEqual(Order.get('J1').status, 'cancelled');
-    // Razorpay retries the webhook → still exactly one refund
+    assert.strictEqual(calls.refunds.length, 0, 'a customer who paid must not be refunded');
+    assert.strictEqual(Order.get('J1').paymentStatus, 'paid');
+    assert.strictEqual(Order.get('J1').status, 'placed');
+    assert.deepStrictEqual(calls.notified, ['J1'], 'the restaurant is notified once the money is captured');
     await webhook('payment.captured', { id: 'pay_try2', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'captured' });
-    assert.strictEqual(calls.refunds.length, 1);
+    assert.strictEqual(calls.refunds.length, 0);
+    assert.deepStrictEqual(calls.notified, ['J1']);
   });
 
   await t('M: customer cancels inside 30s window, UPI captures late → refunded once (webhook + verify race)', async () => {
