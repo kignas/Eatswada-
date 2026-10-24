@@ -8,6 +8,19 @@ const { recordRestaurantPaymentFeeCharge } = require('./settlementService');
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 
+// A network timeout or 5xx may happen after Razorpay accepted the refund. Keep
+// those claims in processing for webhook/reconciliation instead of incorrectly
+// marking them failed and allowing an unsafe second attempt.
+function hasDefinitiveProviderRejection(err) {
+  const status = Number(err?.statusCode || err?.status || err?.response?.status || 0);
+  return Number.isInteger(status) && status >= 400 && status < 500
+    && ![408, 409, 425, 429].includes(status);
+}
+
+function providerErrorMessage(err) {
+  return String(err?.error?.description || err?.message || 'unknown provider outcome').slice(0, 200);
+}
+
 /**
  * Initiate a Razorpay refund for a CANCELLED, PAID order and record the refund
  * lifecycle on the order document.
@@ -61,7 +74,7 @@ async function initiateOrderRefund(order, reason = '') {
     }, { $set: { partialCodAdvanceStatus: 'refund_processing', 'refund.status': 'processing', 'refund.reason': String(reason || '').slice(0, 200), 'refund.initiatedAt': now, 'refund.razorpayRefundId': '', 'refund.completedAt': null, 'refund.amount': Number(order.partialCodAdvanceAmount || 0) } }, { new: true });
     if (!claimed) return { refunded: false, skipped: 'already_started' };
     try {
-      const refund = await refundPayment(claimed.razorpayPaymentId, Number(claimed.partialCodAdvanceAmount || 0), { orderId: String(claimed._id), reason: String(reason || 'Pre-acceptance partial COD cancellation').slice(0, 200) });
+      const refund = await refundPayment(claimed.razorpayPaymentId, Number(claimed.partialCodAdvanceAmount || 0), { orderId: String(claimed._id), refundType: 'partial_cod_cancellation', amountPaise: String(Math.round(Number(claimed.partialCodAdvanceAmount || 0) * 100)), reason: String(reason || 'Pre-acceptance partial COD cancellation').slice(0, 200) });
       const set = { 'refund.razorpayRefundId': String((refund && refund.id) || '') };
       if (refund && refund.status === 'processed') {
         set['refund.status'] = 'completed';
@@ -73,9 +86,14 @@ async function initiateOrderRefund(order, reason = '') {
       syncInMemory(order, fresh);
       return { refunded: true, status: fresh?.refund?.status, refundId: set['refund.razorpayRefundId'] };
     } catch (err) {
-      const message = err && (err.error?.description || err.message) ? (err.error?.description || err.message) : 'unknown error';
-      await Order.updateOne({ _id: claimed._id, 'refund.status': 'processing' }, { $set: { partialCodAdvanceStatus: 'refund_failed', 'refund.status': 'failed', 'refund.reason': `refund initiation failed: ${message}`.slice(0, 200) } }).catch(() => {});
-      return { refunded: false, error: message };
+      const message = providerErrorMessage(err);
+      const definitive = hasDefinitiveProviderRejection(err);
+      await Order.updateOne({ _id: claimed._id, 'refund.status': 'processing' }, {
+        $set: definitive
+          ? { partialCodAdvanceStatus: 'refund_failed', 'refund.status': 'failed', 'refund.reason': `Razorpay rejected refund: ${message}`.slice(0, 200) }
+          : { 'refund.reason': `Refund outcome unknown; reconcile with Razorpay before retry: ${message}`.slice(0, 200) },
+      }).catch(() => {});
+      return { refunded: false, status: definitive ? 'failed' : 'processing', outcomeUnknown: !definitive, error: message };
     }
   }
   if (order.paymentMethod === 'cod') {
@@ -172,6 +190,8 @@ async function initiateOrderRefund(order, reason = '') {
 
     const refund = await refundPayment(claimed.razorpayPaymentId, amount, {
       orderId: String(claimed._id),
+      refundType: 'order_cancellation',
+      amountPaise: String(Math.round(amount * 100)),
       reason: cleanReason,
     });
 
@@ -188,17 +208,24 @@ async function initiateOrderRefund(order, reason = '') {
 
     const fresh = await Order.findById(claimed._id).select('paymentStatus refund partialCodAdvanceStatus').lean();
     syncInMemory(order, fresh);
+    if (fresh?.refund?.status === 'completed') {
+      try { await require('./settlementService').applyRefundAdjustment(fresh); }
+      catch (ledgerErr) { console.error(`[REFUND] ledger adjustment failed order=${claimed._id}: ${ledgerErr.message}`); }
+    }
     return { refunded: true, status: fresh?.refund?.status, refundId: set['refund.razorpayRefundId'] };
   } catch (err) {
-    const message = err && (err.error?.description || err.message) ? (err.error?.description || err.message) : 'unknown error';
+    const message = providerErrorMessage(err);
+    const definitive = hasDefinitiveProviderRejection(err);
     await Order.updateOne(
       { _id: claimed._id, 'refund.status': 'processing' },
-      { $set: { 'refund.status': 'failed', 'refund.reason': `refund initiation failed: ${message}`.slice(0, 200) } }
+      { $set: definitive
+        ? { 'refund.status': 'failed', 'refund.reason': `Razorpay rejected refund: ${message}`.slice(0, 200) }
+        : { 'refund.reason': `Refund outcome unknown; reconcile with Razorpay before retry: ${message}`.slice(0, 200) } }
     ).catch(() => {});
     const fresh = await Order.findById(claimed._id).select('paymentStatus refund').lean().catch(() => null);
     syncInMemory(order, fresh);
-    console.error(`[REFUND] order=${claimed._id} failed: ${message}`);
-    return { refunded: false, error: message };
+    console.error(`[REFUND] order=${claimed._id} ${definitive ? 'rejected' : 'outcome unknown'}: ${message}`);
+    return { refunded: false, status: definitive ? 'failed' : 'processing', outcomeUnknown: !definitive, error: message };
   }
 }
 
@@ -219,21 +246,22 @@ async function refundDuplicatePayment(orderIds, paymentId, amountRupees, reason 
   if (!claim.modifiedCount) return { refunded: false, skipped: 'already_handled' };
 
   try {
-    const refund = await refundPayment(paymentId, amountRupees, { reason: String(reason).slice(0, 200) });
+    const refund = await refundPayment(paymentId, amountRupees, { orderId: String(orderIds[0] || ''), refundType: 'duplicate_payment', paymentId: String(paymentId), amountPaise: String(Math.round(Number(amountRupees || 0) * 100)), reason: String(reason).slice(0, 200) });
     await Order.updateMany(
-      { _id: { $in: orderIds }, 'duplicatePayments.paymentId': String(paymentId) },
+      { _id: { $in: orderIds }, duplicatePayments: { $elemMatch: { paymentId: String(paymentId), status: 'processing' } } },
       { $set: { 'duplicatePayments.$.status': refund?.status === 'processed' ? 'completed' : 'processing', 'duplicatePayments.$.refundId': String(refund?.id || '') } }
     );
     console.warn(`[PAYMENT] duplicate payment ${paymentId} refunded (${refund?.id || 'pending'})`);
     return { refunded: true, refundId: refund?.id };
   } catch (err) {
-    const message = err && (err.error?.description || err.message) ? (err.error?.description || err.message) : 'unknown error';
+    const message = providerErrorMessage(err);
+    const definitive = hasDefinitiveProviderRejection(err);
     await Order.updateMany(
-      { _id: { $in: orderIds }, 'duplicatePayments.paymentId': String(paymentId) },
-      { $set: { 'duplicatePayments.$.status': 'failed', 'duplicatePayments.$.error': message.slice(0, 200) } }
+      { _id: { $in: orderIds }, duplicatePayments: { $elemMatch: { paymentId: String(paymentId), status: 'processing' } } },
+      { $set: { 'duplicatePayments.$.status': definitive ? 'failed' : 'processing', 'duplicatePayments.$.error': `${definitive ? 'Razorpay rejected refund' : 'Refund outcome unknown; reconcile before retry'}: ${message}`.slice(0, 200) } }
     ).catch(() => {});
-    console.error(`[PAYMENT] duplicate payment ${paymentId} refund FAILED — refund manually in Razorpay: ${message}`);
-    return { refunded: false, error: message };
+    console.error(`[PAYMENT] duplicate payment ${paymentId} refund ${definitive ? 'rejected' : 'outcome unknown'}: ${message}`);
+    return { refunded: false, status: definitive ? 'failed' : 'processing', outcomeUnknown: !definitive, error: message };
   }
 }
 
@@ -252,8 +280,9 @@ async function refundDuplicatePayment(orderIds, paymentId, amountRupees, reason 
  * never send two refunds. NEVER throws; returns a result descriptor.
  */
 async function initiateSupportRefund(orderId, amountRupees, reason = '', adminId = null) {
-  const order = await Order.findById(orderId).select('paymentMethod paymentStatus razorpayPaymentId total supportRefund');
+  const order = await Order.findById(orderId).select('status paymentMethod paymentStatus razorpayPaymentId total supportRefund');
   if (!order) return { refunded: false, skipped: 'no_order' };
+  if (order.status !== 'delivered') return { refunded: false, skipped: 'not_delivered' };
 
   const requested = round2(amountRupees);
   if (requested <= 0) return { refunded: false, skipped: 'invalid_amount' };
@@ -286,7 +315,10 @@ async function initiateSupportRefund(orderId, amountRupees, reason = '', adminId
 
   try {
     const refund = await refundPayment(claimed.razorpayPaymentId, capped, {
-      orderId: String(claimed._id), reason: String(reason || 'Support resolution').slice(0, 200),
+      orderId: String(claimed._id),
+      refundType: 'support',
+      amountPaise: String(Math.round(capped * 100)),
+      reason: String(reason || 'Support resolution').slice(0, 200),
     });
     const completed = refund && refund.status === 'processed';
     const set = { 'supportRefund.razorpayRefundId': String((refund && refund.id) || '') };
@@ -298,13 +330,23 @@ async function initiateSupportRefund(orderId, amountRupees, reason = '', adminId
       if (capped >= round2(order.total) - 0.01) set.paymentStatus = 'refunded';
     }
     await Order.updateOne({ _id: claimed._id, 'supportRefund.status': 'processing' }, { $set: set });
-    return { refunded: true, status: completed ? 'completed' : 'processing', refundId: set['supportRefund.razorpayRefundId'], amount: capped };
+    const fresh = await Order.findById(claimed._id).select('status paymentStatus total supportRefund refund').lean();
+    const fullRefundCompleted = fresh?.supportRefund?.status === 'completed'
+      && Number(fresh.supportRefund.amount || 0) >= Number(fresh.total || 0) - 0.01;
+    if (fullRefundCompleted) {
+      try { await require('./settlementService').applyRefundAdjustment(fresh); }
+      catch (ledgerErr) { console.error(`[SUPPORT-REFUND] ledger adjustment failed order=${claimed._id}: ${ledgerErr.message}`); }
+    }
+    return { refunded: true, status: fresh?.supportRefund?.status || (completed ? 'completed' : 'processing'), refundId: set['supportRefund.razorpayRefundId'], amount: capped };
   } catch (err) {
-    const message = err?.error?.description || err?.message || 'unknown error';
+    const message = providerErrorMessage(err);
+    const definitive = hasDefinitiveProviderRejection(err);
     await Order.updateOne({ _id: claimed._id, 'supportRefund.status': 'processing' },
-      { $set: { 'supportRefund.status': 'failed', 'supportRefund.error': String(message).slice(0, 200) } }).catch(() => {});
-    console.error(`[SUPPORT-REFUND] order=${claimed._id} failed: ${message}`);
-    return { refunded: false, error: message };
+      { $set: definitive
+        ? { 'supportRefund.status': 'failed', 'supportRefund.error': `Razorpay rejected refund: ${message}`.slice(0, 200) }
+        : { 'supportRefund.error': `Refund outcome unknown; reconcile with Razorpay before retry: ${message}`.slice(0, 200) } }).catch(() => {});
+    console.error(`[SUPPORT-REFUND] order=${claimed._id} ${definitive ? 'rejected' : 'outcome unknown'}: ${message}`);
+    return { refunded: false, status: definitive ? 'failed' : 'processing', outcomeUnknown: !definitive, error: message };
   }
 }
 

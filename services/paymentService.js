@@ -30,12 +30,20 @@ function getRazorpay() {
 
 function toPaise(amountRupees) {
   const n = Number(amountRupees);
-  if (!Number.isFinite(n) || n <= 0) {
-    const err = new Error('Payment amount must be greater than zero.');
+  // Provider APIs accept integer paise. Reject invalid/overflowing amounts and
+  // positive rupee values that round down to zero instead of sending amount=0.
+  if (!Number.isFinite(n) || n <= 0 || n > Number.MAX_SAFE_INTEGER / 100) {
+    const err = new Error('Payment amount must be a finite positive amount within the supported limit.');
     err.statusCode = 400;
     throw err;
   }
-  return Math.round(n * 100);
+  const paise = Math.round(n * 100);
+  if (!Number.isSafeInteger(paise) || paise <= 0) {
+    const err = new Error('Payment amount must be at least one paisa and within the supported limit.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return paise;
 }
 
 async function createRazorpayOrder(amountRupees, receipt, notes = {}) {

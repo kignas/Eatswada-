@@ -208,13 +208,51 @@ async function recoverAbandonedCheckouts() {
   }
 }
 
+
+// Recover stock releases interrupted after a cancellation was persisted. The
+// release service uses a required transaction, so the release marker and stock
+// movements commit atomically; a process restart can safely retry rows whose
+// cancellation exists but whose inventoryReleasedAt marker is still null.
+async function recoverCancelledInventoryReleases() {
+  let rows = [];
+  try {
+    rows = await Order.find({
+      status: 'cancelled',
+      inventoryReservedAt: { $ne: null },
+      inventoryReleasedAt: null,
+    }).select('_id inventoryReservedAt inventoryReleasedAt').sort({ updatedAt: 1 }).limit(MAX_PER_SWEEP).lean();
+  } catch (err) {
+    console.error('[abandoned-checkout] cancelled inventory-release scan failed:', err.message);
+    return { scanned: 0, released: 0 };
+  }
+
+  let released = 0;
+  for (const order of rows) {
+    try {
+      const outcome = await releaseOrderInventory(order, null);
+      if (outcome?.released) released++;
+    } catch (err) {
+      // Leave the marker unset; the next sweep retries. The release itself is
+      // transaction-protected so retry cannot double-credit stock.
+      console.error(`[abandoned-checkout] cancelled order ${order._id} inventory recovery failed:`, err.message);
+    }
+  }
+  return { scanned: rows.length, released };
+}
+
+async function runCheckoutRecovery() {
+  const checkout = await recoverAbandonedCheckouts();
+  const inventory = await recoverCancelledInventoryReleases();
+  return { ...checkout, inventoryReleaseScanned: inventory.scanned, inventoryReleasesRecovered: inventory.released };
+}
+
 let recoveryTimer = null;
 function startAbandonedCheckoutRecovery(intervalMs = 60 * 1000) {
-  recoverAbandonedCheckouts().catch(() => {});
+  runCheckoutRecovery().catch(() => {});
   if (recoveryTimer) clearInterval(recoveryTimer);
-  recoveryTimer = setInterval(() => { recoverAbandonedCheckouts().catch(() => {}); }, intervalMs);
+  recoveryTimer = setInterval(() => { runCheckoutRecovery().catch(() => {}); }, intervalMs);
   if (recoveryTimer.unref) recoveryTimer.unref();
   return recoveryTimer;
 }
 
-module.exports = { expireAbandonedCheckout, recoverAbandonedCheckouts, startAbandonedCheckoutRecovery, EXPIRY_REASON, ADVANCE_EXPIRY_REASON };
+module.exports = { expireAbandonedCheckout, recoverAbandonedCheckouts, recoverCancelledInventoryReleases, runCheckoutRecovery, startAbandonedCheckoutRecovery, EXPIRY_REASON, ADVANCE_EXPIRY_REASON };

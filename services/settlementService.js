@@ -95,7 +95,7 @@ async function ensureOrderLedger(order, session = null) {
   // If a full refund was processed before the delivery ledger was first
   // created, create the adjustment now. This closes the timing gap between
   // Razorpay refund webhooks and rider delivery completion.
-  if (existing && order.refund?.status === 'completed') {
+  if (existing && (order.refund?.status === 'completed' || (order.supportRefund?.status === 'completed' && Number(order.supportRefund.amount || 0) >= Number(order.total || 0) - 0.01))) {
     try {
       await applyRefundAdjustment(order, session);
     } catch (err) {
@@ -375,7 +375,9 @@ async function getRestaurantSettlementStatement(restaurantId, { includeSettled =
 }
 
 async function applyRefundAdjustment(order, session = null) {
-  if (!order?._id || order.refund?.status !== 'completed') return null;
+  const fullSupportRefund = order?.supportRefund?.status === 'completed'
+    && Number(order.supportRefund.amount || 0) >= Number(order.total || 0) - 0.01;
+  if (!order?._id || (order.refund?.status !== 'completed' && !fullSupportRefund)) return null;
   const q = SettlementLedger.findOne({ order: order._id, source: 'order_delivery', status: { $ne: 'void' } });
   if (session) q.session(session);
   const original = await q.lean();
