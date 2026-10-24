@@ -4,6 +4,7 @@ const { initiateOrderRefund } = require('../services/refundService');
 const PlatformRating = require('../models/PlatformRating');
 const asyncHandler = require('express-async-handler');
 const { releaseOrderInventory } = require('../services/inventoryReservationService');
+const { cancelOrderByStaff } = require('../services/orderCancellationService');
 const bcrypt       = require('bcryptjs');
 const User         = require('../models/User');
 const Order        = require('../models/Order');
@@ -147,6 +148,21 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
     return res.status(409).json({ success: false, message: 'Delivery OTP must be verified before an order can be marked delivered.' });
   }
   const previousStatus = order.status;
+  if (target === 'cancelled') {
+    // A status flip is not a cancellation: stock, refund and notifications must
+    // follow. Use the same path as POST/PATCH .../cancel.
+    const reason = String(req.body?.reason || req.body?.note || 'Cancelled by admin').trim().slice(0, 200);
+    await cancelOrderByStaff(order, { reason, actorId: req.user._id });
+    await logAdminAction(req, {
+      action: 'order.cancel',
+      targetType: 'order',
+      targetId: order._id,
+      targetLabel: order.orderNumber || String(order._id),
+      oldValue: { status: previousStatus },
+      newValue: { status: order.status, reason },
+    });
+    return res.json({ success: true, data: order });
+  }
   order.advanceStatus(target, 'Updated by admin');
   await order.save();
   if (target === 'delivered') await require('../services/settlementService').ensureOrderLedger(order);
@@ -170,12 +186,8 @@ exports.cancelOrder = asyncHandler(async (req, res) => {
   }
   const reason = String(req.body?.reason || 'Cancelled by admin').trim().slice(0, 200);
   const previousStatus = order.status;
-  order.advanceStatus('cancelled', reason);
-  order.cancelReason = reason;
-  // Launch-fix: persist the cancellation first, then refund (atomic claim).
-  await order.save();
-  await releaseOrderInventory(order, req.user._id);
-  await initiateOrderRefund(order, reason);
+  // Persist first, then release stock, refund, stop the ring, notify.
+  await cancelOrderByStaff(order, { reason, actorId: req.user._id });
   await logAdminAction(req, {
     action: 'order.cancel',
     targetType: 'order',

@@ -245,7 +245,7 @@ exports.getVendorDashboard = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findOne(vendorRestaurantFilter(req)).select('name createdAt isOpen availability deliveryMode').lean();
   if (!restaurant) return res.status(404).json({success:false,message:'Restaurant not found.'});
   const start = new Date(); start.setHours(0,0,0,0);
-  const filter = { restaurant: restaurant._id, createdAt: { $gte: start }, $or: [{paymentMethod:'cod'},{paymentMethod:{$ne:'cod'},paymentStatus:'paid'}] };
+  const filter = { restaurant: restaurant._id, createdAt: { $gte: start }, $or: [{paymentMethod:'cod',partialCodAdvanceStatus:{$ne:'pending'}},{paymentMethod:{$ne:'cod'},paymentStatus:'paid'}] };
   const [orders, pendingSettlement, pendingMenu, lowStock, recent] = await Promise.all([
     Order.find(filter).select('status total subtotal paymentStatus').lean(),
     Ledger.aggregate([{ $match:{restaurant:restaurant._id,vendor:req.user._id,status:'eligible'} },{ $group:{_id:null,total:{$sum:'$netSettlementAmount'}} }]),
@@ -265,7 +265,7 @@ exports.getVendorAlerts = asyncHandler(async (req,res)=>{
   const [menu, stock, orders]=await Promise.all([
     Menu.find({restaurantId,isActive:{$ne:false},approvalStatus:{$in:['pending','rejected']}}).select('name approvalStatus rejectionReason updatedAt').sort({updatedAt:-1}).limit(50).lean(),
     Menu.find({restaurantId,isActive:{$ne:false},trackStock:true}).select('name stockQuantity lowStockThreshold').lean(),
-    Order.find({restaurant:restaurantId,status:'placed',$or:[{paymentMethod:'cod'},{paymentMethod:{$ne:'cod'},paymentStatus:'paid'}]}).select('orderNumber createdAt').sort({createdAt:1}).limit(50).lean()
+    Order.find({restaurant:restaurantId,status:'placed',$or:[{paymentMethod:'cod',partialCodAdvanceStatus:{$ne:'pending'}},{paymentMethod:{$ne:'cod'},paymentStatus:'paid'}]}).select('orderNumber createdAt').sort({createdAt:1}).limit(50).lean()
   ]);
   const alerts=[...menu.map(i=>({type:i.approvalStatus==='rejected'?'menu_rejected':'menu_pending',entityId:i._id,title:i.name,message:i.rejectionReason|| (i.approvalStatus==='pending'?'Waiting for admin approval.':'Item needs correction.'),createdAt:i.updatedAt})),...stock.filter(i=>Number(i.stockQuantity)<=Number(i.lowStockThreshold)).map(i=>({type:Number(i.stockQuantity)<=0?'out_of_stock':'low_stock',entityId:i._id,title:i.name,message:`${i.stockQuantity} unit(s) remaining`,createdAt:null})),...orders.map(o=>({type:'order_action',entityId:o._id,title:o.orderNumber||'New order',message:'Order requires your response.',createdAt:o.createdAt}))];
   res.json({success:true,data:alerts});

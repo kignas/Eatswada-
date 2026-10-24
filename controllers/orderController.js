@@ -25,6 +25,8 @@ const { createRazorpayOrder, assertConfigured } = require('../services/paymentSe
 const { operationalStatus } = require('../services/restaurantHours');
 const { notifyOrderStatus } = require('../services/notificationService');
 const { initiateOrderRefund } = require('../services/refundService');
+const { releaseOrderToRestaurant } = require('../services/restaurantHandoffService');
+const { cancelOrderByStaff } = require('../services/orderCancellationService');
 const { calculateRestaurantCommission, DEFAULT_COMMISSION_RATE } = require('../services/commissionService');
 const { ensureOrderLedger } = require('../services/settlementService');
 const { deadlinesFrom, isWithinCustomerCancellationWindow } = require('../services/orderCancellationPolicy');
@@ -837,6 +839,13 @@ const createOrder = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  // Ordinary COD (no advance owed) is committed the moment it is created, so the
+  // restaurant is notified and its 5-minute response window starts now. UPI and
+  // partial-COD orders are handed over only after their payment is captured.
+  if (requestedMethod === 'cod' && !(partialCodAdvance > 0)) {
+    for (const order of created) await releaseOrderToRestaurant(order);
+  }
+
   return res.status(201).json(buildCheckoutResponse(created, false));
 });
 
@@ -1098,6 +1107,18 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+  // Cancelling is more than a status change (stock, refund, notifications), and
+  // it must also work for orders whose online payment never arrived — so it is
+  // handled here, before the payment-captured gate below.
+  if (status === 'cancelled') {
+    if (!allowedNextStatuses(order.status).includes('cancelled')) {
+      return res.status(409).json({ success: false, message: `Cannot cancel an order that is \"${order.status}\".` });
+    }
+    await cancelOrderByStaff(order, { reason: (typeof note === 'string' && note.trim()) || 'Cancelled by admin', actorId: req.user._id });
+    await order.populate(ORDER_POPULATE_PATHS);
+    return res.json({ success: true, data: withLiveDisplayData(order) });
+  }
 
   if (Number(order.partialCodAdvanceAmount || 0) > 0 && order.partialCodAdvanceStatus !== 'paid' && status !== 'cancelled') {
     return res.status(409).json({ success: false, code: 'COD_ADVANCE_REQUIRED', message: 'The customer must complete the required COD advance before the restaurant can accept this order.' });

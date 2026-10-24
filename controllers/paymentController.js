@@ -17,6 +17,7 @@ const {
 } = require('../services/paymentService');
 const { RESTAURANT_RESPONSE_WINDOW_MS, deadlinesFrom } = require('../services/orderCancellationPolicy');
 const { releaseOrderInventory } = require('../services/inventoryReservationService');
+const { releaseOrderToRestaurant } = require('../services/restaurantHandoffService');
 
 function publicPayment(order) {
   return {
@@ -221,7 +222,12 @@ async function markPartialCodAdvancePaid(order, paymentId) {
     { $set: { partialCodAdvanceStatus: 'paid', partialCodAdvancePaidAt: new Date(), razorpayPaymentId: String(paymentId), paymentStatus: 'cod_pending' } },
     { new: true }
   );
-  if (claimed) return { paid: true, order: claimed };
+  if (claimed) {
+    // The advance is now captured, so the order is committed: start the
+    // restaurant's response window and notify. Idempotent (see the service).
+    await releaseOrderToRestaurant(claimed);
+    return { paid: true, order: claimed };
+  }
   const current = await Order.findById(order._id);
   if (current?.partialCodAdvanceStatus === 'paid' && current.razorpayPaymentId === String(paymentId)) return { paid: true, alreadyPaid: true, order: current };
   if (current?.partialCodAdvanceStatus === 'paid' && current.razorpayPaymentId && current.razorpayPaymentId !== String(paymentId)) {

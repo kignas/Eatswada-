@@ -111,7 +111,7 @@ exports.getVendorOrders = asyncHandler(async (req, res) => {
     ...orderOwnershipFilter(req),
     ...statusFilter,
     $or: [
-      { paymentMethod: 'cod' },
+      { paymentMethod: 'cod', partialCodAdvanceStatus: { $ne: 'pending' } },
       { paymentMethod: { $ne: 'cod' }, paymentStatus: 'paid' },
     ],
   };
@@ -173,6 +173,10 @@ exports.acceptOrder = asyncHandler(async (req, res) => {
 
   if (order.paymentMethod !== 'cod' && order.paymentStatus !== 'paid') {
     return res.status(402).json({ success: false, message: 'Online payment has not been captured yet.' });
+  }
+
+  if (Number(order.partialCodAdvanceAmount || 0) > 0 && order.partialCodAdvanceStatus !== 'paid') {
+    return res.status(402).json({ success: false, code: 'COD_ADVANCE_REQUIRED', message: 'The customer has not paid the required COD advance yet.' });
   }
 
   if (order.status !== 'placed') {
@@ -289,6 +293,8 @@ exports.rejectOrder = asyncHandler(async (req, res) => {
 
   order.cancelReason = reason;
   order.cancellationResponsibility = 'none';
+  // The restaurant declined, so a captured partial-COD advance must go back.
+  if (Number(order.partialCodAdvanceAmount || 0) > 0) order.partialCodRefundEligible = true;
   order.advanceStatus('cancelled', `Rejected by restaurant: ${reason}`);
 
   // Launch-fix: persist the rejection FIRST (VersionError → 409 if the
