@@ -332,13 +332,18 @@ const getProfile = asyncHandler(async (req, res) => {
 
 const updateProfile = asyncHandler(async (req, res) => {
   const { name, email, phone, password, vegOnly, avatar, adultConfirmed } = req.body;
-  const user = await User.findById(req.user._id).select('+password');
+  const user = await User.findById(req.user._id).select('+password +googleUid');
   if (!user) return res.status(404).json({ success:false, message:'User profile not found.' });
   if (name !== undefined) user.name = String(name).trim();
   if (email !== undefined) {
     const normalizedEmail = normalizeEmail(email);
     if (normalizedEmail && !isValidEmail(normalizedEmail)) {
       return res.status(400).json({ success:false, message:'Enter a valid email address.' });
+    }
+    // For a Google account the email IS the verified Google identity. Letting it be edited would
+    // let someone park another person's address on their own account (account pre-hijacking).
+    if (user.googleUid && normalizedEmail !== normalizeEmail(user.email)) {
+      return res.status(400).json({ success:false, code:'EMAIL_LINKED_TO_GOOGLE', message:'Your email is linked to your Google account and cannot be changed here.' });
     }
     user.email = normalizedEmail || undefined;
   }

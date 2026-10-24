@@ -20,11 +20,25 @@ async function findGoogleUser(decoded) {
   let user = googleUid
     ? await User.findOne({ googleUid }).select('+googleUid +password')
     : null;
+  let matchedBy = user ? 'googleUid' : null;
   if (!user && email) {
     user = await User.findOne({ email }).select('+googleUid +password');
+    if (user) matchedBy = 'email';
   }
-  return { user, email, googleUid };
+  return { user, email, googleUid, matchedBy };
 }
+
+// A verified Google email proves who the person is, but an EXISTING Eatswada account that merely
+// carries the same email proves nothing: profile emails are not verified, so an attacker can put
+// someone else's address on an account they control. Rules:
+//  - Google sign-in only serves customer accounts (staff sign in through their own endpoints).
+//  - An account already bound to a different Google uid is never handed to this Google identity.
+const isCustomerAccount = (user) => (user.role || 'user') === 'user';
+const accountExists = (res) => res.status(409).json({
+  success: false,
+  code: 'ACCOUNT_EXISTS',
+  message: 'An Eatswada account already exists for this email. Please log in instead.',
+});
 
 /**
  * Google sign-in entry point.
@@ -46,7 +60,7 @@ exports.firebaseAuth = asyncHandler(async (req, res) => {
     });
   }
 
-  let { user, email, googleUid } = await findGoogleUser(decoded);
+  let { user, email, googleUid, matchedBy } = await findGoogleUser(decoded);
 
   if (!email || decoded.email_verified !== true) {
     return res.status(400).json({
@@ -77,13 +91,22 @@ exports.firebaseAuth = asyncHandler(async (req, res) => {
     });
   }
 
+  if (!isCustomerAccount(user)) return accountExists(res);
+  if (matchedBy === 'email' && user.googleUid && user.googleUid !== googleUid) return accountExists(res);
+
   if (!user.isActive) {
     return res.status(403).json({ success: false, message: 'Your account has been disabled.' });
   }
 
   let changed = false;
-  if (googleUid && !user.googleUid) {
+  if (matchedBy === 'email' && !user.googleUid) {
+    // First Google sign-in on an account that was never Google-linked: its email was never
+    // verified, so whoever prepared it (a password, live sessions) must not keep access.
+    // Link it, drop the old password and revoke every older JWT. The owner can set a new
+    // password from their profile or via "forgot password" after signing in with Google.
     user.googleUid = googleUid;
+    user.password = undefined;
+    user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
     changed = true;
   }
   if (decoded.picture && user.avatar !== String(decoded.picture)) {
@@ -158,7 +181,7 @@ exports.completeGoogleProfile = asyncHandler(async (req, res) => {
 
   if (emailUser || googleUser) {
     const existing = emailUser || googleUser;
-    if (existing.googleUid && existing.googleUid === googleUid) {
+    if (isCustomerAccount(existing) && existing.googleUid && existing.googleUid === googleUid) {
       // A retry after a transient client failure should not create a second
       // account. Complete the same Google-linked account idempotently.
       if (!existing.isActive) {
