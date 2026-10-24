@@ -7,6 +7,8 @@ const User = require('../models/User');
 const RiderApplication = require('../models/RiderApplication');
 
 const normalizePhone = value => String(value || '').replace(/[\s()-]/g, '').trim();
+// Secret status token: the applicant gets it once; we keep only its sha256 (same idea as the vendor flow).
+const hashStatusToken = token => crypto.createHash('sha256').update(token).digest('hex');
 const publicShape = app => ({
   id: String(app._id), name: app.name, phone: app.phone, email: app.email,
   vehicleType: app.vehicleType, vehicleNumber: app.vehicleNumber,
@@ -35,25 +37,33 @@ exports.submitApplication = asyncHandler(async (req, res) => {
   const existingUser = await User.findOne({ $or: [{ phone }, ...(email ? [{ email }] : [])] }).select('_id role');
   if (existingUser) return res.status(409).json({ success:false, message:'An account already exists for this phone or email. Contact Eatswada support if you need help.' });
   const existingApp = await RiderApplication.findOne({ phone }).select('_id status');
-  if (existingApp && !['rejected','withdrawn'].includes(existingApp.status)) return res.status(409).json({ success:false, message:'An application already exists for this phone number.', applicationId:String(existingApp._id), status:existingApp.status });
+  // Generic on purpose: never return the applicationId or status of someone else's application.
+  if (existingApp && !['rejected','withdrawn'].includes(existingApp.status)) return res.status(409).json({ success:false, message:'An application already exists for this phone number.' });
   const passwordHash = await bcrypt.hash(password, 12);
+  const statusToken = crypto.randomBytes(32).toString('hex');
+  const statusTokenHash = hashStatusToken(statusToken);
   let application;
   if (existingApp) {
     application = await RiderApplication.findByIdAndUpdate(existingApp._id, {
-      $set: { name, phone, email, passwordHash, vehicleType, vehicleNumber, deliveryZone, drivingLicenseNumber, vehicleRegistrationNumber, status:'submitted', reviewNote:'', reviewedBy:null, reviewedAt:null, approvedRiderId:null }
+      $set: { name, phone, email, passwordHash, statusTokenHash, vehicleType, vehicleNumber, deliveryZone, drivingLicenseNumber, vehicleRegistrationNumber, status:'submitted', reviewNote:'', reviewedBy:null, reviewedAt:null, approvedRiderId:null }
     }, { new:true, runValidators:true }).select('+passwordHash');
   } else {
-    application = await RiderApplication.create({ name, phone, email, passwordHash, vehicleType, vehicleNumber, deliveryZone, drivingLicenseNumber, vehicleRegistrationNumber });
+    application = await RiderApplication.create({ name, phone, email, passwordHash, statusTokenHash, vehicleType, vehicleNumber, deliveryZone, drivingLicenseNumber, vehicleRegistrationNumber });
   }
-  return res.status(201).json({ success:true, message:'Application submitted. You can log in after admin approval.', data:{ id:String(application._id), status:application.status, name:application.name } });
+  return res.status(201).json({ success:true, message:'Application submitted. You can log in after admin approval.', data:{ id:String(application._id), status:application.status, name:application.name, statusToken } });
 });
 
 exports.getApplicationStatus = asyncHandler(async (req, res) => {
   const id = String(req.params.id || '');
-  const phone = normalizePhone(req.query.phone);
-  if (!mongoose.Types.ObjectId.isValid(id) || !/^\+?[1-9]\d{9,14}$/.test(phone)) return res.status(400).json({ success:false, message:'Valid application ID and phone are required.' });
-  const app = await RiderApplication.findOne({ _id:id, phone }).select('name status reviewNote createdAt reviewedAt');
+  const token = String(req.query?.statusToken || req.body?.statusToken || '').trim();
+  if (!mongoose.Types.ObjectId.isValid(id) || !token) return res.status(400).json({ success:false, message:'Valid application ID and status token are required.' });
+  const app = await RiderApplication.findById(id).select('+statusTokenHash');
   if (!app) return res.status(404).json({ success:false, message:'Application not found.' });
+  // Old applications have no token hash, and timingSafeEqual throws on a missing value or a length mismatch.
+  // Compare only equal-length buffers; every non-match is the same plain 404.
+  const given = Buffer.from(hashStatusToken(token));
+  const stored = Buffer.from(typeof app.statusTokenHash === 'string' ? app.statusTokenHash : '');
+  if (given.length !== stored.length || !crypto.timingSafeEqual(given, stored)) return res.status(404).json({ success:false, message:'Application not found.' });
   return res.json({ success:true, data:{ id:String(app._id), name:app.name, status:app.status, reviewNote:app.reviewNote, createdAt:app.createdAt, reviewedAt:app.reviewedAt } });
 });
 
