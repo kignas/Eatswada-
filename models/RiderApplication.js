@@ -5,6 +5,8 @@ const riderApplicationSchema = new mongoose.Schema({
   phone: { type: String, required: true, trim: true, unique: true },
   email: { type: String, lowercase: true, trim: true, default: '' },
   passwordHash: { type: String, required: true, select: false },
+  // sha256 of the secret status token given to the applicant once at submit time. Never returned by queries.
+  statusTokenHash: { type: String, select: false },
   vehicleType: { type: String, enum: ['bike', 'scooter', 'bicycle', 'car'], required: true },
   vehicleNumber: { type: String, trim: true, uppercase: true, default: '' },
   deliveryZone: { type: String, trim: true, required: true, maxlength: 80 },
