@@ -35,6 +35,7 @@ const { deadlinesFrom, isWithinCustomerCancellationWindow } = require('../servic
 const { getPlatformSettings, billPolicyFrom } = require('../services/platformSettingsService');
 const { computeCheckoutBill, evaluateCheckoutGate } = require('../services/checkoutMath');
 const { getZoneDeliveryCapacity, resolveOrderZone } = require('../services/riderAssignmentService');
+const { normalizeOwnCloudinaryUrl } = require('../utils/cloudinaryUrl');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -989,9 +990,14 @@ const submitReview = asyncHandler(async (req, res) => {
   if (requestedItemRatings.length > 100) return res.status(400).json({ success:false, message:'Too many item ratings.' });
   const requestedPhotos = Array.isArray(req.body?.photos) ? req.body.photos : [];
   if (requestedPhotos.length > 4) return res.status(400).json({ success: false, message: 'A review can include up to 4 photos.' });
-  const photos = requestedPhotos.map(value => String(value || '').trim()).filter(Boolean);
-  if (photos.some(url => url.length > 1000 || !/^https:\/\/res\.cloudinary\.com\//i.test(url))) {
-    return res.status(400).json({ success: false, message: 'Review photos must be uploaded through the customer image upload endpoint.' });
+  // Only images served from OUR Cloudinary cloud (the customer upload endpoint) are accepted.
+  const photos = [];
+  for (const value of requestedPhotos) {
+    const candidate = typeof value === 'string' ? value.trim() : (value || '');
+    if (candidate === '') continue; // blank entries are ignored, as before
+    const url = normalizeOwnCloudinaryUrl(candidate);
+    if (!url) return res.status(400).json({ success: false, message: 'Review photos must be uploaded through the customer image upload endpoint.' });
+    photos.push(url);
   }
   const numericScore = Number(score);
   const numericRiderScore = riderScore == null || riderScore === '' ? null : Number(riderScore);
@@ -1019,8 +1025,8 @@ const submitReview = asyncHandler(async (req, res) => {
     // Per-item photos: same Cloudinary-only rule as the review-level photos.
     const itemPhotos = (Array.isArray(raw?.photos) ? raw.photos : [])
       .slice(0, 3)
-      .map(value => String(value || '').trim())
-      .filter(url => url && url.length <= 1000 && /^https:\/\/res\.cloudinary\.com\//i.test(url));
+      .map(value => normalizeOwnCloudinaryUrl(value))
+      .filter(Boolean);
     itemRatings.push({ menuItem: orderItem.menuItem || null, itemName: orderItem.name, score: scoreValue, comment: String(raw?.comment || '').trim().slice(0,300), photos: itemPhotos });
   }
   let review = await Review.findOne({ order: order._id });
