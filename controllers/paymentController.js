@@ -16,7 +16,6 @@ const {
   toPaise,
 } = require('../services/paymentService');
 const { RESTAURANT_RESPONSE_WINDOW_MS, deadlinesFrom } = require('../services/orderCancellationPolicy');
-const { releaseOrderInventory } = require('../services/inventoryReservationService');
 const { releaseOrderToRestaurant } = require('../services/restaurantHandoffService');
 
 function publicPayment(order) {
@@ -219,6 +218,9 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
 // Exported (not a route handler) so the abandoned-checkout sweeper can settle a
 // late capture through the exact same paid path as the webhook.
 exports.markCheckoutPaid = markCheckoutPaid;
+// Same for a partial-COD advance that Razorpay captured after the customer left.
+exports.markPartialCodAdvancePaid = markPartialCodAdvancePaid;
+
 
 async function markPartialCodAdvancePaid(order, paymentId) {
   const claimed = await Order.findOneAndUpdate(
@@ -291,44 +293,20 @@ exports.verifyPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Payment amount or currency does not match the server total.' });
   }
   if (payment.status !== 'captured') {
-    // A terminal Razorpay failure must never leave a customer-facing order
-    // looking live/placed. The order is cancelled here as a second line of
-    // defence in case the Razorpay payment.failed webhook is delayed/missed.
+    // A failed attempt does NOT cancel the order: the customer can retry payment on it
+    // (retryPayment) and the abandoned-checkout sweeper expires it if they never do.
     if (payment.status === 'failed' && isPartialCod) {
       await Order.updateOne({ _id: orders[0]._id, razorpayOrderId: storedRazorpayOrderId, partialCodAdvanceStatus: 'pending', status: { $ne: 'cancelled' } }, { $set: { partialCodAdvanceStatus: 'pending' } });
       return res.status(409).json({ success: false, message: 'Advance payment failed. You can retry the advance payment.', partialCodAdvanceStatus: 'pending' });
     }
     if (payment.status === 'failed') {
-      await Order.updateMany(
-        {
-          _id: { $in: orders.map(o => o._id) },
-          razorpayOrderId: storedRazorpayOrderId,
-          paymentStatus: { $nin: ['paid', 'refunded'] },
-          status: { $ne: 'cancelled' },
-        },
-        {
-          $set: {
-            paymentStatus: 'failed',
-            razorpayPaymentId: String(razorpayPaymentId),
-            status: 'cancelled',
-            cancelReason: 'Payment failed',
-            isCancellable: false,
-          },
-          $push: {
-            statusHistory: {
-              status: 'cancelled',
-              note: 'Payment failed; order cancelled automatically',
-              at: new Date(),
-            },
-          },
-        }
-      );
-      for (const failedOrder of orders) await releaseOrderInventory(failedOrder, req.user?._id || null).catch(() => {});
+      const current = await Order.findOne({ _id: orders[0]._id }).select('status');
       return res.status(409).json({
         success: false,
-        message: 'Payment failed. The order has been cancelled.',
+        retryable: true,
+        message: 'Payment failed. You can retry the payment.',
         paymentStatus: 'failed',
-        orderStatus: 'cancelled',
+        orderStatus: current?.status || 'placed',
       });
     }
     return res.status(409).json({ success: false, message: `Payment is ${payment.status || 'not captured yet'}.`, paymentStatus: payment.status || 'pending' });
@@ -486,37 +464,9 @@ exports.paymentStatus = asyncHandler(async (req, res) => {
         }
       }
 
-      const failed = attempts.find(p => p.status === 'failed');
-      if (failed && attempts.length > 0 && attempts.every(p => p.status === 'failed')) {
-        // findOneAndUpdate returns the FULL order (items, restaurant, reservation
-        // markers). The `order` above was loaded with a narrow .select(), so
-        // releasing stock from it silently did nothing. Only the request that
-        // actually wins this cancel releases; release itself is also idempotent.
-        const cancelledNow = await Order.findOneAndUpdate(
-          { _id: order._id, razorpayOrderId: order.razorpayOrderId, paymentStatus: 'pending', status: { $ne: 'cancelled' } },
-          {
-            $set: {
-              paymentStatus: 'failed',
-              razorpayPaymentId: String(failed.id || ''),
-              status: 'cancelled',
-              cancelReason: 'Payment failed',
-              isCancellable: false,
-            },
-            $push: {
-              statusHistory: {
-                status: 'cancelled',
-                note: 'Payment failed; order cancelled automatically',
-                at: new Date(),
-              },
-            },
-          },
-          { new: true }
-        );
-        if (cancelledNow) {
-          await releaseOrderInventory(cancelledNow, req.user?._id || null)
-            .catch((err) => console.error(`[PAYMENT] stock release failed for ${cancelledNow._id}:`, err.message));
-        }
-      }
+      // Failed attempts are deliberately NOT turned into a cancellation here: the customer
+      // may still retry (same modal or retryPayment). An order that is never paid is expired
+      // by the abandoned-checkout sweeper, which also returns the reserved stock.
     } catch (err) {
       console.warn(`[PAYMENT] status reconciliation failed for ${order.razorpayOrderId}: ${err.message}`);
     }
@@ -615,48 +565,12 @@ exports.handleWebhook = asyncHandler(async (req, res) => {
   } else if (event.event === 'payment.failed' && isPartialCod) {
     await Order.updateOne({ _id: orders[0]._id, razorpayOrderId, partialCodAdvanceStatus: 'pending', status: { $ne: 'cancelled' } }, { $set: { partialCodAdvanceStatus: 'pending' } });
   } else if (event.event === 'payment.failed') {
-    // A failed online payment must NEVER remain a live `placed` order.
-    // Mark only the orders belonging to this CURRENT Razorpay attempt as
-    // payment-failed/cancelled. Old attempts are kept in history so a late
-    // event cannot cancel a newer retry.
-    await Order.updateMany(
-      {
-        _id: { $in: orders.map(o => o._id) },
-        razorpayOrderId,
-        paymentStatus: { $nin: ['paid', 'refunded'] },
-      },
-      {
-        $set: {
-          paymentStatus: 'failed',
-          razorpayPaymentId: paymentId,
-          status: 'cancelled',
-          cancelReason: 'Payment failed',
-          isCancellable: false,
-        },
-        $push: {
-          statusHistory: {
-            status: 'cancelled',
-            note: 'Payment failed; order cancelled automatically',
-            at: new Date(),
-          },
-        },
-      }
-    );
-    // The cancelled order no longer needs its reserved stock. Re-read the orders
-    // THIS event just failed (matched by the payment id it stamped) so we hold the
-    // full documents. Release is idempotent: a Razorpay webhook retry, the status
-    // reconciliation above, or an earlier customer cancel can never restore twice.
-    const failedNow = await Order.find({
-      _id: { $in: orders.map(o => o._id) },
-      razorpayOrderId,
-      status: 'cancelled',
-      paymentStatus: 'failed',
-      razorpayPaymentId: paymentId,
-    });
-    for (const failedOrder of failedNow) {
-      await releaseOrderInventory(failedOrder, null)
-        .catch((err) => console.error(`[PAYMENT] stock release failed for ${failedOrder._id}:`, err.message));
-    }
+    // ONE failed attempt must not cancel the order. Razorpay lets the customer retry
+    // inside the same checkout modal (and retryPayment opens a fresh attempt); if that
+    // retry succeeds, the order must still be there to receive the money. The order
+    // stays `placed` / `pending` with its stock reserved. If the customer never pays,
+    // services/abandonedCheckoutService.js expires it after the unpaid window, returns
+    // the stock and tells the customer. Nothing to do here but acknowledge the event.
   }
 
   return res.json({ success: true });
