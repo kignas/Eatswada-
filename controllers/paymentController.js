@@ -216,6 +216,10 @@ async function markCheckoutPaid(orders, paymentId, amountPaise) {
   };
 }
 
+// Exported (not a route handler) so the abandoned-checkout sweeper can settle a
+// late capture through the exact same paid path as the webhook.
+exports.markCheckoutPaid = markCheckoutPaid;
+
 async function markPartialCodAdvancePaid(order, paymentId) {
   const claimed = await Order.findOneAndUpdate(
     { _id: order._id, paymentMethod: 'cod', partialCodAdvanceAmount: { $gt: 0 }, partialCodAdvanceStatus: 'pending', status: { $ne: 'cancelled' } },
