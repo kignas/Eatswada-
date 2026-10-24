@@ -2,6 +2,7 @@
 
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { JWT_VERIFY_OPTIONS } = require('../utils/jwtOptions');
 
 // Keep the auth query small: authorization does not need the user's full
 // document, addresses, saved restaurants, FCM tokens, or OTP/reset fields.
@@ -37,7 +38,7 @@ const protect = async (req, res, next) => {
   if (alreadyVerifiedThisRequest(req, token)) return next();
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
     req.user = await User.findById(decoded.id).select(AUTH_PROJECTION).lean();
 
     if (!req.user) {
@@ -79,7 +80,7 @@ const optionalAuth = async (req, res, next) => {
   if (alreadyVerifiedThisRequest(req, token)) return next();
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
     const user = await User.findById(decoded.id).select(AUTH_PROJECTION).lean();
     if (user && user.isActive && (Number(decoded.tv) || 0) === (Number(user.tokenVersion) || 0)) {
       req.user = user;
