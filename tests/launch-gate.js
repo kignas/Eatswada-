@@ -101,10 +101,11 @@ check('Admin authorization uses existing admin role',()=>{
     assert(!/\bceo\b/i.test(read(p)), `${p} still contains ceo`);
   }
 });
-check('OTP provider dependencies declared',()=>{
+check('Phone-OTP SMS provider is removed while axios remains declared',()=>{
   const pkg=JSON.parse(read('package.json'));
   assert(pkg.dependencies.axios);
-  assert(pkg.dependencies.twilio);
+  assert(!pkg.dependencies.twilio && !pkg.devDependencies?.twilio, 'Twilio must not be a dependency when phone-OTP login is disabled');
+  assert(!fs.existsSync(path.join(projectRoot, 'utils', 'sendOTP.js')), 'obsolete SMS OTP utility must not exist');
 });
 if (fs.existsSync(path.join(projectRoot,'customer','cart.html'))) {
   check('Customer cart profile endpoint is correct',()=>{
