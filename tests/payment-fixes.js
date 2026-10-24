@@ -131,6 +131,35 @@ const webhook = (event, entity) => pc.handleWebhook({ body: Buffer.from(JSON.str
     assert.ok(Array.isArray(r.body?.refundedOrderIds) && r.body.refundedOrderIds.length === 1, 'verify must tell the app the money is being refunded');
   });
 
+  const codBase = (o) => base({ paymentMethod: 'cod', paymentStatus: 'cod_pending', total: 1000, partialCodAdvanceAmount: 100, partialCodAdvanceStatus: 'pending', restaurantResponseDeadline: null, ...o });
+
+  await t('N: partial-COD advance captured → restaurant response window starts and vendor is notified exactly once', async () => {
+    Order.insert(codBase({ _id: 'P1' }));
+    const ev = ['payment.captured', { id: 'pay_p1', order_id: 'order_O1', amount: 10000, currency: 'INR', status: 'captured' }];
+    paymentToFetch = ev[1];
+    const req = { body: { orderId: 'P1', razorpayPaymentId: 'pay_p1', razorpayOrderId: 'order_O1', razorpaySignature: 's' }, user: { _id: 'u1' } };
+    const r = res();
+    // webhook + client verify + a Razorpay webhook retry, all for the same payment
+    await Promise.all([webhook(...ev), pc.verifyPayment(req, r, (e) => { throw e; }), webhook(...ev)]);
+    assert.strictEqual(Order.get('P1').partialCodAdvanceStatus, 'paid');
+    assert.ok(Order.get('P1').restaurantResponseDeadline, 'restaurantResponseDeadline must be set so the 5-minute auto-cancel can apply');
+    assert.deepStrictEqual(calls.notified, ['P1'], 'vendor must be notified exactly once');
+  });
+
+  await t('O: handoff service is idempotent and only acts on a still-placed order with no deadline', async () => {
+    const { releaseOrderToRestaurant } = require(path.join(ROOT, 'services/restaurantHandoffService.js'));
+    Order.insert(codBase({ _id: 'H1', partialCodAdvanceAmount: 0, partialCodAdvanceStatus: 'not_required' }));
+    const a = await releaseOrderToRestaurant({ _id: 'H1' });
+    const b = await releaseOrderToRestaurant({ _id: 'H1' });
+    assert.strictEqual(a.handedOff, true); assert.strictEqual(b.handedOff, false);
+    assert.deepStrictEqual(calls.notified, ['H1']);
+    const dl = new Date(Order.get('H1').restaurantResponseDeadline).getTime() - Date.now();
+    assert.ok(dl > 4 * 60 * 1000 && dl <= 5 * 60 * 1000 + 1000, 'deadline is ~5 minutes out');
+    Order.insert(codBase({ _id: 'H2', status: 'cancelled', partialCodAdvanceAmount: 0 }));
+    assert.strictEqual((await releaseOrderToRestaurant({ _id: 'H2' })).handedOff, false, 'never ring for a cancelled order');
+    assert.strictEqual((await releaseOrderToRestaurant(null)).handedOff, false);
+  });
+
   await t('E: retry detects that the earlier payment already went through', async () => {
     Order.insert(base({ _id: 'E1', total: 90 }));
     orderPayments = [{ id: 'pay_LATE', status: 'captured', amount: 9000, currency: 'INR' }];
