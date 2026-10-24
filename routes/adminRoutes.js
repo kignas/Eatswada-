@@ -49,10 +49,8 @@ router.put('/orders/:id/force-deliver', protect, authorize('admin'), requirePerm
 // Pillar 1 — live delivery capacity for the dashboard shortage circuit breaker.
 router.get('/delivery-capacity', protect, authorize('admin'), getDeliveryCapacity);
 router.get('/restaurants', protect, authorize('admin'), getRestaurants);
-router.get('/restaurants/:id/fssai', protect, authorize('admin'), async (req,res,next) => {
-  // Reuse the restaurant settings reader so admin UI can inspect FSSAI data.
-  try { return getRestaurantDeliverySettings(req,res,next); } catch (e) { return next(e); }
-});
+// Reuse the restaurant settings reader so admin UI can inspect FSSAI data (it is already asyncHandler-wrapped).
+router.get('/restaurants/:id/fssai', protect, authorize('admin'), getRestaurantDeliverySettings);
 router.patch('/restaurants/:id/fssai', protect, authorize('admin'), updateRestaurantFssai);
 router.get('/restaurants/:id/commission', protect, authorize('admin'), getRestaurantCommission);
 router.patch('/restaurants/:id/commission', protect, authorize('admin'), updateRestaurantCommission);
