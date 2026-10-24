@@ -58,9 +58,12 @@ router.get('/restaurants/:id/commission', protect, authorize('admin'), getRestau
 router.patch('/restaurants/:id/commission', protect, authorize('admin'), updateRestaurantCommission);
 router.get('/restaurants/:id/delivery-settings', protect, authorize('admin'), getRestaurantDeliverySettings);
 router.patch('/restaurants/:id/delivery-settings', protect, authorize('admin'), updateRestaurantDeliverySettings);
-router.get('/payout-requests', protect, authorize('admin'), adminMarketplace.listPayoutRequests);
-router.get('/payout-requests/:id/reconciliation', protect, authorize('admin'), adminMarketplace.getPayoutReconciliation);
-router.patch('/payout-requests/:id', protect, authorize('admin'), adminMarketplace.updatePayoutRequest);
+// Vendor payouts move real money (mark paid / reject releases or settles ledger
+// entries), so they need the finance permission like every /settlements route.
+// Admins with an empty permissions list keep full access.
+router.get('/payout-requests', protect, authorize('admin'), requirePermission('finance.manage'), adminMarketplace.listPayoutRequests);
+router.get('/payout-requests/:id/reconciliation', protect, authorize('admin'), requirePermission('finance.manage'), adminMarketplace.getPayoutReconciliation);
+router.patch('/payout-requests/:id', protect, authorize('admin'), requirePermission('finance.manage'), adminMarketplace.updatePayoutRequest);
 router.get('/support/tickets', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.listSupportTickets);
 router.get('/support/tickets/:id/resolution', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.getSupportResolutionContext);
 router.post('/support/tickets/:id/resolve', protect, authorize('admin'), requirePermission('support.manage'), adminMarketplace.resolveSupportTicket);
