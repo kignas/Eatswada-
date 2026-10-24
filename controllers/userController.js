@@ -2,130 +2,11 @@ const crypto = require('crypto');
 const User          = require('../models/User');
 const Address       = require('../models/Address');
 const generateToken = require('../utils/generateToken');
-const { sendOTP, generateOTPCode } = require('../utils/sendOTP');
 const asyncHandler  = require('express-async-handler');
 
-const OTP_TTL_MS = 5 * 60 * 1000;
 const normalizePhone = (phone) => String(phone || '').trim();
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const isValidEmail = (email) => /^\S+@\S+\.\S+$/.test(email);
-
-// Phone-OTP sign-in/registration is a CUSTOMER flow. A 4-digit SMS code must never be enough
-// to get a token for an admin, vendor or rider account: those sign in through their own
-// endpoints (password + their own limiters/approval checks). Staff phones are treated exactly
-// like unknown phones so these endpoints do not reveal which numbers belong to staff.
-const isCustomerAccount = (user) => (user.role || 'user') === 'user';
-
-const issueOTP = async (user, purpose) => {
-  if (user.otp?.lockedUntil && user.otp.lockedUntil > new Date()) {
-    const error = new Error('Too many incorrect attempts. Please wait before requesting a new OTP.');
-    error.statusCode = 429;
-    throw error;
-  }
-  if (user.otpRequestedTooRecently()) {
-    const retryAfter = Math.max(1, Math.ceil((60_000 - (Date.now() - user.otp.lastSentAt.getTime())) / 1000));
-    const error = new Error(`Please wait ${retryAfter} seconds before requesting another OTP.`);
-    error.statusCode = 429;
-    throw error;
-  }
-
-  const otp = generateOTPCode();
-  user.otp = {
-    code: otp,
-    expiresAt: new Date(Date.now() + OTP_TTL_MS),
-    purpose,
-    attempts: 0,
-    lastSentAt: new Date(),
-  };
-  await user.save();
-  await sendOTP(user.phone, otp);
-};
-
-const sendOTPHandler = asyncHandler(async (req, res) => {
-  const phone = normalizePhone(req.body.phone);
-  if (!/^\+?[6-9]\d{9,14}$/.test(phone)) {
-    return res.status(400).json({ success: false, message: 'Enter a valid mobile number.' });
-  }
-
-  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
-  if (!user) {
-    user = new User({ phone, isPhoneVerified: false });
-  } else if (!isCustomerAccount(user)) {
-    // Same reply as a normal send, but no SMS and nothing stored.
-    console.warn('[OTP] customer OTP requested for a non-customer account; ignored');
-    return res.json({ success: true, message: 'OTP sent successfully' });
-  }
-
-  await issueOTP(user, 'login');
-  res.json({ success: true, message: 'OTP sent successfully' });
-});
-
-const verifyOTPHandler = asyncHandler(async (req, res) => {
-  const phone = normalizePhone(req.body.phone);
-  const otp = String(req.body.otp || '').trim();
-  console.log(`[OTP-VERIFY] handler phone=${phone.replace(/(\+91|\+?91)?(\d{2})\d{6}(\d{2})$/, '$1$2******$3')} otpLength=${otp.length}`);
-  const user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt');
-  if (!user || !isCustomerAccount(user)) {
-    console.log('[OTP-VERIFY] user not found');
-    return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
-  }
-  const result = user.checkOTP(otp, 'login');
-  if (!result.ok) {
-    await user.save();
-    return res.status(result.reason === 'locked' || result.reason === 'locked_now' ? 429 : 400).json({
-      success: false,
-      message: result.reason === 'locked' || result.reason === 'locked_now'
-        ? 'Too many incorrect attempts. Please request a new OTP later.'
-        : 'Invalid or expired OTP.'
-    });
-  }
-  user.isPhoneVerified = true;
-  user.lastLogin = new Date();
-  await user.save();
-  res.json({
-    success: true,
-    message: 'Login successful',
-    data: { user: user.toJSON(), token: generateToken(user._id, user.role, user.tokenVersion) },
-  });
-});
-
-const register = asyncHandler(async (req, res) => {
-  const name = String(req.body.name || '').trim();
-  const phone = normalizePhone(req.body.phone);
-  const email = normalizeEmail(req.body.email);
-  const password = String(req.body.password || '');
-  const otp = String(req.body.otp || '').trim();
-
-  if (!/^\+?[6-9]\d{9,14}$/.test(phone)) return res.status(400).json({ success:false, message:'Enter a valid mobile number.' });
-  if (password.length < 6) return res.status(400).json({ success:false, message:'Password must be at least 6 characters.' });
-  if (!name || name.length < 2) return res.status(400).json({ success:false, message:'Name is required.' });
-  if (email && !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ success:false, message:'Enter a valid email address.' });
-
-  // otp.attempts / otp.lockedUntil are select:false and MUST be requested, or
-  // checkOTP() cannot see the running failed-attempt count and the per-account
-  // lockout below never triggers (an attacker could keep guessing the OTP here
-  // even after /verify-otp locked the account). Same projection as verify-otp.
-  let user = await User.findOne({ phone }).select('+otp.code +otp.expiresAt +otp.purpose +otp.attempts +otp.lockedUntil +otp.lastSentAt +password');
-  if (!user || !isCustomerAccount(user)) return res.status(400).json({ success:false, message:'Please verify your mobile number first.' });
-  if (user.isPhoneVerified && user.password) return res.status(409).json({ success:false, message:'This account already exists. Please log in.' });
-  const otpResult = user.checkOTP(otp, 'login');
-  if (!otpResult.ok) {
-    await user.save();
-    return res.status(otpResult.reason === 'locked' || otpResult.reason === 'locked_now' ? 429 : 400).json({ success:false, message:'Invalid or expired OTP.' });
-  }
-  const duplicateEmail = email ? await User.findOne({ email, _id: { $ne: user._id } }) : null;
-  if (duplicateEmail) return res.status(409).json({ success:false, message:'This email is already registered.' });
-
-  user.name = name;
-  if (email) user.email = email;
-  user.password = password;
-  user.isPhoneVerified = true;
-  user.otp = undefined;
-  user.lastLogin = new Date();
-  await user.save();
-
-  res.status(201).json({ success:true, data:{ user:user.toJSON(), token:generateToken(user._id, user.role, user.tokenVersion) } });
-});
 
 const login = asyncHandler(async (req, res) => {
   const identifier = String(req.body.identifier ?? req.body.email ?? req.body.phone ?? '').trim();
@@ -459,7 +340,7 @@ const setDefaultAddress = asyncHandler(async (req, res) => {
 
 
 module.exports = {
-  sendOTPHandler, verifyOTPHandler, register, login,
+  login,
   requestEmailPasswordReset, verifyEmailPasswordResetOTP, resetPasswordByEmailOTP,
   logout, getProfile, updateProfile,
   getAddresses, addAddress, updateAddress, deleteAddress, setDefaultAddress,

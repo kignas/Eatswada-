@@ -1033,8 +1033,7 @@ const submitReview = asyncHandler(async (req, res) => {
     review.comment = cleanComment;
     review.photos = photos;
     review.itemRatings = itemRatings;
-    review.isVisible = true;
-    review.adminNote = '';
+    // isVisible / adminNote are admin moderation state: an edit never resets them.
   } else {
     review = new Review({ restaurant: order.restaurant, user: req.user._id, order: order._id, score: numericScore, riderScore: numericRiderScore, comment: cleanComment, photos, itemRatings });
   }
