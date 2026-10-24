@@ -6,7 +6,7 @@ const helmet         = require('helmet');
 const cors           = require('cors');
 const rateLimit      = require('express-rate-limit');
 const mongoSanitize  = require('express-mongo-sanitize');
-const xssClean       = require('xss-clean');
+const sanitizeInput  = require('./middleware/sanitizeInput');
 const hpp            = require('hpp');
 const compression    = require('compression');
 const morgan         = require('morgan');
@@ -133,7 +133,7 @@ const authLimiter = rateLimit({
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 app.use(mongoSanitize());
-app.use(xssClean());
+app.use(sanitizeInput);
 app.use(hpp({ whitelist: ['sort', 'category', 'cuisine'] }));
 
 if (process.env.NODE_ENV === 'development') app.use(morgan('dev'));
