@@ -30,6 +30,20 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Per-account guard for password changes: a stolen token must not be able to guess the current
+// password. Only requests that try to change the password are counted (name/avatar edits are free),
+// and only failed ones (a successful change does not use up the budget).
+const profilePasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => String(req.user._id),
+  skip: (req) => req.body?.password === undefined,
+  message: { success: false, code: 'TOO_MANY_PASSWORD_ATTEMPTS', message: 'Too many password attempts. Please try again in 15 minutes or reset your password by email.' },
+});
+
 // ── Auth ──────────────────────────────────────────────────────
 // Customers sign in with Google (Firebase) or email/phone + password. There is no phone-OTP
 // login/sign-up: /send-otp, /verify-otp and /register were removed (unknown routes -> 404).
@@ -74,12 +88,13 @@ router.post('/logout', protect, logout);
 
 // ── Profile ───────────────────────────────────────────────────
 router.get('/profile',  protect, getProfile);
-router.put('/profile',  protect,
+router.put('/profile',  protect, profilePasswordLimiter,
   [
     body('name').optional().isString().trim().isLength({ min: 1, max: 80 }).withMessage('Name must be 1-80 characters'),
     body('email').optional({ values: 'falsy' }).isEmail().withMessage('Enter a valid email address'),
     body('phone').optional().isString().isLength({ min: 10, max: 20 }).withMessage('Enter a valid mobile number'),
     body('password').optional().isString().isLength({ min: 8, max: 128 }).withMessage('Password must be 8-128 characters'),
+    body('currentPassword').optional().isString().isLength({ max: 128 }).withMessage('Current password is invalid'),
     body('vegOnly').optional().isBoolean().withMessage('vegOnly must be boolean'),
     body('avatar').optional({ values: 'null' }).isString().isLength({ max: 2048 }).withMessage('Avatar value is too long'),
     body('adultConfirmed').optional().isBoolean().withMessage('adultConfirmed must be boolean'),
