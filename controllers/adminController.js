@@ -18,6 +18,7 @@ const { logAdminAction } = require('../services/auditService');
 const { commissionRateForDeliveryMode, commissionPlanForDeliveryMode } = require('../services/commissionService');
 const { operationalStatus, getLocalContext } = require('../services/restaurantHours');
 const { setAccountFreeze } = require('../services/customerTrustService');
+const { isFullAdmin } = require('../middleware/permissionMiddleware');
 
 const ADMIN_ROLES = ['admin'];
 const VEHICLE_TYPES = ['bike', 'scooter', 'bicycle', 'car'];
@@ -1198,12 +1199,13 @@ exports.getPlatformRatings = asyncHandler(async (req, res) => {
 
 
 
-// Least-privilege admin staff modules. An admin with an empty permission set
-// keeps full access (back-compat); a populated set scopes them to these areas.
+// Least-privilege admin staff modules. Full access requires the explicit '*'
+// permission (see middleware/permissionMiddleware.js); an empty or missing set
+// grants nothing. A populated set scopes staff to these areas.
 // Support / trust / review modules let a growing team be split by function.
-const ADMIN_PERMISSION_SET = ['restaurants.manage','restaurants.delete','vendors.manage','orders.manage','finance.manage','coupons.manage','settings.manage','analytics.view','support.manage','customers.trust','reviews.moderate'];
-exports.getAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; const u=await User.findById(req.params.id).select('name email role permissions isActive'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); res.json({success:true,data:u}); });
-exports.updateAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(String(req.user._id)===String(req.params.id)) return res.status(400).json({success:false,message:'You cannot change your own admin permissions.'}); const u=await User.findById(req.params.id).select('role permissions'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); const previousPermissions=Array.isArray(u.permissions)?[...u.permissions]:[]; const permissions=Array.isArray(req.body?.permissions)?[...new Set(req.body.permissions.filter(p=>ADMIN_PERMISSION_SET.includes(p)))]:[]; u.permissions=permissions; await u.save(); await logAdminAction(req,{action:'admin.permissions.update',targetType:'admin',targetId:u._id,targetLabel:u.email||String(u._id),oldValue:{permissions:previousPermissions},newValue:{permissions:u.permissions}}); res.json({success:true,data:{adminId:u._id,permissions:u.permissions}}); });
+const ADMIN_PERMISSION_SET = ['restaurants.manage','restaurants.delete','vendors.manage','orders.manage','finance.manage','coupons.manage','settings.manage','analytics.view','support.manage','customers.view','customers.trust','reviews.moderate','catalog.manage','content.manage','riders.manage','privacy.manage'];
+exports.getAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(!isFullAdmin(req.user)) return res.status(403).json({success:false,message:'Full administrator access is required to view admin permissions.'}); const u=await User.findById(req.params.id).select('name email role permissions isActive'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); res.json({success:true,data:u}); });
+exports.updateAdminPermissions = asyncHandler(async (req,res)=>{ if(!assertAdmin(req,res)) return; if(!isFullAdmin(req.user)) return res.status(403).json({success:false,message:'Full administrator access is required to change admin permissions.'}); if(String(req.user._id)===String(req.params.id)) return res.status(400).json({success:false,message:'You cannot change your own admin permissions.'}); const requested=req.body?.permissions; if(!Array.isArray(requested)||requested.some(p=>typeof p!=='string'||!ADMIN_PERMISSION_SET.includes(p))) return res.status(400).json({success:false,message:'permissions must be an array of known permission names.'}); const u=await User.findById(req.params.id).select('role permissions email'); if(!u||u.role!=='admin') return res.status(404).json({success:false,message:'Admin account not found.'}); const previousPermissions=Array.isArray(u.permissions)?[...u.permissions]:[]; const permissions=[...new Set(requested)]; u.permissions=permissions; await u.save(); await logAdminAction(req,{action:'admin.permissions.update',targetType:'admin',targetId:u._id,targetLabel:u.email||String(u._id),oldValue:{permissions:previousPermissions},newValue:{permissions:u.permissions}}); res.json({success:true,data:{adminId:u._id,permissions:u.permissions}}); });
 
 
 // Admin inventory controls are intentionally cross-restaurant; vendor inventory
