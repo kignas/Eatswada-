@@ -76,6 +76,7 @@ const corsOrigins = [
   'http://127.0.0.1:5500',
   'https://eatswada.com',
   'https://www.eatswada.com',
+  'https://eatswada-nextjs.vercel.app',
   'https://kignas.github.io',
   // Capacitor Android/iOS WebView origins for packaged apps.
   'https://localhost',
@@ -83,7 +84,10 @@ const corsOrigins = [
   ...configuredCorsOrigins
 ].filter((origin, index, list) => list.indexOf(origin) === index);
 
-app.use(cors({
+// The new Next.js preview is intentionally read-only at the browser CORS layer
+// while it is being verified against the shared production database.
+const nextPreviewOrigin = 'https://eatswada-nextjs.vercel.app';
+const corsOptionsForRequest = (req) => ({
   origin(origin, callback) {
     // Non-browser/server-to-server requests have no Origin header.
     if (!origin) return callback(null, true);
@@ -91,28 +95,16 @@ app.use(cors({
     return callback(new Error(`CORS origin not allowed: ${origin}`));
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  // Idempotency-Key is sent by cart.html during POST /api/orders.
-  // Without it, the browser preflight fails and the frontend reports
-  // the misleading "Failed to fetch" message.
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'Idempotency-Key',
-    'x-setup-key'
-  ]
-}));
-
-app.options('*', cors({
-  origin(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (corsOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('CORS origin not allowed'));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  // Limit this preview origin to read-only browser methods during initial testing.
+  // Other already-approved origins retain the existing method policy.
+  methods: req.headers.origin === nextPreviewOrigin
+    ? ['GET', 'HEAD', 'OPTIONS']
+    : ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'x-setup-key']
-}));
+});
+
+app.use((req, res, next) => cors(corsOptionsForRequest(req))(req, res, next));
+app.options('*', (req, res, next) => cors(corsOptionsForRequest(req))(req, res, next));
 
 const globalLimiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
