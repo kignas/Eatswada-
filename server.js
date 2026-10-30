@@ -36,6 +36,8 @@ const paymentRoutes = require('./routes/paymentRoutes');
 const settlementRoutes = require('./routes/settlementRoutes');
 const couponRoutes = require('./routes/couponRoutes');
 const platformRoutes = require('./routes/platformRoutes');
+const pricingRoutes = require('./routes/pricingRoutes');
+const adminPricingRoutes = require('./routes/adminPricingRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const firebaseAuthRoutes = require('./routes/firebaseAuthRoutes');
 const homeBannerRoutes = require('./routes/homeBannerRoutes');
@@ -273,6 +275,8 @@ const apiMounts = [
   ['/settlements',          settlementRoutes],
   ['/coupons',              couponRoutes],
   ['/platform',             platformRoutes],
+  ['/pricing',              pricingRoutes],
+  ['/admin/pricing',        adminPricingRoutes],
   ['/notifications',        notificationRoutes],
   ['/privacy',             privacyRoutes],
   ['/support',             customerSupportRoutes],
