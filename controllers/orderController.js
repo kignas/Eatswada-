@@ -34,6 +34,16 @@ const { ensureOrderLedger } = require('../services/settlementService');
 const { deadlinesFrom, isWithinCustomerCancellationWindow } = require('../services/orderCancellationPolicy');
 const { getPlatformSettings, billPolicyFrom } = require('../services/platformSettingsService');
 const { computeCheckoutBill, evaluateCheckoutGate } = require('../services/checkoutMath');
+// Dynamic pricing & profitability engine (feature-flagged; see
+// services/pricing/pricingRules ENGINE_DEFAULTS.pricingEngineEnabled).
+const { resolvePricingRules } = require('../services/pricing/pricingRules');
+const {
+  priceCheckoutWithEngine,
+  billFromQuote,
+  commissionFromQuote,
+} = require('../services/pricing/checkoutIntegration');
+const { DECISION: PRICING_DECISION } = require('../services/pricing/profitabilityEngine');
+const { persistSnapshot } = require('../services/pricing/quoteService');
 const { getZoneDeliveryCapacity, resolveOrderZone } = require('../services/riderAssignmentService');
 const { normalizeOwnCloudinaryUrl } = require('../utils/cloudinaryUrl');
 
@@ -646,16 +656,67 @@ const createOrder = asyncHandler(async (req, res) => {
   // ── Pillar 2: itemized bill per restaurant ──────────────────────────
   // computeCheckoutBill applies the platform free-delivery / handling /
   // small-cart / rain-surge rules on top of the distance fee.
-  const bills = priced.map((p, i) => computeCheckoutBill({
-    subtotal: p.subtotal,
-    deliveryFee: p.deliveryFee,
-    discountAmount: Number(p.discount || 0),
-    tipAmount: tipShares[i] || 0,
-    itemCount: (p.serverItems || []).reduce((n, it) => n + Number(it.quantity || 0), 0),
-    policy: billPolicy,
-    isFirstOrder,
-    restaurantFreeDeliveryApplied: p.restaurantFreeDelivery === true,
-  }));
+  //
+  // ── Dynamic pricing engine (opt-in) ─────────────────────────────────
+  // When `pricingEngineEnabled` is on, the authoritative quote comes from
+  // services/pricing instead: road-route distances, the food-price uplift,
+  // the independent rider payout, contribution targeting and the three-way
+  // acceptance decision. The legacy path below is untouched when it is off.
+  const pricingRules = await resolvePricingRules();
+  let engineQuotes = null;
+  if (pricingRules.pricingEngineEnabled === true) {
+    const engine = await priceCheckoutWithEngine({
+      rules: pricingRules,
+      priced,
+      customerCoords,
+      paymentMethod: requestedMethod,
+      isFirstOrder,
+      coupon: couponInfo
+        ? {
+            discountPaise: Math.round(Number(couponInfo.discount || 0) * 100),
+            fundedBy: couponInfo.coupon.fundedBy || 'platform',
+            restaurantSharePercent: couponInfo.coupon.restaurantSharePercent || 0,
+          }
+        : null,
+    });
+
+    if (engine.decisions.anyRejected) {
+      // NOT_ECONOMICALLY_SERVICEABLE — never knowingly sell a delivery below
+      // the contribution target. Offer the restaurant's own delivery instead
+      // when it exists, otherwise explain that delivery is unavailable.
+      const rejectedRestaurant = engine.rejected?.restaurantName || 'this restaurant';
+      const selfDelivery = priced.some(p => p.restaurant?.deliveryMode === 'self_delivery');
+      const e = new Error(selfDelivery
+        ? `${rejectedRestaurant} can only deliver this order with its own rider right now. Please choose self-delivery at checkout.`
+        : `Delivery for ${rejectedRestaurant} is unavailable at this address right now. Please try a closer restaurant or a larger order.`);
+      e.statusCode = 409;
+      e.code = 'NOT_ECONOMICALLY_SERVICEABLE';
+      e.pricingDecision = PRICING_DECISION.NOT_ECONOMICALLY_SERVICEABLE;
+      e.selfDeliveryAvailable = selfDelivery;
+      throw e;
+    }
+
+    engineQuotes = engine.quotes;
+    // The engine owns commission when it is active: the uplift IS the platform
+    // food-price revenue, so a commission would double-count it. Each quote
+    // reports rate 0 with the restaurant's full agreed base as its net amount.
+    for (let i = 0; i < priced.length; i += 1) {
+      priced[i].commission = commissionFromQuote(engineQuotes[i]);
+    }
+  }
+
+  const bills = engineQuotes
+    ? engineQuotes.map((q, i) => billFromQuote(q, { tipRupees: tipShares[i] || 0 }))
+    : priced.map((p, i) => computeCheckoutBill({
+        subtotal: p.subtotal,
+        deliveryFee: p.deliveryFee,
+        discountAmount: Number(p.discount || 0),
+        tipAmount: tipShares[i] || 0,
+        itemCount: (p.serverItems || []).reduce((n, it) => n + Number(it.quantity || 0), 0),
+        policy: billPolicy,
+        isFirstOrder,
+        restaurantFreeDeliveryApplied: p.restaurantFreeDelivery === true,
+      }));
 
   const checkoutGrandTotal = bills.reduce((sum, b) => sum + b.grandTotal, 0);
 
@@ -739,6 +800,7 @@ const createOrder = asyncHandler(async (req, res) => {
       });
       const tip = tipShares[i] || 0;
       const bill = bills[i];
+      const quote = engineQuotes ? engineQuotes[i] : null;
 
       const order = await Order.create({
         user: req.user._id,
@@ -752,7 +814,9 @@ const createOrder = asyncHandler(async (req, res) => {
         customerPhone: customer?.phone || '',
         items: p.serverItems,
         deliveryAddress: { ...addressSnapshot, coordinates: customerCoords },
-        deliveryDistanceKm: p.distanceKm,
+        deliveryDistanceKm: quote
+          ? (quote.distance?.restaurantToCustomerKm ?? p.distanceKm)
+          : p.distanceKm,
         subtotal: p.subtotal,
         // deliveryFee stores the FINAL (post free-delivery waiver) fee so every
         // legacy consumer of order.deliveryFee sees exactly what was charged.
@@ -794,6 +858,34 @@ const createOrder = asyncHandler(async (req, res) => {
       order.clearOtpSecrets();
       await order.populate(ORDER_POPULATE_PATHS);
       created.push(order);
+
+      // Immutable financial snapshot for engine-priced orders. Best-effort:
+      // a snapshot write failure must never block a paid checkout, and the
+      // unique index on `order` makes a retry safe.
+      if (quote) {
+        try {
+          const snap = await persistSnapshot({ order, quote, rules: pricingRules });
+          if (snap?._id) {
+            await Order.updateOne(
+              { _id: order._id, user: req.user._id },
+              { $set: {
+                  'financialSnapshot.snapshotId': snap._id,
+                  'financialSnapshot.pricingRuleVersion': quote.pricingVersion || '',
+                  'financialSnapshot.decision': quote.decision || null,
+                  'financialSnapshot.expectedContribution': quote.contribution?.projected ?? null,
+                  'financialSnapshot.minimumRequiredContribution': quote.contribution?.required ?? null,
+                  'financialSnapshot.riderGuaranteedPayout': quote.riderPayout?.guaranteedTotal ?? null,
+                  'financialSnapshot.foodPriceUplift': quote.bill?.foodUplift ?? null,
+                  'financialSnapshot.quoteIssuedAt': quote.quoteIssuedAt ? new Date(quote.quoteIssuedAt) : null,
+                  'financialSnapshot.quoteExpiresAt': quote.quoteExpiresAt ? new Date(quote.quoteExpiresAt) : null,
+              } }
+            );
+            order.financialSnapshot = { ...(order.financialSnapshot || {}), snapshotId: snap._id };
+          }
+        } catch (snapshotErr) {
+          console.error('[pricing] financial snapshot failed:', snapshotErr.message);
+        }
+      }
       await reserveOrderInventory(order, req.user._id);
       // Keep the in-memory snapshot aligned with the reservation marker used by
       // cancellation/payment-failure paths. Existing untracked items are no-op.

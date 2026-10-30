@@ -468,6 +468,18 @@ exports.updateAssignedOrderStatus = asyncHandler(async (req, res) => {
   const fresh = await Order.findById(order._id).populate('restaurant', 'name image address location');
   const responseOrder = fresh || updated;
 
+  // Dynamic pricing engine: append ACTUAL post-delivery figures to the
+  // immutable financial snapshot (projected figures are never rewritten).
+  // No-op on a legacy order; a failure never affects the delivery response.
+  if (status === 'delivered') {
+    try {
+      const { recordDeliveryActuals } = require('../services/pricing/riderPayoutIntegration');
+      await recordDeliveryActuals(responseOrder);
+    } catch (actualsErr) {
+      console.error('[pricing] delivery actuals hook failed:', actualsErr.message);
+    }
+  }
+
   if (status === 'out_for_delivery' || status === 'delivered') {
     try { await notifyOrderStatus(responseOrder.user, responseOrder); } catch (_) {}
   }
