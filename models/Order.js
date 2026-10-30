@@ -757,5 +757,50 @@ orderSchema.methods.clearOtpSecrets = function () {
   return this;
 };
 
+/* ── Analytics outcome hooks (Restaurant menu analytics) ──
+ *
+ * Conversion and cancellation are counted from SERVER-AUTHORITATIVE order
+ * state, never from a browser beacon. Hooking both `save` and
+ * `findOneAndUpdate` matters because the two halves of the lifecycle use
+ * different paths:
+ *   • vendor/rider/admin flows mostly use Order.save() (document middleware);
+ *   • rider delivery + refund completion use findOneAndUpdate (query
+ *     middleware), which document hooks never see.
+ * recordOrderOutcome() is idempotent (one row per order+outcome via a unique
+ * index) and never throws, so a duplicate hook firing is harmless and a
+ * tracking failure can never fail a delivery or a refund.
+ */
+function recordOutcomeFromDocument(doc) {
+  if (!doc || !doc.restaurant) return;
+  const status = doc.status;
+  const refundStatus = doc.refund && doc.refund.status;
+  // Defer so the hook never adds latency to the caller's request/transaction.
+  setImmediate(() => {
+    const { recordOrderOutcome } = require('../services/analyticsService');
+    const { schedulePerformanceRefresh } = require('../services/restaurantRankingService');
+    if (status === 'delivered') {
+      recordOrderOutcome({ eventType: 'order_completed', order: doc, userId: doc.user }).catch(() => {});
+    } else if (status === 'cancelled') {
+      recordOrderOutcome({ eventType: 'order_cancelled', order: doc, userId: doc.user }).catch(() => {});
+    }
+    if (refundStatus === 'completed') {
+      recordOrderOutcome({ eventType: 'refund', order: doc, userId: doc.user }).catch(() => {});
+    }
+    // A completed or cancelled order is a significant performance event, so the
+    // restaurant's score is recomputed (coalesced, off the request path).
+    if (status === 'delivered' || status === 'cancelled' || refundStatus === 'completed') {
+      schedulePerformanceRefresh(doc.restaurant);
+    }
+  });
+}
+
+orderSchema.post('save', function (doc) {
+  recordOutcomeFromDocument(doc);
+});
+
+orderSchema.post('findOneAndUpdate', function (doc) {
+  recordOutcomeFromDocument(doc);
+});
+
 module.exports = mongoose.model('Order', orderSchema);
 

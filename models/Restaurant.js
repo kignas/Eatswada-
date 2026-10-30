@@ -397,6 +397,33 @@ const restaurantSchema = new mongoose.Schema(
       index: true,
     },
 
+    // ── Restaurant Performance & Ranking Engine (admin controls) ──
+    // Manual feature/pin. A pinned restaurant is promoted ahead of the
+    // performance order for the online group only (an offline restaurant is
+    // never promoted above an online one). `pinnedUntil` (null = forever) lets
+    // an admin set a temporary campaign without a follow-up cleanup job.
+    isPinned: { type: Boolean, default: false, index: true },
+    pinnedUntil: { type: Date, default: null },
+    pinReason: { type: String, trim: true, maxlength: 200, default: '' },
+
+    // Clearly-labelled sponsored placement. Kept separate from isPinned so the
+    // customer API can disclose it (`sponsored: true` + label) rather than
+    // passing an ad off as an organic result.
+    isSponsored: { type: Boolean, default: false, index: true },
+    sponsoredUntil: { type: Date, default: null },
+    sponsorLabel: { type: String, trim: true, maxlength: 60, default: 'Sponsored' },
+
+    // Denormalised copy of the latest computed performance score so the
+    // customer listing can sort/filter on it in ONE indexed query instead of
+    // joining the performance collection on every request. Authoritative
+    // detail (factors, sample) lives in models/RestaurantPerformance.
+    performance: {
+      score: { type: Number, default: 0, min: 0, max: 100 },
+      dataConfidence: { type: Number, default: 0, min: 0, max: 1 },
+      isNew: { type: Boolean, default: true },
+      computedAt: { type: Date, default: null },
+    },
+
     // Number of verified customer reviews. Kept separate from legacy/admin rating data.
     reviewCount: {
       type: Number,
@@ -460,6 +487,21 @@ restaurantSchema.index({
   rating: -1,
   createdAt: -1
 });
+
+// Performance-ranking index (Restaurant Performance & Ranking Engine).
+// The recommended sort is online-first, then pinned, then performance score,
+// then the legacy admin knobs. One compound index covers the equality prefix
+// (visibility) followed by every sort key in order.
+restaurantSchema.index({
+  isActive: 1,
+  approvalStatus: 1,
+  'performance.score': -1,
+  isPinned: -1,
+  isFeatured: -1,
+  displayPriority: -1,
+});
+// Sponsored-slot selection reads only sponsored, visible, online restaurants.
+restaurantSchema.index({ isActive: 1, approvalStatus: 1, isSponsored: 1, 'performance.score': -1 });
 
 // ── Full-text search index for /search endpoint ──
 restaurantSchema.index({ name: 'text', cuisineDisplay: 'text' });
