@@ -14,6 +14,8 @@ const {
   validTime,
   withOperationalAvailability,
 } = require('../services/restaurantHours');
+const { buildAvailabilityExpr } = require('../services/restaurantAvailability');
+const { withServiceability, getRankingConfig } = require('../services/restaurantRankingService');
 
 const clampPage = (value, fallback = 1) => Math.max(1, Number(value) || fallback);
 const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
@@ -53,6 +55,13 @@ const CUSTOMER_LIST_PROJECTION = {
   isNearFast: 1,
   homeOrder: 1,
   displayPriority: 1,
+  // Ranking engine fields.
+  isPinned: 1,
+  pinnedUntil: 1,
+  isSponsored: 1,
+  sponsoredUntil: 1,
+  sponsorLabel: 1,
+  performance: 1,
   reviewCount: 1,
   totalOrders: 1,
   address: 1,
@@ -163,32 +172,69 @@ const getRestaurants = asyncHandler(async (req, res) => {
   if (category) filter.categories = { $in: [category] };
   if (search) filter.$text = { $search: search };
 
+  const skip = (page - 1) * limit;
+  const now = new Date();
+  const hoursContext = getLocalContext(now);
+  const rankingConfig = await getRankingConfig();
+
+  // Optional customer coordinates → delivery distance + serviceability.
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  const customerCoords = Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+    ? [lng, lat]
+    : null;
+
+  // Effective availability is evaluated INSIDE the aggregation (same rules as
+  // services/restaurantAvailability) so online-first ordering happens before
+  // pagination without loading the whole collection into Node. This fixes the
+  // long-standing bug where an autoHours restaurant closed by its weekly
+  // schedule still sorted as "open" because the persisted flag was stale.
+  const addFields = {
+    __isOpen: buildAvailabilityExpr(hoursContext),
+    // Legacy explicit homepage position (999999 = automatic). Kept as the
+    // highest-priority key after availability so existing admin-set positions
+    // keep working; new documents all tie on the default and fall through to
+    // the performance ranking.
+    __homeOrder: { $ifNull: ['$homeOrder', 999999] },
+    __pinned: {
+      $and: [
+        { $eq: ['$isPinned', true] },
+        { $or: [{ $eq: ['$pinnedUntil', null] }, { $gt: ['$pinnedUntil', now] }] },
+      ],
+    },
+    __sponsored: {
+      $and: [
+        { $eq: ['$isSponsored', true] },
+        { $or: [{ $eq: ['$sponsoredUntil', null] }, { $gt: ['$sponsoredUntil', now] }] },
+      ],
+    },
+  };
+
+  // Rank score = performance score, plus a clearly-labelled sponsored boost.
+  // Sponsored placements get a bounded, disclosed advantage (never a silent
+  // reorder), and it is capped so a sponsored restaurant cannot leapfrog a
+  // much better one by an unbounded amount.
+  const sponsoredBoost = rankingConfig.sponsoredEnabled ? Number(rankingConfig.sponsoredScoreBoost) || 0 : 0;
+  addFields.__rankScore = {
+    $add: [
+      { $ifNull: ['$performance.score', 0] },
+      { $cond: ['$__sponsored', sponsoredBoost, 0] },
+    ],
+  };
+
   const sortMap = {
-    recommended: { homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 },
     rating: { rating: -1, ratingCount: -1 },
     time: { estimatedDeliveryMin: 1, rating: -1 },
-    distance: { distanceMeters: 1, rating: -1 }
+    distance: { distanceMeters: 1, rating: -1 },
   };
-  const sortOpt = sortMap[sort] || { rating: -1 };
-  const skip = (page - 1) * limit;
 
-  // PERFORMANCE: this used to be up to three SEQUENTIAL round trips
-  // (count open + count closed -> open page -> closed page). It is now one
-  // aggregate that preserves the exact same ordering contract:
-  //   1. restaurants that can accept orders (`availability.isOpen === true`,
-  //      the canonical field) come before every other restaurant, and this
-  //      happens BEFORE pagination;
-  //   2. inside each group the requested sort applies (recommended keeps the
-  //      explicit homeOrder -> 999999 fallback for old documents);
-  //   3. `total` counts both groups, exactly like openCount + closedCount.
-  // `__isOpen` / `__homeOrder` are helper keys only; the inclusion
-  // $project below strips them, so the response shape is unchanged.
-  const groupSort = sort === 'recommended'
-    ? { __isOpen: -1, __homeOrder: 1, isFeatured: -1, displayPriority: -1, rating: -1, createdAt: -1 }
-    : { __isOpen: -1, ...sortOpt };
-
-  const addFields = { __isOpen: { $eq: ['$availability.isOpen', true] } };
-  if (sort === 'recommended') addFields.__homeOrder = { $ifNull: ['$homeOrder', 999999] };
+  // Every sort keeps online-first as the leading key. The default
+  // ('recommended') is the performance ranking: legacy explicit position, then
+  // pinned, then featured, then performance score (with the sponsored boost),
+  // then the legacy admin knobs.
+  const groupSort = sort === 'recommended' || !sortMap[sort]
+    ? { __isOpen: -1, __homeOrder: 1, __pinned: -1, isFeatured: -1, __rankScore: -1, displayPriority: -1, rating: -1, createdAt: -1 }
+    : { __isOpen: -1, ...sortMap[sort] };
 
   const [result] = await Restaurant.aggregate([
     { $match: filter },
@@ -200,7 +246,7 @@ const getRestaurants = asyncHandler(async (req, res) => {
           { $sort: groupSort },
           { $skip: skip },
           { $limit: limit },
-          { $project: CUSTOMER_LIST_PROJECTION },
+          { $project: { ...CUSTOMER_LIST_PROJECTION, __isOpen: 1, __pinned: 1, __sponsored: 1, __rankScore: 1 } },
         ],
       },
     },
@@ -209,16 +255,30 @@ const getRestaurants = asyncHandler(async (req, res) => {
   const total = (result && result.total && result.total[0] && result.total[0].n) || 0;
   const restaurants = (result && result.data) || [];
 
-  const now = new Date();
-  const hoursContext = getLocalContext(now);
   res.json({
     success: true,
     page: Number(page),
     pages: Math.ceil(total / limit),
     total,
     // Effective status is computed at request time, without writes or timers.
-    // The indexed aggregation/sort and pagination remain unchanged.
-    data: restaurants.map(restaurant => withOperationalAvailability(restaurant, now, hoursContext))
+    data: restaurants.map((restaurant, index) => {
+      const view = withOperationalAvailability(restaurant, now, hoursContext);
+      const withDistance = withServiceability(view, customerCoords);
+      return {
+        ...withDistance,
+        // Ranking metadata — the backend is the source of truth; the frontend
+        // must render this, never compute its own order.
+        rankPosition: skip + index + 1,
+        online: restaurant.__isOpen === true,
+        orderable: restaurant.__isOpen === true,
+        performanceScore: Number(restaurant.performance?.score) || 0,
+        featured: restaurant.isFeatured === true,
+        pinned: restaurant.__pinned === true,
+        sponsored: restaurant.__sponsored === true,
+        sponsoredLabel: restaurant.__sponsored === true ? (restaurant.sponsorLabel || 'Sponsored') : '',
+        serviceable: withDistance.serviceable,
+      };
+    }),
   });
 });
 
@@ -273,7 +333,25 @@ const getRestaurantById = asyncHandler(async (req, res) => {
   const restaurant = await Restaurant.findOne({ _id: req.params.id, isActive: true, approvalStatus: 'approved' });
   if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found' });
   const now = new Date();
-  res.json({ success: true, data: withOperationalAvailability(restaurant, now, getLocalContext(now)) });
+  const view = withOperationalAvailability(restaurant, now, getLocalContext(now));
+  // Availability classification + ranking metadata come from the same backend
+  // services the listing uses, so the detail page and the list can never
+  // disagree about whether a restaurant is orderable.
+  const { classifyRestaurantAvailability } = require('../services/restaurantAvailability');
+  const availability = classifyRestaurantAvailability(view, now);
+  res.json({
+    success: true,
+    data: {
+      ...view,
+      availabilityStatus: availability.class,
+      orderable: availability.orderable,
+      performanceScore: Number(restaurant.performance?.score) || 0,
+      featured: restaurant.isFeatured === true,
+      sponsored: restaurant.isSponsored === true,
+      sponsoredLabel: restaurant.isSponsored ? (restaurant.sponsorLabel || 'Sponsored') : '',
+      availabilityInfo: availability,
+    },
+  });
 });
 
 const getMenu = asyncHandler(async (req, res) => {

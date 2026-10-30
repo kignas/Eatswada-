@@ -729,3 +729,49 @@ exports.replyToVendorReview = asyncHandler(async (req, res) => {
   await review.save();
   res.json({ success: true, data: { reviewId: review._id, vendorReply: review.vendorReply } });
 });
+
+/* GET /api/vendor/performance
+ * The vendor's OWN performance score + ranking factors, so a partner can see
+ * how they are ranked and what to improve. Read-only and strictly scoped to
+ * req.user.restaurantId — a vendor can never read another restaurant's score.
+ * Recomputes on read only if the snapshot is missing, so a brand-new
+ * restaurant still gets a number without waiting for the next sweep.
+ */
+exports.getVendorPerformance = asyncHandler(async (req, res) => {
+  if (!assertVendorPayload(req, res)) return;
+  const restaurantId = req.user.restaurantId;
+  const RestaurantPerformance = require('../models/RestaurantPerformance');
+  const { refreshRestaurantPerformance } = require('../services/restaurantRankingService');
+  const { classifyRestaurantAvailability } = require('../services/restaurantAvailability');
+
+  let performance = await RestaurantPerformance.findOne({ restaurant: restaurantId }).lean();
+  if (!performance) performance = await refreshRestaurantPerformance(restaurantId);
+
+  const restaurant = await Restaurant.findById(restaurantId)
+    .select('name isActive approvalStatus isFeatured isPinned isSponsored performance availability openingHours isOpen')
+    .lean();
+  if (!restaurant) return res.status(404).json({ success: false, message: 'Restaurant not found.' });
+  const now = new Date();
+  const availability = classifyRestaurantAvailability(restaurant, now);
+
+  res.json({
+    success: true,
+    data: {
+      restaurantId,
+      name: restaurant.name,
+      score: performance?.score ?? 0,
+      dataConfidence: performance?.dataConfidence ?? 0,
+      isNewRestaurant: performance?.isNewRestaurant ?? true,
+      computedAt: performance?.computedAt || null,
+      factors: performance?.factors || [],
+      sample: performance?.sample || null,
+      availability: { class: availability.class, orderable: availability.orderable, reason: availability.reason, label: availability.label },
+      ranking: {
+        featured: restaurant.isFeatured === true,
+        pinned: restaurant.isPinned === true,
+        sponsored: restaurant.isSponsored === true,
+        sponsorLabel: restaurant.isSponsored ? (restaurant.sponsorLabel || 'Sponsored') : '',
+      },
+    },
+  });
+});

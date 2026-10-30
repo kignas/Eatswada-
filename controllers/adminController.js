@@ -1127,6 +1127,9 @@ exports.moderateReview = asyncHandler(async (req, res) => {
   const s = stats[0] || { avg: 0, count: 0 };
   await Restaurant.findByIdAndUpdate(review.restaurant, { rating: s.count ? Math.round(s.avg*10)/10 : 4, ratingCount: s.count, reviewCount: s.count });
   await logAdminAction(req, { action: 'review.moderate', targetType: 'review', targetId: review._id, targetLabel: String(review._id), newValue: { isVisible, adminNote: update.adminNote } });
+  // Moderation changes which reviews count, so the performance score (ratings
+  // factor) is stale until refreshed. Recomputed in the background.
+  require('../services/restaurantRankingService').schedulePerformanceRefresh(review.restaurant);
   res.json({ success: true, data: review });
 });
 
