@@ -301,6 +301,7 @@ const { startAssignmentRecovery } = require('./services/riderAssignmentService')
 const { startRestaurantResponseRecovery } = require('./services/restaurantOrderTimeoutService');
 const { startAbandonedCheckoutRecovery } = require('./services/abandonedCheckoutService');
 const { startMenuStockScheduler } = require('./services/menuStockScheduler');
+const { startPerformanceScheduler } = require('./services/restaurantRankingService');
 
 connectDB().then(() => {
   // Durable safety net for rider auto-assignment: an in-process setTimeout is
@@ -314,6 +315,10 @@ connectDB().then(() => {
   startAbandonedCheckoutRecovery();
   // Recover scheduled automatic menu restocks after restarts and every minute.
   startMenuStockScheduler();
+  // Periodically recompute restaurant performance scores (ranking engine).
+  // Event-driven refreshes are debounced separately; this sweep is the safety
+  // net after restarts and the source of the initial scores on a fresh deploy.
+  startPerformanceScheduler();
 
   if (perfDiagnostics.enabled) perfDiagnostics.start(mongoose.connection);
 
