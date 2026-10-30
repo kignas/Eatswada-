@@ -22,6 +22,7 @@ const {
   getVendorApplications, getVendorApplicationById,
   approveVendorApplication, rejectVendorApplication, requestVendorApplicationChanges,
 } = require('../controllers/vendorApplicationController');
+const adminRanking = require('../controllers/adminRankingController');
 
 // server.js applies authLimiter to /api/users and /api/auth but not to
 // /api/admin, so this endpoint previously sat behind nothing but the global
@@ -49,6 +50,17 @@ router.put('/orders/:id/force-deliver', protect, authorize('admin'), requirePerm
 // Pillar 1 — live delivery capacity for the dashboard shortage circuit breaker.
 router.get('/delivery-capacity', protect, authorize('admin'), requirePermission('orders.manage'), getDeliveryCapacity);
 router.get('/restaurants', protect, authorize('admin'), requirePermission('restaurants.manage'), getRestaurants);
+// Restaurant Performance & Ranking Engine — admin controls. Declared BEFORE the
+// generic /restaurants/:id routes so the literal paths are not captured as :id.
+router.get('/restaurants/performance', protect, authorize('admin'), requirePermission('analytics.view'), adminRanking.listRestaurantPerformance);
+router.get('/restaurants/offline', protect, authorize('admin'), requirePermission('restaurants.manage'), adminRanking.listOfflineRestaurants);
+router.get('/ranking/config', protect, authorize('admin'), requirePermission('analytics.view'), adminRanking.getRankingConfig);
+router.patch('/ranking/config', protect, authorize('admin'), requirePermission('settings.manage'), adminRanking.updateRankingConfig);
+router.post('/ranking/recompute', protect, authorize('admin'), requirePermission('analytics.view'), adminRanking.recomputeRanking);
+router.get('/ranking/poor-performers', protect, authorize('admin'), requirePermission('analytics.view'), adminRanking.getPoorPerformers);
+router.get('/ranking/sponsored', protect, authorize('admin'), requirePermission('analytics.view'), adminRanking.listSponsored);
+router.get('/restaurants/:id/performance', protect, authorize('admin'), requirePermission('analytics.view'), adminRanking.getRestaurantPerformance);
+router.patch('/restaurants/:id/ranking', protect, authorize('admin'), requirePermission('restaurants.manage'), adminRanking.updateRestaurantRanking);
 // Reuse the restaurant settings reader so admin UI can inspect FSSAI data (it is already asyncHandler-wrapped).
 router.get('/restaurants/:id/fssai', protect, authorize('admin'), requirePermission('restaurants.manage'), getRestaurantDeliverySettings);
 router.patch('/restaurants/:id/fssai', protect, authorize('admin'), requirePermission('restaurants.manage'), updateRestaurantFssai);
