@@ -174,8 +174,36 @@ const orderSchema = new mongoose.Schema(
       taxAmount: { type: Number, min: 0, default: 0 },
       tipAmount: { type: Number, min: 0, default: 0 },
       grandTotal: { type: Number, min: 0, default: 0 },
+      // ── Dynamic-pricing-engine lines (additive; 0 on legacy orders) ──
+      // Without these the engine's itemized bill would be silently stripped by
+      // the schema and the stored bill would not reconcile with `total`.
+      baseFoodSubtotal: { type: Number, min: 0, default: 0 },
+      foodUplift: { type: Number, min: 0, default: 0 },
+      customerFoodSubtotal: { type: Number, min: 0, default: 0 },
+      deliverySubsidy: { type: Number, min: 0, default: 0 },
+      codFee: { type: Number, min: 0, default: 0 },
+      autoDiscount: { type: Number, min: 0, default: 0 },
+      couponDiscount: { type: Number, min: 0, default: 0 },
     },
     grandTotal: { type: Number, min: 0, default: 0 },
+
+    // ── DYNAMIC PRICING ENGINE (additive, optional) ────────────────────
+    // Present only for orders priced by services/pricing (when the admin has
+    // enabled the engine). The immutable financial detail lives in
+    // models/OrderFinancialSnapshot; this is a lightweight pointer plus the
+    // headline figures so existing order reads need no extra query.
+    // Absent on every legacy order, so all existing consumers are unchanged.
+    financialSnapshot: {
+      snapshotId: { type: mongoose.Schema.Types.ObjectId, ref: 'OrderFinancialSnapshot', default: null },
+      pricingRuleVersion: { type: String, default: '' },
+      decision: { type: String, enum: ['PROFITABLE', 'REPRICING_REQUIRED', 'NOT_ECONOMICALLY_SERVICEABLE', null], default: null },
+      expectedContribution: { type: Number, default: null },
+      minimumRequiredContribution: { type: Number, default: null },
+      riderGuaranteedPayout: { type: Number, default: null },
+      foodPriceUplift: { type: Number, default: null },
+      quoteIssuedAt: { type: Date, default: null },
+      quoteExpiresAt: { type: Date, default: null },
+    },
 
     // ── PLATFORM COMMISSION SNAPSHOT ───────────────────────────────────
     // These values are frozen at order creation. They are deliberately kept
