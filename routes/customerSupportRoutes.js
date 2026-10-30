@@ -5,8 +5,9 @@ const { protect, authorize } = require('../middleware/authMiddleware');
 const controller = require('../controllers/customerSupportController');
 const router = express.Router();
 
-// `max` (not `limit`) so this works on express-rate-limit v6 AND v7+, same as server.js.
-const keyGenerator = (req) => String(req.user?._id || req.ip);
+// All support routes pass through `protect` and `authorize('user')` before
+// these limiters, so key by the authenticated account (not the raw IP).
+const keyGenerator = (req) => String(req.user._id);
 
 // Sending things (create / reply / close): strict.
 const writeLimiter = rateLimit({

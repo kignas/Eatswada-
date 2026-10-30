@@ -2,20 +2,21 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 const { protect, authorize, optionalAuth } = require('../middleware/authMiddleware');
 const { requirePermission } = require('../middleware/permissionMiddleware');
 const c = require('../controllers/analyticsController');
 
 const router = express.Router();
 
-// Public beacon: generous but bounded, keyed per authenticated user or IP so a
+// Public beacon: generous but bounded, keyed by normalized client IP so a
 // single abusive client cannot inflate traffic counts or hammer the collection.
 const trackLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => String(req.user?._id || req.ip),
+  keyGenerator: (req) => ipKeyGenerator(req.ip),
   message: { success: false, message: 'Too many analytics events. Please slow down.' },
 });
 
