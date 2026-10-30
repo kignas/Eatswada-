@@ -151,6 +151,19 @@ async function autoAssignRider(order, excludeRiderIds = []) {
     );
     if (!claimed) return { assigned: false, rider: null, reason: 'Order was claimed or changed by another request.' };
 
+    // Dynamic pricing engine: guarantee the rider the projected payout BEFORE
+    // the offer is accepted. No-op on a legacy (non-engine) order.
+    try {
+      const { ensureGuaranteedPayout } = require('./pricing/riderPayoutIntegration');
+      const guarantee = await ensureGuaranteedPayout(claimed, rider);
+      if (guarantee) {
+        claimed.riderEarning = guarantee.guaranteedPayoutRupees;
+        claimed.riderGuaranteedPayout = guarantee;
+      }
+    } catch (guaranteeErr) {
+      console.error('[dispatch] guaranteed payout failed:', guaranteeErr.message);
+    }
+
     // Keep the caller's document aligned with the authoritative atomic claim.
     order.rider = claimed.rider; order.riderAssignedAt = claimed.riderAssignedAt;
     order.riderStatus = claimed.riderStatus; order.riderEarning = claimed.riderEarning;

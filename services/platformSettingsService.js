@@ -65,12 +65,40 @@ const DEFAULT_PLATFORM_SETTINGS = Object.freeze({
   // Rider distance pay is capped at riderMaxDistanceKm × riderPerKmPay so a
   // long trip cannot produce an unbounded payout (e.g. 3 km × ₹5 = ₹15 cap).
   riderMaxDistanceKm: 3,
+
+  // ── Dynamic pricing & profitability engine (additive, opt-in) ──
+  // The full rule set lives in services/pricing/pricingRules (ENGINE_DEFAULTS)
+  // and may be overridden per key here or by an active PricingRule document.
+  // Only the headline switches are mirrored into this typed registry so the
+  // existing Admin -> Platform config screen can toggle them; the deep rule
+  // editor lives at Admin -> Financial Management -> Dynamic Pricing.
+  pricingEngineEnabled: false,
+  foodPriceUpliftPercent: 30,
+  maxDeliveryDistanceKm: 10,
+  riderBasePayout: 30,
+  riderPerKmPayout: 9,
+  riderMinPayout: 30,
+  petrolPricePerLitre: 105,
+  motorcycleMileageKmPerLitre: 45,
+  maintenanceCostPerKm: 1.5,
+  smallOrderFeeMax: 15,
+  codHandlingFeeEnabled: true,
+  codHandlingFeePercent: 1.5,
+  codHandlingFeeMax: 20,
+  freeDeliveryThreshold: 299,
+  firstOrderFreeDeliveryEnabled: true,
+  firstOrderFreeDeliveryMaxKm: 4,
+  firstOrderFreeDeliveryMaxSubsidy: 22,
+  discountSafetyReserve: 10,
+  discountMinAmount: 0,
+  discountMaxAmount: 50,
 });
 
 const BOOLEAN_KEYS = new Set([
   'isUnderMaintenance', 'isDeliveryPausedShortage', 'autoShortageCircuitBreaker',
   'isRainSurgeActive', 'isGlobalFreeDelivery', 'isFirstOrderFreeDelivery',
   'isUpiEnabled', 'isCodEnabled', 'codAutoBlockEnabled',
+  'pricingEngineEnabled', 'codHandlingFeeEnabled', 'firstOrderFreeDeliveryEnabled',
 ]);
 
 const NUMBER_KEYS = new Set([
@@ -81,6 +109,11 @@ const NUMBER_KEYS = new Set([
   'codAdvanceThreshold', 'codAdvancePercent', 'codMaxRefusalsBeforeAutoBlock',
   'riderBasePay', 'riderPerKmPay', 'riderWaitTimePayPerMin', 'riderRainSurgeBonus',
   'riderMaxDistanceKm',
+  'foodPriceUpliftPercent', 'maxDeliveryDistanceKm', 'riderBasePayout', 'riderPerKmPayout',
+  'riderMinPayout', 'petrolPricePerLitre', 'motorcycleMileageKmPerLitre',
+  'maintenanceCostPerKm', 'smallOrderFeeMax', 'codHandlingFeePercent', 'codHandlingFeeMax',
+  'freeDeliveryThreshold', 'firstOrderFreeDeliveryMaxKm', 'firstOrderFreeDeliveryMaxSubsidy',
+  'discountSafetyReserve', 'discountMinAmount', 'discountMaxAmount',
 ]);
 
 const MIN_ZERO_KEYS = new Set([
@@ -90,6 +123,11 @@ const MIN_ZERO_KEYS = new Set([
   'codAdvanceThreshold', 'codAdvancePercent', 'codMaxRefusalsBeforeAutoBlock',
   'riderBasePay', 'riderPerKmPay', 'riderWaitTimePayPerMin', 'riderRainSurgeBonus',
   'riderMaxDistanceKm',
+  'foodPriceUpliftPercent', 'maxDeliveryDistanceKm', 'riderBasePayout', 'riderPerKmPayout',
+  'riderMinPayout', 'petrolPricePerLitre', 'motorcycleMileageKmPerLitre',
+  'maintenanceCostPerKm', 'smallOrderFeeMax', 'codHandlingFeePercent', 'codHandlingFeeMax',
+  'freeDeliveryThreshold', 'firstOrderFreeDeliveryMaxKm', 'firstOrderFreeDeliveryMaxSubsidy',
+  'discountSafetyReserve', 'discountMinAmount', 'discountMaxAmount',
 ]);
 
 const STRING_KEYS = new Set(['maintenanceTitle', 'maintenanceMessage', 'maintenanceEta', 'shortageBannerMessage', 'codDisplayLabel']);
