@@ -50,7 +50,17 @@ const { handleWebhook } = require('./controllers/paymentController');
 // 🚨 APP IS CREATED HERE FIRST! 🚨
 const app = express();
 
-app.set("trust proxy", 1);
+// Number of reverse proxies sitting in front of Node (nginx, ALB, Cloudflare...).
+// The rate limiter keys on req.ip, so this MUST match your real proxy chain:
+//   too LOW  -> every user looks like the proxy's IP and they all share one
+//               rate-limit bucket (the classic "Too many requests" everywhere bug)
+//   too HIGH -> clients can spoof their IP through X-Forwarded-For.
+// Set TRUST_PROXY_HOPS in the EC2 .env to change it. Default is 1.
+const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS, 10);
+app.set(
+  'trust proxy',
+  Number.isInteger(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1
+);
 
 // Opt-in performance diagnostics for controlled staging/load-test runs.
 // Disabled by default; when enabled it records request latency, event-loop
@@ -62,7 +72,7 @@ app.use(compression());
 app.use(helmet());
 
 // ── CORS ────────────────────────────────────────────────────────
-// Keep production origins explicit. Set CORS_ORIGINS in Render as a
+// Keep production origins explicit. Set CORS_ORIGINS in the server .env as a
 // comma-separated list for any additional customer/admin/vendor origins.
 // Example:
 // CORS_ORIGINS=https://eatswada.com,https://www.eatswada.com,https://kignas.github.io
@@ -106,19 +116,68 @@ const corsOptionsForRequest = (req) => ({
 app.use((req, res, next) => cors(corsOptionsForRequest(req))(req, res, next));
 app.options('*', (req, res, next) => cors(corsOptionsForRequest(req))(req, res, next));
 
-const globalLimiter = rateLimit({
-  windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max:      Number(process.env.RATE_LIMIT_MAX)        || 600,
-  standardHeaders: true, legacyHeaders: false,
-  message: { success: false, message: 'Too many requests, please slow down.' },
-});
-app.use(globalLimiter);
-
 // Razorpay webhooks need the exact raw request bytes for HMAC verification.
 // Both supported API prefixes must use the raw parser BEFORE express.json().
+// Registered BEFORE the rate limiters on purpose: webhooks come from Razorpay's
+// servers (shared IPs) and are authenticated by HMAC, so a 429 here would make
+// Razorpay's payment confirmations fail.
 const razorpayWebhookRawBody = express.raw({ type: 'application/json', limit: '1mb' });
 app.post('/api/payments/webhook', razorpayWebhookRawBody, handleWebhook);
 app.post('/api/v1/payments/webhook', razorpayWebhookRawBody, handleWebhook);
+
+// ── TEMPORARY: client-IP diagnostic ───────────────────────────
+// Only exists when IP_DEBUG_KEY is set in the server .env. Open it in a phone
+// browser:  https://<your-api-domain>/api/_ip-debug?key=<IP_DEBUG_KEY>
+// If "ip" is NOT your real public IP (or is the same on two different phones),
+// TRUST_PROXY_HOPS is wrong. Remove IP_DEBUG_KEY from .env when you're done.
+if (process.env.IP_DEBUG_KEY) {
+  app.get('/api/_ip-debug', (req, res) => {
+    if (req.query.key !== process.env.IP_DEBUG_KEY) return res.status(404).end();
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      ip: req.ip,
+      ips: req.ips,
+      forwardedFor: req.get('x-forwarded-for') || null,
+      socketAddress: req.socket.remoteAddress,
+      trustProxy: app.get('trust proxy')
+    });
+  });
+}
+
+// ── Rate limiting ─────────────────────────────────────────────
+// Reads (GET/HEAD) and writes (POST/PUT/PATCH/DELETE) have separate buckets so
+// browsing menus can never lock someone out of placing an order. Limits are
+// generous on purpose: many Indian mobile users share one carrier-NAT IP, and a
+// single restaurant page fires several API calls (plus polling).
+// Brute-force protection for login/OTP lives in the route files' own limiters.
+// Health checks and CORS preflights are never counted.
+// Env overrides (new names, so old low RATE_LIMIT_MAX / RATE_LIMIT_WINDOW_MS
+// values left in .env no longer apply):
+//   RATE_LIMIT_API_WINDOW_MS, RATE_LIMIT_READ_MAX, RATE_LIMIT_WRITE_MAX
+const RATE_LIMIT_EXEMPT_PATHS = new Set(['/', '/live', '/ready', '/health']);
+const isReadRequest      = (req) => req.method === 'GET' || req.method === 'HEAD';
+const isRateLimitExempt  = (req) => req.method === 'OPTIONS' || RATE_LIMIT_EXEMPT_PATHS.has(req.path);
+const rateLimitWindowMs  = Number(process.env.RATE_LIMIT_API_WINDOW_MS) || 15 * 60 * 1000;
+const rateLimitMessage   = { success: false, message: 'Too many requests, please slow down.' };
+
+const readLimiter = rateLimit({
+  windowMs: rateLimitWindowMs,
+  max:      Number(process.env.RATE_LIMIT_READ_MAX) || 5000,
+  standardHeaders: true, legacyHeaders: false,
+  message: rateLimitMessage,
+  skip: (req) => isRateLimitExempt(req) || !isReadRequest(req),
+});
+
+const writeLimiter = rateLimit({
+  windowMs: rateLimitWindowMs,
+  max:      Number(process.env.RATE_LIMIT_WRITE_MAX) || 1500,
+  standardHeaders: true, legacyHeaders: false,
+  message: rateLimitMessage,
+  skip: (req) => isRateLimitExempt(req) || isReadRequest(req),
+});
+
+app.use(readLimiter);
+app.use(writeLimiter);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false,
