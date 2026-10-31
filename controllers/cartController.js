@@ -8,6 +8,7 @@ const {
   DELIVERY_RULES,
   calculateDeliveryFee,
 } = require('../services/deliveryPricing');
+const { resolvePricingRules } = require('../services/pricing/pricingRules');
 
 // ─────────────────────────────────────────────────────────────────────
 // MULTI-RESTAURANT CART (Phase 3.5A)
@@ -193,8 +194,9 @@ async function buildCartResponse(cart, options = {}) {
   // PERFORMANCE: the restaurant pricing read and the delivery-address
   // populate are independent, so they run together (one round trip, not two).
   // An empty cart no longer issues a Restaurant query that cannot match.
-  const [restaurants] = await Promise.all([
+  const [restaurants, pricingRules] = await Promise.all([
     loadPricingRestaurants(groupRestaurantIds(cart.items), options.prefetchedRestaurants),
+    resolvePricingRules(),
     options.populateAddress && cart.deliveryAddress
       ? Cart.populate(cart, { path: 'deliveryAddress' })
       : null,
@@ -221,7 +223,11 @@ async function buildCartResponse(cart, options = {}) {
     const rest = restMap.get(restaurantId) || {};
     const subtotal = round2(groupItems.reduce((s, i) => s + i.price * i.quantity, 0));
 
-    const minimumOrder = Math.max(0, Number(rest.minOrder || 0));
+    const minimumOrder = Math.max(
+      0,
+      Number(rest.minOrder || 0),
+      Number(pricingRules.platformMinimumOrderRupees || 0),
+    );
     const minimumOrderMet = subtotal >= minimumOrder;
     const minimumOrderRemaining = minimumOrderMet ? 0 : round2(minimumOrder - subtotal);
 

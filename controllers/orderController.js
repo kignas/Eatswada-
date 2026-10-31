@@ -228,6 +228,7 @@ async function resolveDeliveryAddress({ addressId, deliveryAddress, userId }) {
 // written — a customer never ends up with a partial multi-restaurant order.
 async function buildRestaurantPricing({
   restaurantId, items, customerCoords, billPolicy = null, pricingEngineEnabled = false,
+  platformMinimumOrderRupees = 99,
 }) {
   if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
     const error = new Error('Invalid restaurant'); error.statusCode = 400; throw error;
@@ -304,7 +305,7 @@ async function buildRestaurantPricing({
   }
 
   // Per-restaurant minimum order.
-  const minimumOrder = Number(restaurant.minOrder || 0);
+  const minimumOrder = Math.max(Number(restaurant.minOrder || 0), Number(platformMinimumOrderRupees || 0));
   if (!pricingEngineEnabled && minimumOrder > 0 && subtotal < minimumOrder) {
     const e = new Error(`Minimum order for ${restaurant.name} is ₹${minimumOrder}. Add ₹${Math.ceil(minimumOrder - subtotal)} more to continue.`);
     e.statusCode = 400; throw e;
@@ -537,6 +538,7 @@ const createOrder = asyncHandler(async (req, res) => {
       customerCoords,
       billPolicy,
       pricingEngineEnabled,
+      platformMinimumOrderRupees: pricingRules.platformMinimumOrderRupees,
     }));
   }
 
