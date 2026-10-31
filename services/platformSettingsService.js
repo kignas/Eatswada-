@@ -43,7 +43,7 @@ const DEFAULT_PLATFORM_SETTINGS = Object.freeze({
   perKmExtraFee: 8,
   platformHandlingFee: 5,
   smallCartThreshold: 99,
-  smallCartFee: 15,
+  smallCartFee: 8,
   packagingChargePerItem: 0,
   taxPercent: 0,
 
@@ -85,7 +85,7 @@ const DEFAULT_PLATFORM_SETTINGS = Object.freeze({
   petrolPricePerLitre: 105,
   motorcycleMileageKmPerLitre: 45,
   maintenanceCostPerKm: 1.5,
-  smallOrderFeeMax: 15,
+  smallOrderFeeMax: 8,
   codHandlingFeeEnabled: true,
   codHandlingFeePercent: 1.5,
   codHandlingFeeMax: 20,
