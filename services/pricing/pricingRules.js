@@ -79,7 +79,9 @@ const ENGINE_DEFAULTS = Object.freeze({
   // ── Contribution targets by food-basket band ───────────────────────
   // maxBasket null = open-ended top band.
   contributionTiers: [
-    { maxBasket: 199, target: 5 },
+    // Keep the lower ₹3 target through ₹299 to avoid a sharp minimum-order
+    // cliff immediately above ₹199; larger-basket targets remain unchanged.
+    { maxBasket: 299, target: 3 },
     { maxBasket: 399, target: 8 },
     { maxBasket: 499, target: 12 },
     { maxBasket: 699, target: 20 },
@@ -88,7 +90,7 @@ const ENGINE_DEFAULTS = Object.freeze({
 
   // ── Small-order fee ────────────────────────────────────────────────
   smallOrderFeeEnabled: true,
-  smallOrderFeeMax: 15,
+  smallOrderFeeMax: 8,
 
   // ── COD handling fee ───────────────────────────────────────────────
   // The fee is justified by a REAL modelled cost (below), not a penalty.
@@ -107,6 +109,9 @@ const ENGINE_DEFAULTS = Object.freeze({
   // restaurant settlement, rider payout, GST, gateway and risk allowances.
   // The restaurant's own contractual minimum is always honoured separately.
   minimumOrderEnabled: true,
+  // Public platform floor. Distance economics may raise this when the order
+  // cannot meet the minimum contribution even after the permitted small-order fee.
+  platformMinimumOrderRupees: 99,
 
   // ── Free delivery ──────────────────────────────────────────────────
   freeDeliveryEnabled: true,
@@ -258,6 +263,9 @@ function mergeRules(base, raw) {
       case 'peakHourEndHour':
         out[key] = clampNumber(value, { min: 0, max: 23, fallback: base[key] });
         break;
+      case 'platformMinimumOrderRupees':
+        out[key] = clampNumber(value, { min: 0, max: 100000, fallback: base[key] });
+        break;
       case 'maxDeliveryDistanceKm':
         out[key] = clampNumber(value, { min: 0.5, max: 100, fallback: base[key] });
         break;
@@ -278,6 +286,7 @@ function versionOf(rules) {
     restaurantChargePercent: rules.restaurantChargePercent,
     menuPricesIncludeUplift: rules.menuPricesIncludeUplift !== false,
     minimumOrderEnabled: rules.minimumOrderEnabled !== false,
+    platformMinimumOrderRupees: rules.platformMinimumOrderRupees,
     legacyCommissionModelEnabled: rules.legacyCommissionModelEnabled === true,
     discountAutoApplyEnabled: rules.discountAutoApplyEnabled === true,
     maxDeliveryDistanceKm: rules.maxDeliveryDistanceKm,
@@ -301,6 +310,7 @@ function versionOf(rules) {
     paymentGatewayFeeTaxPercent: rules.paymentGatewayFeeTaxPercent,
     gstOnUpliftPercent: rules.gstOnUpliftPercent,
     contributionTiers: rules.contributionTiers,
+    smallOrderFeeEnabled: rules.smallOrderFeeEnabled !== false,
     smallOrderFeeMax: rules.smallOrderFeeMax,
     codHandlingFeePercent: rules.codHandlingFeePercent,
     codHandlingFeeFixed: rules.codHandlingFeeFixed,

@@ -41,6 +41,8 @@ function computeMinimumOrder({
   const engineEnabled = rules.minimumOrderEnabled !== false;
 
   const restaurantMinimumPaise = Math.max(0, toPaise(restaurantMinOrderRupees));
+  const platformMinimumPaise = Math.max(0, toPaise(rules.platformMinimumOrderRupees));
+  const smallOrderFeeCapPaise = rules.smallOrderFeeEnabled === false ? 0 : Math.max(0, toPaise(rules.smallOrderFeeMax));
 
   let engineMinimumPaise = 0;
   let reachable = true;
@@ -58,7 +60,7 @@ function computeMinimumOrder({
         : gross + percentOfPaise(gross, rules.foodPriceUpliftPercent);
       const upliftPaise = commissionable ? 0 : Math.max(0, customerFood - basePaise);
       const commissionPaise = commissionable ? percentOfPaise(basePaise, commissionRate) : 0;
-      const c = computeContribution({
+      let c = computeContribution({
         baseSubtotalPaise: basePaise,
         upliftPaise,
         commissionPaise,
@@ -70,24 +72,50 @@ function computeMinimumOrder({
         isCod: false,
         rules,
       });
+      // The minimum-order search must include the same permitted small-order
+      // fee as checkout; otherwise cards advertise a higher minimum than the
+      // quote can actually accept. Iterate because the fee itself increases
+      // the gateway charge slightly.
+      let smallOrderFeePaise = 0;
+      for (let attempt = 0; attempt < 5 && !c.meetsTarget; attempt += 1) {
+        const nextFee = Math.min(smallOrderFeeCapPaise, smallOrderFeePaise + c.shortfallPaise);
+        if (nextFee <= smallOrderFeePaise) break;
+        smallOrderFeePaise = nextFee;
+        c = computeContribution({
+          baseSubtotalPaise: basePaise,
+          upliftPaise,
+          commissionPaise,
+          customerFoodSubtotalPaise: customerFood,
+          deliveryFeePaise,
+          smallOrderFeePaise,
+          restaurantPayablePaise: Math.max(0, basePaise - commissionPaise),
+          riderPayoutPaise,
+          platformFundedDiscountPaise: 0,
+          isCod: false,
+          rules,
+        });
+      }
       if (!c.meetsTarget) lastFailRupee = rupee;
     }
     if (lastFailRupee >= SCAN_CAP_RUPEES) reachable = false;
     else engineMinimumPaise = (lastFailRupee + 1) * 100;
   }
 
-  const minimumPaise = Math.max(engineMinimumPaise, restaurantMinimumPaise);
+  const minimumPaise = Math.max(engineMinimumPaise, restaurantMinimumPaise, platformMinimumPaise);
   const source = minimumPaise === 0 ? 'none'
-    : restaurantMinimumPaise >= engineMinimumPaise ? 'restaurant' : 'distance';
+    : restaurantMinimumPaise === minimumPaise ? 'restaurant'
+      : platformMinimumPaise === minimumPaise ? 'platform' : 'distance';
 
   return {
     reachable,
     engineMinimumPaise,
     restaurantMinimumPaise,
+    platformMinimumPaise,
     minimumPaise,
     source,
     engineMinimumRupees: fromPaise(engineMinimumPaise),
     restaurantMinimumRupees: fromPaise(restaurantMinimumPaise),
+    platformMinimumRupees: fromPaise(platformMinimumPaise),
     minimumRupees: fromPaise(minimumPaise),
   };
 }

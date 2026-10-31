@@ -385,8 +385,9 @@ async function buildQuote({
         maxFeePaise: toPaise(rules.smallOrderFeeMax),
         enabled: rules.smallOrderFeeEnabled !== false,
       });
-      if (step.feePaise === smallPaise) break;
-      smallPaise = step.feePaise;
+      const nextSmallPaise = Math.min(toPaise(rules.smallOrderFeeMax), smallPaise + step.feePaise);
+      if (nextSmallPaise <= smallPaise) break;
+      smallPaise = nextSmallPaise;
     }
 
     let contributionNow = contributionFor({ subsidyPaise, smallOrderPaise: smallPaise });
