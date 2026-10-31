@@ -702,6 +702,14 @@ const createOrder = asyncHandler(async (req, res) => {
       // when it exists, otherwise explain that delivery is unavailable.
       const rejectedRestaurant = engine.rejected?.restaurantName || 'this restaurant';
       const selfDelivery = priced.some(p => p.restaurant?.deliveryMode === 'self_delivery');
+      const belowMinimum = ['below_minimum_order', 'below_restaurant_minimum_order'].includes(engine.rejected?.quote?.reason);
+      if (belowMinimum) {
+        const m = new Error(engine.rejected.quote.message || 'Your order is below the minimum order for this location.');
+        m.statusCode = 409;
+        m.code = 'MINIMUM_ORDER_NOT_MET';
+        m.pricingDecision = PRICING_DECISION.NOT_ECONOMICALLY_SERVICEABLE;
+        throw m;
+      }
       const e = new Error(selfDelivery
         ? `${rejectedRestaurant} can only deliver this order with its own rider right now. Please choose self-delivery at checkout.`
         : `Delivery for ${rejectedRestaurant} is unavailable at this address right now. Please try a closer restaurant or a larger order.`);

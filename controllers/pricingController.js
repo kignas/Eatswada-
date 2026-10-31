@@ -126,6 +126,7 @@ exports.quote = asyncHandler(async (req, res) => {
       _id: restaurant._id,
       location: restaurant.location,
       deliveryRadiusKm: restaurant.deliveryRadiusKm,
+      minOrder: restaurant.minOrder,
       // The SAME gate the checkout uses: the legacy commission model is opt-in
       // and only applies to a restaurant actually on a legacy/custom plan.
       // `commissionRate` alone is useless here because it defaults to 15 for
@@ -184,12 +185,21 @@ exports.restaurantCards = asyncHandler(async (req, res) => {
 
   const isFirstOrder = !(await Order.exists({ user: req.user._id }));
   const restaurants = await Restaurant.find({ _id: { $in: rawIds }, isActive: true, approvalStatus: 'approved' })
-    .select('name image location deliveryRadiusKm deliveryMode commissionRate')
+    .select('name image location deliveryRadiusKm deliveryMode commissionRate commissionPlan minOrder')
     .lean();
 
   const cards = await Promise.all(restaurants.map(restaurant => buildRestaurantCardPricing({
     rules,
-    restaurant: { _id: restaurant._id, location: restaurant.location, deliveryRadiusKm: restaurant.deliveryRadiusKm },
+    restaurant: {
+      _id: restaurant._id,
+      location: restaurant.location,
+      deliveryRadiusKm: restaurant.deliveryRadiusKm,
+      minOrder: restaurant.minOrder,
+      commissionRate: restaurant.commissionRate,
+      commissionable: rules.legacyCommissionModelEnabled === true
+        && ['legacy', 'custom'].includes(String(restaurant.commissionPlan || ''))
+        && Number(restaurant.commissionRate) > 0,
+    },
     customerCoords,
     eligibleSubtotalRupees: Number(req.query?.eligibleSubtotal || 0),
     isFirstOrder,
