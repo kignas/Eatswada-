@@ -25,6 +25,78 @@ const { buildQuote, DEFAULT_QUOTE_TTL_MS } = require('./pricingOrchestrator');
 // Tolerance for re-verification: a 1-paisa rounding wobble is not a repricing.
 const VERIFY_TOLERANCE_PAISE = 1;
 
+// ── Signed quote ids ────────────────────────────────────────────────
+// Quotes are not stored. A customer quote's id is a signed, self-describing
+// token (HMAC-SHA256) that binds the quote to ONE customer, restaurant and
+// payment method, with its pricing version, total and expiry. POST /orders
+// verifies it (checkQuoteForOrder) so the customer is never charged a price
+// they were not shown, and an expired quote cannot be honoured.
+//
+//   q2.<base64url(JSON payload)>.<base64url(HMAC)>
+//
+// The key is derived from QUOTE_SIGNING_SECRET (preferred) or JWT_SECRET with
+// a domain-separation label, so a quote token can never be confused with a
+// login token. Without a secret, issuing FAILS CLOSED and verifying rejects.
+const QUOTE_TOKEN_PREFIX = 'q2';
+const QUOTE_TOKEN_MAX_LENGTH = 2000;
+const SIGNING_LABEL = 'eatswada-quote-v1:';
+
+function signingKey() {
+  const secret = process.env.QUOTE_SIGNING_SECRET || process.env.JWT_SECRET;
+  if (!secret) return null;
+  return crypto.createHash('sha256').update(SIGNING_LABEL + secret).digest();
+}
+
+const normaliseMethod = (m) => (String(m || 'upi').toLowerCase() === 'cod' ? 'cod' : 'upi');
+
+function signQuoteToken(quote, { userId, restaurantId, paymentMethod } = {}) {
+  const key = signingKey();
+  if (!key) {
+    const err = new Error('Quote signing secret is not configured.');
+    err.statusCode = 500;
+    throw err;
+  }
+  const exp = new Date(quote?.quoteExpiresAt).getTime();
+  const total = Number(quote?.paise?.customerTotalPaise);
+  if (!Number.isFinite(exp) || !Number.isFinite(total)) {
+    const err = new Error('Quote cannot be signed: missing expiry or total.');
+    err.statusCode = 500;
+    throw err;
+  }
+  const payload = {
+    v: 1,
+    u: String(userId),
+    r: String(restaurantId),
+    pm: normaliseMethod(paymentMethod),
+    pv: String(quote.pricingVersion),
+    t: Math.round(total),
+    iat: new Date(quote.quoteIssuedAt).getTime() || Date.now(),
+    exp,
+  };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', key).update(`${QUOTE_TOKEN_PREFIX}.${body}`).digest('base64url');
+  return `${QUOTE_TOKEN_PREFIX}.${body}.${sig}`;
+}
+
+/** Parse + signature-check a token. Returns the payload or null. */
+function readQuoteToken(token) {
+  if (typeof token !== 'string' || !token || token.length > QUOTE_TOKEN_MAX_LENGTH) return null;
+  const key = signingKey();
+  if (!key) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts[0] !== QUOTE_TOKEN_PREFIX || !parts[1] || !parts[2]) return null;
+  const expected = crypto.createHmac('sha256', key).update(`${parts[0]}.${parts[1]}`).digest();
+  let given;
+  try { given = Buffer.from(parts[2], 'base64url'); } catch { return null; }
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (!payload || payload.v !== 1) return null;
+    if (![payload.t, payload.exp].every(Number.isFinite)) return null;
+    return payload;
+  } catch { return null; }
+}
+
 /** Build + stamp a quote with a server-generated id. */
 async function createQuote(args = {}) {
   const quote = await buildQuote({
@@ -32,7 +104,15 @@ async function createQuote(args = {}) {
     ...args,
   });
   if (quote && quote.serviceable !== false) {
-    quote.quoteId = `q_${crypto.randomUUID()}`;
+    quote.quoteId = args.userId
+      // Customer-facing quote: signed and bound to this customer.
+      ? signQuoteToken(quote, {
+          userId: args.userId,
+          restaurantId: quote.restaurantId || args.restaurant?._id,
+          paymentMethod: args.paymentMethod,
+        })
+      // Admin previews / internal callers: an opaque id, never accepted by checkout.
+      : `q_${crypto.randomUUID()}`;
   }
   return quote;
 }
@@ -168,11 +248,50 @@ async function recordActuals(orderId, actuals = {}) {
   );
 }
 
+const QUOTE_REJECTIONS = {
+  QUOTE_EXPIRED: 'Your price has expired. Please review the updated bill and try again.',
+  QUOTE_PRICE_CHANGED: 'The price changed since it was shown. Please review the updated bill.',
+  QUOTE_MISMATCH: 'This price quote does not match your order. Please refresh your cart and try again.',
+};
+const reject = (code, reason) => ({ ok: false, code, reason, message: QUOTE_REJECTIONS[code] });
+
+/**
+ * Check a customer-supplied quoteId against the order being placed.
+ *
+ * `freshQuote` is the engine quote just rebuilt from server data for THIS
+ * order, so the amount the customer will be charged is always the fresh one;
+ * this check only decides whether that is still what they were shown.
+ *
+ * When the order carries a coupon the quote endpoint did not price that
+ * coupon, so the total is not compared (signature, owner, restaurant, payment
+ * method, expiry and pricing version still are).
+ *
+ * @returns {{ok:true}|{ok:false,code:string,reason:string,message:string}}
+ */
+function checkQuoteForOrder({ quoteId, userId, restaurantId, paymentMethod, freshQuote, hasCoupon = false, now = new Date() } = {}) {
+  const t = readQuoteToken(quoteId);
+  if (!t) return reject('QUOTE_MISMATCH', 'quote_invalid');
+  if (t.u !== String(userId)) return reject('QUOTE_MISMATCH', 'quote_wrong_customer');
+  if (t.r !== String(restaurantId)) return reject('QUOTE_MISMATCH', 'quote_wrong_restaurant');
+  if (t.pm !== normaliseMethod(paymentMethod)) return reject('QUOTE_MISMATCH', 'quote_wrong_payment_method');
+  if (now.getTime() >= t.exp) return reject('QUOTE_EXPIRED', 'quote_expired');
+  if (!freshQuote || freshQuote.serviceable === false) return reject('QUOTE_PRICE_CHANGED', 'not_serviceable');
+  if (String(t.pv) !== String(freshQuote.pricingVersion)) return reject('QUOTE_PRICE_CHANGED', 'pricing_version_changed');
+  if (!hasCoupon) {
+    const freshTotal = Number(freshQuote?.paise?.customerTotalPaise);
+    if (!Number.isFinite(freshTotal)) return reject('QUOTE_PRICE_CHANGED', 'quote_unverifiable');
+    if (Math.abs(t.t - freshTotal) > VERIFY_TOLERANCE_PAISE) return reject('QUOTE_PRICE_CHANGED', 'price_changed');
+  }
+  return { ok: true };
+}
+
 module.exports = {
   VERIFY_TOLERANCE_PAISE,
   createQuote,
   isExpired,
   verifyQuote,
+  checkQuoteForOrder,
+  readQuoteToken,
   persistSnapshot,
   recordActuals,
 };
