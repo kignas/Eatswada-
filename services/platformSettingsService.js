@@ -36,7 +36,7 @@ const DEFAULT_PLATFORM_SETTINGS = Object.freeze({
 
   // ── Pillar 2: checkout bill + delivery pricing controller ──
   isGlobalFreeDelivery: false,
-  freeDeliveryMinSubtotal: 199,
+  freeDeliveryMinSubtotal: 0,
   isFirstOrderFreeDelivery: false,
   baseDeliveryFee: 25,
   baseDistanceKm: 2,
@@ -72,7 +72,7 @@ const DEFAULT_PLATFORM_SETTINGS = Object.freeze({
   // Only the headline switches are mirrored into this typed registry so the
   // existing Admin -> Platform config screen can toggle them; the deep rule
   // editor lives at Admin -> Financial Management -> Dynamic Pricing.
-  pricingEngineEnabled: false,
+  pricingEngineEnabled: true,
   foodPriceUpliftPercent: 30,
   maxDeliveryDistanceKm: 10,
   riderBasePayout: 30,
@@ -85,7 +85,7 @@ const DEFAULT_PLATFORM_SETTINGS = Object.freeze({
   codHandlingFeeEnabled: true,
   codHandlingFeePercent: 1.5,
   codHandlingFeeMax: 20,
-  freeDeliveryThreshold: 299,
+  freeDeliveryThreshold: 0,
   firstOrderFreeDeliveryEnabled: true,
   firstOrderFreeDeliveryMaxKm: 4,
   firstOrderFreeDeliveryMaxSubsidy: 22,
