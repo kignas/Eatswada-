@@ -95,7 +95,11 @@ async function buildQuote({
 
   const isCod = String(paymentMethod || '').toLowerCase() === 'cod';
   const commissionable = restaurant.commissionable === true;
-  const maxDistanceKm = Number(rules.maxDeliveryDistanceKm) || 10;
+  const platformMaxDistanceKm = Number(rules.maxDeliveryDistanceKm) || 10;
+  const restaurantRadiusKm = Number(restaurant.deliveryRadiusKm);
+  const maxDistanceKm = Number.isFinite(restaurantRadiusKm) && restaurantRadiusKm > 0
+    ? Math.min(platformMaxDistanceKm, restaurantRadiusKm)
+    : platformMaxDistanceKm;
 
   // ── 1/2. Distances ─────────────────────────────────────────────────
   const restaurantCoords = restaurant?.location?.coordinates || restaurant?.coords || null;
