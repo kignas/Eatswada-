@@ -822,8 +822,12 @@ async function buildRestaurantCardPricing({
       baseThreshold: freeDelivery.baseThresholdRupees,
       eligibleSubtotal: freeDelivery.eligibleSubtotalRupees,
       amountRemaining: freeDelivery.amountRemainingRupees,
-      unlocked: freeDelivery.unlocked === true || firstOrderEligible === true,
-      firstOrderFreeDelivery: firstOrderEligible,
+      // Customer-facing "unlocked" means a subsidy was actually approved
+      // and funded, not merely that first-order eligibility conditions match.
+      // Checkout and the bill use the granted subsidy as the source of truth.
+      unlocked: subsidisedPaise > 0,
+      firstOrderFreeDelivery: firstOrderSubsidyPaise > 0,
+      firstOrderEligible,
       reason: subsidisedPaise > 0 ? 'unlocked' : freeDelivery.reason,
       distanceKm: deliveryKm,
       riderPayoutEstimate: cardRiderPayout.totalRupees,
