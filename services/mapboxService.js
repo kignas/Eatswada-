@@ -15,6 +15,10 @@
 const axios = require('axios');
 
 const TTL_MS = 60 * 1000;     // recompute a given order's route at most once/min
+// A failed lookup (or "no route") is remembered only briefly: long enough that a
+// Mapbox outage does not cost a 4 s timeout on every request, short enough that
+// one blip does not price customers on the straight-line estimate for a minute.
+const NEGATIVE_TTL_MS = 5 * 1000;
 const cache = new Map();      // orderId (or coord key) -> { at, value }
 
 function isConfigured() { return !!process.env.MAPBOX_TOKEN; }
@@ -26,7 +30,7 @@ async function getRoute(fromLngLat, toLngLat, cacheKey) {
 
   const key = cacheKey || `${fromLngLat.join(',')}|${toLngLat.join(',')}`;
   const hit = cache.get(key);
-  if (hit && (Date.now() - hit.at) < TTL_MS) return hit.value;
+  if (hit && (Date.now() - hit.at) < (hit.value ? TTL_MS : NEGATIVE_TTL_MS)) return hit.value;
 
   try {
     const coords = `${fromLngLat[0]},${fromLngLat[1]};${toLngLat[0]},${toLngLat[1]}`;
@@ -51,7 +55,7 @@ async function getRoute(fromLngLat, toLngLat, cacheKey) {
     }
     return value;
   } catch (err) {
-    cache.set(key, { at: Date.now(), value: null });  // brief negative cache
+    cache.set(key, { at: Date.now(), value: null });  // brief negative cache (NEGATIVE_TTL_MS)
     return null;
   }
 }
