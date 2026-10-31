@@ -60,7 +60,8 @@ function estimateRoute(from, to) {
  * @param {number[]} to   [lng, lat]
  * @param {object}   opts
  * @param {Function} opts.routeFn   injectable provider (defaults to mapboxService)
- * @param {string}   opts.cacheKey  stable key; defaults to the coordinate pair
+ * @param {string}   opts.cacheKey  optional caller prefix; both endpoints are always
+ *                                  appended so the key identifies the route
  * @returns {Promise<{distanceKm:number,durationSec:number,source:string,degraded:boolean}>}
  *          Never rejects: an unusable point or provider failure returns the
  *          straight-line estimate.
@@ -74,7 +75,11 @@ async function resolveRoute(from, to, { routeFn = null, cacheKey = null } = {}) 
 
   const provider = routeFn || providerOverride || require('../mapboxService').getRoute;
   try {
-    const result = await provider(a, b, cacheKey || `${a.join(',')}|${b.join(',')}`);
+    // The provider caches by this key, so it MUST identify the route: a
+    // caller prefix alone (`card:<restaurantId>|r2c`) would hand the next
+    // customer the previous customer's distance. Always append both endpoints.
+    const routeKey = `${a.join(',')}|${b.join(',')}`;
+    const result = await provider(a, b, cacheKey ? `${cacheKey}|${routeKey}` : routeKey);
     if (result && Number.isFinite(Number(result.distanceMeters)) && Number(result.distanceMeters) > 0) {
       return {
         distanceKm: round2(Number(result.distanceMeters) / 1000),
