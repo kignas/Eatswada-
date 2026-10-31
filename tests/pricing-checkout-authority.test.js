@@ -14,7 +14,7 @@ assert.match(controller, /if\s*\(!pricingEngineEnabled\s*&&\s*distanceKm\s*>\s*e
 assert.match(controller, /if\s*\(!pricingEngineEnabled\s*&&\s*minimumOrder\s*>\s*0\s*&&\s*subtotal\s*<\s*minimumOrder\)/);
 assert.match(controller, /const policyFee\s*=\s*pricingEngineEnabled\s*\?\s*0/);
 assert.match(controller, /const pricingRules\s*=\s*await resolvePricingRules\(\)/);
-assert.match(controller, /pricingEngineEnabled,\s*\}\)\)/);
+assert.match(controller, /pricingEngineEnabled,\s*(?:platformMinimumOrderRupees:\s*pricingRules\.platformMinimumOrderRupees,\s*)?\}\)\)/);
 assert.match(orchestrator, /const platformMaxDistanceKm\s*=\s*Number\(rules\.maxDeliveryDistanceKm\)\s*\|\|\s*10/);
 assert.match(orchestrator, /Math\.min\(platformMaxDistanceKm,\s*restaurantRadiusKm\)/);
 
