@@ -288,7 +288,9 @@ async function resolveDeliveryAddress({ addressId, deliveryAddress, userId }) {
 // shared across every restaurant in the checkout. Throws (with .statusCode)
 // on any failure so the WHOLE checkout is rejected before a single order is
 // written — a customer never ends up with a partial multi-restaurant order.
-async function buildRestaurantPricing({ restaurantId, items, customerCoords, billPolicy = null }) {
+async function buildRestaurantPricing({
+  restaurantId, items, customerCoords, billPolicy = null, pricingEngineEnabled = false,
+}) {
   if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
     const error = new Error('Invalid restaurant'); error.statusCode = 400; throw error;
   }
@@ -317,7 +319,10 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords, bil
   const effectiveRadius = Number.isFinite(configuredRadius) && configuredRadius > 0
     ? Math.min(configuredRadius, MAX_DELIVERY_RADIUS_KM)
     : MAX_DELIVERY_RADIUS_KM;
-  if (distanceKm > effectiveRadius) {
+  // When the authoritative pricing engine is enabled, its road-route distance
+  // (not this legacy straight-line estimate) decides serviceability. The
+  // engine applies both the platform cap and this restaurant-specific radius.
+  if (!pricingEngineEnabled && distanceKm > effectiveRadius) {
     const e = new Error(`${restaurant.name} delivers only within ${effectiveRadius.toFixed(1).replace(/\.0$/, '')} km — your address is ${distanceKm.toFixed(1)} km away.`);
     e.statusCode = 400; throw e;
   }
@@ -362,7 +367,7 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords, bil
 
   // Per-restaurant minimum order.
   const minimumOrder = Number(restaurant.minOrder || 0);
-  if (minimumOrder > 0 && subtotal < minimumOrder) {
+  if (!pricingEngineEnabled && minimumOrder > 0 && subtotal < minimumOrder) {
     const e = new Error(`Minimum order for ${restaurant.name} is ₹${minimumOrder}. Add ₹${Math.ceil(minimumOrder - subtotal)} more to continue.`);
     e.statusCode = 400; throw e;
   }
@@ -370,11 +375,14 @@ async function buildRestaurantPricing({ restaurantId, items, customerCoords, bil
   // Per-restaurant delivery fee. When the platform bill policy is available
   // it prices by distance (base fee + per-km); otherwise the legacy flat ₹30
   // launch fee is used, so an unconfigured deployment is unchanged.
-  const policyFee = billPolicy
-    ? calculatePolicyDeliveryFee(distanceKm, billPolicy)
-    : calculateDeliveryFee(distanceKm);
+  const policyFee = pricingEngineEnabled
+    ? 0
+    : (billPolicy
+        ? calculatePolicyDeliveryFee(distanceKm, billPolicy)
+        : calculateDeliveryFee(distanceKm));
   const freeDeliveryAbove = Number(restaurant.freeDeliveryAbove || 0);
-  const restaurantFreeDelivery = freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove;
+  const restaurantFreeDelivery = !pricingEngineEnabled
+    && freeDeliveryAbove > 0 && subtotal >= freeDeliveryAbove;
   const baseDeliveryFee = policyFee;
 
   const commission = calculateRestaurantCommission({
@@ -576,6 +584,12 @@ const createOrder = asyncHandler(async (req, res) => {
     }
   }
 
+  // Resolve the pricing switch BEFORE any legacy pricing/validation. When
+  // enabled, checkout must not enforce legacy minimum-order, radius or fee
+  // calculations before the route-based engine has produced its quote.
+  const pricingRules = await resolvePricingRules();
+  const pricingEngineEnabled = pricingRules.pricingEngineEnabled === true;
+
   // ── Price EVERY restaurant before creating anything ─────────────────
   const priced = [];
   for (const group of groups) {
@@ -584,6 +598,7 @@ const createOrder = asyncHandler(async (req, res) => {
       items: group.items,
       customerCoords,
       billPolicy,
+      pricingEngineEnabled,
     }));
   }
 
@@ -664,7 +679,6 @@ const createOrder = asyncHandler(async (req, res) => {
   // services/pricing instead: road-route distances, the food-price uplift,
   // the independent rider payout, contribution targeting and the three-way
   // acceptance decision. The legacy path below is untouched when it is off.
-  const pricingRules = await resolvePricingRules();
   let engineQuotes = null;
   if (pricingRules.pricingEngineEnabled === true) {
     const engine = await priceCheckoutWithEngine({
