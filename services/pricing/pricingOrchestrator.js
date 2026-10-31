@@ -714,7 +714,10 @@ async function buildRestaurantCardPricing({
   const cardRiderPayout = computeRiderPayout({
     deliveryKm,
     pickupKm: Number(rules.freeDeliveryAssumedPickupKm) || 0,
-    repositioningKm: deliveryKm,
+    // No rider has been assigned for a restaurant card. Use the same
+    // conservative pickup assumption as checkout quotes; do not invent a
+    // full-distance repositioning leg that checkout will not necessarily use.
+    repositioningKm: 0,
     waitingMinutes: 0,
     isPeakHour: isPeakHourAt(businessHour(now), rules),
     isRemoteZone: false,
@@ -754,9 +757,14 @@ async function buildRestaurantCardPricing({
     && isFirstOrder === true
     && deliveryKm <= Number(rules.firstOrderFreeDeliveryMaxKm)
     && eligibleSubtotalPaise >= toPaise(rules.firstOrderFreeDeliveryMinBasket);
-  const firstOrderSubsidyPaise = firstOrderEligible
+  const firstOrderCandidatePaise = firstOrderEligible
     ? Math.min(deliveryFee.feePaise, toPaise(rules.firstOrderFreeDeliveryMaxSubsidy))
     : 0;
+  // A card must never advertise a first-order subsidy that checkout's real
+  // profitability calculation would reject. Keep the same contribution floor.
+  const firstOrderSubsidyPaise = firstOrderCandidatePaise > 0
+    && contributionAtGross(eligibleSubtotalPaise, firstOrderCandidatePaise).meetsTarget
+    ? firstOrderCandidatePaise : 0;
 
   const subsidisedPaise = Math.max(freeDelivery.subsidisedPaise, firstOrderSubsidyPaise);
 
@@ -775,7 +783,10 @@ async function buildRestaurantCardPricing({
       amountRemaining: freeDelivery.amountRemainingRupees,
       unlocked: freeDelivery.unlocked === true || firstOrderEligible === true,
       firstOrderFreeDelivery: firstOrderEligible,
-      reason: freeDelivery.reason,
+      reason: subsidisedPaise > 0 ? 'unlocked' : freeDelivery.reason,
+      distanceKm: deliveryKm,
+      riderPayoutEstimate: cardRiderPayout.totalRupees,
+      riderVehicleExpenseEstimate: cardRiderPayout.expenses.totalExpensesRupees,
     },
     deliveryFee: deliveryFee.feeRupees,
     effectiveDeliveryFee: fromPaise(Math.max(0, deliveryFee.feePaise - subsidisedPaise)),
