@@ -26,6 +26,7 @@
 
 const money = require('./money');
 const { computeFoodPrice } = require('./foodPriceEngine');
+const { computeMinimumOrder, minimumOrderView } = require('./minimumOrderEngine');
 const { computeDeliveryFee } = require('./deliveryFeeEngine');
 const { computeRiderPayout, isPeakHourAt } = require('./riderPayoutEngine');
 const { computeSmallOrderFee } = require('./smallOrderFeeEngine');
@@ -273,6 +274,17 @@ async function buildQuote({
     rules,
   });
 
+  // Distance-aware minimum order (same inputs the restaurant card uses, so the
+  // card, menu, cart and checkout can never disagree).
+  const minimumOrderResult = computeMinimumOrder({
+    rules,
+    deliveryFeePaise: deliveryFee.feePaise,
+    riderPayoutPaise: thresholdRiderPayout.totalPaise,
+    restaurantMinOrderRupees: restaurant.minOrder,
+    commissionable,
+    commissionRate,
+  });
+
   const contributionAtGrossPaise = (grossBasketPaise, subsidyPaise = 0) => {
     const gross = Math.max(0, Math.round(Number(grossBasketPaise) || 0));
     const upliftFraction = Math.max(0, Number(rules.foodPriceUpliftPercent) || 0) / 100;
@@ -434,6 +446,15 @@ async function buildQuote({
     reason = 'target_unreachable_within_permitted_rules';
   }
 
+  // Minimum order: the authoritative gate. A basket below the distance-aware
+  // (or restaurant-contractual) minimum is not orderable, regardless of any
+  // small-order fee that might otherwise have closed the gap.
+  const minimumOrder = minimumOrderView(minimumOrderResult, food.grossFoodPricePaise);
+  if (!minimumOrder.met) {
+    decision = DECISION.NOT_ECONOMICALLY_SERVICEABLE;
+    reason = minimumOrderResult.source === 'restaurant' ? 'below_restaurant_minimum_order' : 'below_minimum_order';
+  }
+
   // ── 9. Discount optimiser ──────────────────────────────────────────
   // The optimiser works out the MOST Eatswada could afford to discount without
   // breaching the target. That figure is always REPORTED (so the admin/campaign
@@ -508,9 +529,13 @@ async function buildQuote({
     serviceable: decision !== DECISION.NOT_ECONOMICALLY_SERVICEABLE || selfDeliveryAvailable === true,
     decision,
     reason,
+    message: minimumOrder.met ? undefined : minimumOrder.message,
     restaurantId: restaurant._id ? String(restaurant._id) : null,
     pricingVersion: rules.version,
     selfDeliveryAvailable: selfDeliveryAvailable === true,
+
+    // ── Distance-aware minimum order (customer-facing) ──
+    minimumOrder,
 
     // ── Route / distance snapshot ──
     distance: {
@@ -746,6 +771,15 @@ async function buildRestaurantCardPricing({
     });
   };
 
+  const minimumOrder = minimumOrderView(computeMinimumOrder({
+    rules,
+    deliveryFeePaise: deliveryFee.feePaise,
+    riderPayoutPaise: cardRiderPayout.totalPaise,
+    restaurantMinOrderRupees: restaurant.minOrder,
+    commissionable: restaurant.commissionable === true,
+    commissionRate: restaurant.commissionRate,
+  }), eligibleSubtotalPaise);
+
   const freeDelivery = computeFreeDelivery({
     baseThresholdRupees: rules.freeDeliveryThreshold,
     deliveryFeePaise: deliveryFee.feePaise,
@@ -795,6 +829,7 @@ async function buildRestaurantCardPricing({
       riderVehicleExpenseEstimate: cardRiderPayout.expenses.totalExpensesRupees,
     },
     deliveryFee: deliveryFee.feeRupees,
+    minimumOrder,
     effectiveDeliveryFee: fromPaise(Math.max(0, deliveryFee.feePaise - subsidisedPaise)),
     subsidised: fromPaise(subsidisedPaise),
   };

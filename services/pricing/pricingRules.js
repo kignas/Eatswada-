@@ -102,6 +102,12 @@ const ENGINE_DEFAULTS = Object.freeze({
   codCashHandlingFixed: 0,
   codFailedDeliveryRiskPercent: 0.5,
 
+  // ── Distance-aware minimum order ───────────────────────────────────
+  // Minimum basket = smallest basket that keeps the contribution target after
+  // restaurant settlement, rider payout, GST, gateway and risk allowances.
+  // The restaurant's own contractual minimum is always honoured separately.
+  minimumOrderEnabled: true,
+
   // ── Free delivery ──────────────────────────────────────────────────
   freeDeliveryEnabled: true,
   freeDeliveryThreshold: 0, // no fixed basket threshold; profitability + distance determine the unlock point
@@ -218,6 +224,7 @@ function mergeRules(base, raw) {
         break;
       case 'pricingEngineEnabled':
       case 'menuPricesIncludeUplift':
+      case 'minimumOrderEnabled':
       case 'riderRepositionEnabled':
       case 'smallOrderFeeEnabled':
       case 'codHandlingFeeEnabled':
@@ -270,6 +277,7 @@ function versionOf(rules) {
     foodPriceUpliftPercent: rules.foodPriceUpliftPercent,
     restaurantChargePercent: rules.restaurantChargePercent,
     menuPricesIncludeUplift: rules.menuPricesIncludeUplift !== false,
+    minimumOrderEnabled: rules.minimumOrderEnabled !== false,
     legacyCommissionModelEnabled: rules.legacyCommissionModelEnabled === true,
     discountAutoApplyEnabled: rules.discountAutoApplyEnabled === true,
     maxDeliveryDistanceKm: rules.maxDeliveryDistanceKm,

@@ -100,6 +100,7 @@ async function priceCheckoutWithEngine({
         _id: p.restaurant?._id,
         location: p.restaurant?.location,
         deliveryRadiusKm: p.restaurant?.deliveryRadiusKm,
+        minOrder: p.restaurant?.minOrder,
         // Legacy commission is OPT-IN and explicitly gated. Restaurant
         // .commissionRate defaults to 15 for EVERY restaurant, so "rate > 0"
         // would silently put every restaurant on the commission model and the
