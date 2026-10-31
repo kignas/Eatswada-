@@ -8,6 +8,10 @@
 //
 // Uses the REAL routeService + mapboxService with a stubbed HTTP client. No
 // network. Usage: npm run test:route-cache-key
+//
+// Part B: a failed Mapbox call was negative-cached for the full 60 s, pricing
+// the customer on the straight-line estimate for a minute after one blip. It is
+// now cached for 5 s only.
 const Module = require('module');
 const path = require('path');
 const assert = require('assert');
@@ -99,6 +103,50 @@ async function t(name, fn) {
     const far = await rs.resolveTripDistances({ restaurantCoords: RESTAURANT, customerCoords: NEAR, riderCoords: FAR, cacheKeyPrefix: 'q:R1:A' });
     assert.notStrictEqual(near.riderToRestaurantKm, far.riderToRestaurantKm);
   });
+
+  // ── B. failed provider calls are only briefly negative-cached ──────
+  const realNow = Date.now;
+  let clock = realNow();
+  const withClock = async (fn) => { Date.now = () => clock; try { await fn(); } finally { Date.now = realNow; } };
+  const route = (mapbox) => mapbox.getRoute(RESTAURANT, NEAR, 'k');
+
+  await t('B1 a failed call is retried after 5 s, not 60 s', async () => withClock(async () => {
+    const mapbox = (fresh(), require(path.join(ROOT, 'services/mapboxService.js')));
+    httpImpl = async () => { throw new Error('boom'); };
+    assert.strictEqual(await route(mapbox), null);
+    assert.strictEqual(httpCalls.length, 1);
+    clock += 4000; await route(mapbox);
+    assert.strictEqual(httpCalls.length, 1, 'still inside the short negative window: no new call');
+    clock += 1500; httpImpl = okHttp; // 5.5 s after the failure
+    const r = await route(mapbox);
+    assert.strictEqual(httpCalls.length, 2, 'failure must not be cached for 60 s');
+    assert.ok(r && r.distanceMeters === 1500);
+  }));
+
+  await t('B2 a failure is still cached briefly (an outage does not cost a 4 s timeout on every request)', async () => withClock(async () => {
+    const mapbox = (fresh(), require(path.join(ROOT, 'services/mapboxService.js')));
+    httpImpl = async () => { throw new Error('boom'); };
+    await route(mapbox); await route(mapbox); await route(mapbox);
+    assert.strictEqual(httpCalls.length, 1);
+  }));
+
+  await t('B3 a successful route is still cached for the full 60 s', async () => withClock(async () => {
+    const mapbox = (fresh(), require(path.join(ROOT, 'services/mapboxService.js')));
+    await route(mapbox);
+    clock += 59000; await route(mapbox);
+    assert.strictEqual(httpCalls.length, 1);
+    clock += 2000; await route(mapbox);
+    assert.strictEqual(httpCalls.length, 2);
+  }));
+
+  await t('B4 a response with no route is treated like a failure (short cache), not a 60 s answer', async () => withClock(async () => {
+    const mapbox = (fresh(), require(path.join(ROOT, 'services/mapboxService.js')));
+    httpImpl = async () => ({ data: { routes: [] } });
+    assert.strictEqual(await route(mapbox), null);
+    clock += 5500; httpImpl = okHttp;
+    assert.ok(await route(mapbox));
+    assert.strictEqual(httpCalls.length, 2);
+  }));
 
   console.log(failed ? `\n${failed} FAILED` : '\nAll route-cache-key tests passed');
   process.exit(failed ? 1 : 0);
