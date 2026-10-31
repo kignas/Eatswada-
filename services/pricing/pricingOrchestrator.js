@@ -199,6 +199,8 @@ async function buildQuote({
     // the engine's food price stays the GROSS online price (never pre-discounted).
     discountRupees: 0,
     commissionable,
+    // Stored menu prices already include the Eatswada uplift (see pricingRules).
+    pricesIncludeUplift: rules.menuPricesIncludeUplift !== false,
   });
 
   // A restaurant still on the legacy commission plan earns Eatswada commission

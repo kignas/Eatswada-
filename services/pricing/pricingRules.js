@@ -30,6 +30,10 @@ const ENGINE_DEFAULTS = Object.freeze({
 
   // ── Business model: customer-funded online food-price uplift ───────
   foodPriceUpliftPercent: 30,
+  // TRUE when menu item prices in the database ALREADY include the uplift
+  // (Eatswada price = restaurant original x 1.30). The engine then derives the
+  // restaurant's original price (stored / 1.30) and never adds the uplift again.
+  menuPricesIncludeUplift: true,
   // Additional contractual restaurant charge, if any. Separate from the
   // uplift and separately accounted; 0 means none.
   restaurantChargePercent: 0,
@@ -44,13 +48,16 @@ const ENGINE_DEFAULTS = Object.freeze({
   ],
 
   // ── Rider payout model ─────────────────────────────────────────────
-  riderBasePayout: 30,
-  riderPerKmPayout: 9,
-  riderFreeFirstKm: 1,
-  riderPickupPerKm: 3,
-  riderRepositionPerKm: 3,
-  riderWaitPayPerMin: 1,
-  riderMinPayout: 30,
+  // Simple model: Rs10 per km of restaurant->customer road distance, minimum
+  // Rs25 (1 km = 25, 3 km = 30, 5 km = 50, 10 km = 100). Base / free-first-km /
+  // pickup / reposition / waiting pay stay configurable but default to 0.
+  riderBasePayout: 0,
+  riderPerKmPayout: 10,
+  riderFreeFirstKm: 0,
+  riderPickupPerKm: 0,
+  riderRepositionPerKm: 0,
+  riderWaitPayPerMin: 0,
+  riderMinPayout: 25,
   riderPeakBonus: 0,
   riderRemoteZoneBonus: 0,
   // Guaranteed-payout floor is never reduced once accepted.
@@ -210,6 +217,7 @@ function mergeRules(base, raw) {
         out.contributionTiers = normaliseTiers(value, base.contributionTiers);
         break;
       case 'pricingEngineEnabled':
+      case 'menuPricesIncludeUplift':
       case 'riderRepositionEnabled':
       case 'smallOrderFeeEnabled':
       case 'codHandlingFeeEnabled':
@@ -261,6 +269,7 @@ function versionOf(rules) {
   const canonical = JSON.stringify({
     foodPriceUpliftPercent: rules.foodPriceUpliftPercent,
     restaurantChargePercent: rules.restaurantChargePercent,
+    menuPricesIncludeUplift: rules.menuPricesIncludeUplift !== false,
     legacyCommissionModelEnabled: rules.legacyCommissionModelEnabled === true,
     discountAutoApplyEnabled: rules.discountAutoApplyEnabled === true,
     maxDeliveryDistanceKm: rules.maxDeliveryDistanceKm,

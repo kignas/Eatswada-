@@ -36,14 +36,26 @@ function computeFoodPrice({
   restaurantChargePercent = 0,
   discountRupees = 0,
   commissionable = false,
+  pricesIncludeUplift = false,
 } = {}) {
-  const basePaise = Math.max(0, toPaise(baseSubtotalRupees));
+  // When menu prices are STORED already marked up (Eatswada price = original x
+  // 1.30), the item subtotal IS the customer food price. The restaurant's
+  // original price is derived back (stored / (1 + uplift)) and the uplift is
+  // never charged a second time.
+  const storedPaise = Math.max(0, toPaise(baseSubtotalRupees));
+  const includeUplift = pricesIncludeUplift === true && !commissionable;
+  const upliftFraction = Math.max(0, Number(upliftPercent) || 0) / 100;
+  const basePaise = includeUplift
+    ? Math.max(0, Math.round(storedPaise / (1 + upliftFraction)))
+    : storedPaise;
   const discountPaise = Math.min(basePaise, Math.max(0, toPaise(discountRupees)));
 
   // Uplift is charged on the base menu amount (before discount). A legacy
   // commission-model restaurant keeps commission and gets no uplift, so the
   // same revenue is never counted as both commission and markup.
-  const upliftPaise = commissionable ? 0 : Math.max(0, percentOfPaise(basePaise, upliftPercent));
+  const upliftPaise = commissionable ? 0
+    : includeUplift ? Math.max(0, storedPaise - basePaise)
+      : Math.max(0, percentOfPaise(basePaise, upliftPercent));
   const restaurantChargePaise = Math.max(0, percentOfPaise(basePaise, restaurantChargePercent));
 
   const grossFoodPricePaise = basePaise + upliftPaise + restaurantChargePaise;
