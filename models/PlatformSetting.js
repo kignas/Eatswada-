@@ -27,7 +27,7 @@ const schema = new mongoose.Schema({
   perKmExtraFee: { type: Number, min: 0, default: 8 },
   platformHandlingFee: { type: Number, min: 0, default: 5 },
   smallCartThreshold: { type: Number, min: 0, default: 99 },
-  smallCartFee: { type: Number, min: 0, default: 15 },
+  smallCartFee: { type: Number, min: 0, default: 8 },
   packagingChargePerItem: { type: Number, min: 0, default: 0 },
   taxPercent: { type: Number, min: 0, max: 100, default: 0 },
 
