@@ -20,6 +20,7 @@ const { resolvePricingRules } = require('../services/pricing/pricingRules');
 const { createQuote } = require('../services/pricing/quoteService');
 const { buildRestaurantCardPricing } = require('../services/pricing/pricingOrchestrator');
 const { validCoordinates } = require('../services/deliveryPricing');
+const { calculateItemServerPrice } = require('../services/pricing/menuItemPrice');
 
 /** Resolve the customer's verified delivery coordinates (never client-supplied). */
 async function resolveCustomerCoords({ addressId, userId }) {
@@ -39,34 +40,58 @@ async function resolveItems(restaurantId, requestedItems) {
     throw err;
   }
 
-  const ids = list
-    .map(it => it?.menuItem || it?.menuId || it?.id || it?._id)
-    .filter(id => mongoose.Types.ObjectId.isValid(String(id)))
-    .map(String);
-  if (!ids.length) {
-    const err = new Error('No valid menu items were supplied.');
+  const requestedIds = list.map(it => it?.menuItem || it?.menuId || it?.id || it?._id);
+  if (requestedIds.some(id => !mongoose.Types.ObjectId.isValid(String(id || '')))) {
+    const err = new Error('One or more cart items are invalid or outdated. Please refresh your cart.');
     err.statusCode = 400;
     throw err;
   }
 
+  const ids = [...new Set(requestedIds.map(String))];
   const docs = await Menu.find({
-    _id: { $in: [...new Set(ids)] },
+    _id: { $in: ids },
     restaurantId,
     isActive: { $ne: false },
-  }).select('price').lean();
-  const priceMap = new Map(docs.map(d => [String(d._id), Math.max(0, Number(d.price) || 0)]));
+    $or: [{ approvalStatus: 'approved' }, { approvalStatus: { $exists: false } }],
+  }).lean();
+  const menuMap = new Map(docs.map(doc => [String(doc._id), doc]));
 
   const items = [];
-  for (const requested of list) {
-    const id = String(requested?.menuItem || requested?.menuId || requested?.id || requested?._id || '');
-    const price = priceMap.get(id);
-    if (price === undefined) {
-      const err = new Error('One or more items no longer belong to this restaurant. Please refresh.');
+  for (let index = 0; index < list.length; index += 1) {
+    const requested = list[index];
+    const id = String(requestedIds[index]);
+    const menuItem = menuMap.get(id);
+    if (!menuItem) {
+      const err = new Error('A cart item no longer belongs to this restaurant. Please refresh your cart.');
       err.statusCode = 409;
       throw err;
     }
-    const quantity = Math.max(1, Math.min(99, Math.floor(Number(requested?.quantity) || 1)));
-    items.push({ quantity, unitPriceRupees: price });
+    if (menuItem.isActive === false || (menuItem.approvalStatus && menuItem.approvalStatus !== 'approved')) {
+      const err = new Error(`${menuItem.name || 'This item'} is not currently approved for ordering.`);
+      err.statusCode = 409;
+      throw err;
+    }
+    if (menuItem.inStock === false || (menuItem.trackStock === true && Number(menuItem.stockQuantity || 0) <= 0)) {
+      const err = new Error(`${menuItem.name || 'This item'} is currently out of stock.`);
+      err.statusCode = 409;
+      throw err;
+    }
+    const quantity = Number(requested?.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+      const err = new Error(`Invalid quantity for ${menuItem.name || 'menu item'}.`);
+      err.statusCode = 400;
+      throw err;
+    }
+    if (menuItem.trackStock && Number(menuItem.stockQuantity) < quantity) {
+      const err = new Error(`${menuItem.name || 'This item'} has only ${Math.max(0, Number(menuItem.stockQuantity) || 0)} unit(s) remaining.`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    items.push({
+      quantity,
+      unitPriceRupees: calculateItemServerPrice(menuItem, requested.customizations),
+    });
   }
   return items;
 }

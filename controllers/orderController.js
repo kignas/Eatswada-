@@ -47,6 +47,7 @@ const { checkQuoteForOrder } = require('../services/pricing/quoteService');
 const { persistSnapshot } = require('../services/pricing/quoteService');
 const { getZoneDeliveryCapacity, resolveOrderZone } = require('../services/riderAssignmentService');
 const { normalizeOwnCloudinaryUrl } = require('../utils/cloudinaryUrl');
+const { calculateItemServerPrice } = require('../services/pricing/menuItemPrice');
 
 // ── Live-data population for order responses ────────────────────────
 // Orders store a *snapshot* of the restaurant name/image and each item's
@@ -161,69 +162,6 @@ function normalizeCustomerCoordinates(deliveryAddress) {
   }
 
   return null;
-}
-
-function calculateItemServerPrice(menuItem, requestedCustomizations) {
-  let basePrice = Number(menuItem.price) || 0;
-  let extraTotal = 0;
-  let portionPrice = null;
-  const selectedByGroup = {};
-  // Backward compatibility: older clients submitted customization selections
-  // as a flat array of labels (for example, ["Extra cheese"]). Keep accepting
-  // that format, while newer clients can send group-aware selections.
-  const legacySelectedLabels = new Set();
-  const entries = Array.isArray(requestedCustomizations)
-    ? requestedCustomizations
-    : (requestedCustomizations && typeof requestedCustomizations === 'object'
-      ? Object.entries(requestedCustomizations).map(([title, value]) => ({ title, selected: Array.isArray(value) ? value : [value] }))
-      : []);
-
-  for (const entry of entries) {
-    if (typeof entry === 'string' || typeof entry === 'number') {
-      const label = String(entry).trim();
-      if (label) legacySelectedLabels.add(label);
-      continue;
-    }
-    if (!entry || typeof entry !== 'object') continue;
-    const title = String(entry.title || '');
-    if (!title) continue;
-    let labels = [];
-    if (Array.isArray(entry.selected)) labels = entry.selected.map(String);
-    else if (Array.isArray(entry.options)) labels = entry.options.map(o => String(o && o.label != null ? o.label : o));
-    else if (entry.label != null) labels = [String(entry.label)];
-    selectedByGroup[title] = [...(selectedByGroup[title] || []), ...labels];
-  }
-
-  // Prices always come from the saved menu document, never from client-supplied prices.
-  for (const group of (Array.isArray(menuItem.customizations) ? menuItem.customizations : [])) {
-    const title = String(group.title || '');
-    const options = Array.isArray(group.options) ? group.options : [];
-    // Merge flat legacy labels into each matching group, matching the old
-    // server behavior. Prices still come exclusively from the saved menu.
-    const legacyLabelsForGroup = options
-      .filter(option => legacySelectedLabels.has(String(option.label)))
-      .map(option => String(option.label));
-    const labels = [...(selectedByGroup[title] || []), ...legacyLabelsForGroup];
-    if (group.pricingMode === 'portion' && labels.length > 1) {
-      const err = new Error(`Please choose only one portion for "${title}".`);
-      err.statusCode = 400;
-      throw err;
-    }
-    for (const label of labels) {
-      const option = options.find(o => String(o.label) === String(label));
-      if (!option) {
-        const err = new Error(`Invalid option "${label}" for "${title}".`);
-        err.statusCode = 400;
-        throw err;
-      }
-      const optionPrice = Math.max(0, Number(option.extraPrice || 0));
-      if (group.pricingMode === 'portion') portionPrice = optionPrice;
-      else extraTotal += optionPrice;
-    }
-  }
-
-  basePrice = portionPrice == null ? basePrice : portionPrice;
-  return Math.round((basePrice + extraTotal) * 100) / 100;
 }
 
 // Resolves which delivery address/coordinates an order should use.
