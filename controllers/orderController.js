@@ -43,6 +43,7 @@ const {
   commissionFromQuote,
 } = require('../services/pricing/checkoutIntegration');
 const { DECISION: PRICING_DECISION } = require('../services/pricing/profitabilityEngine');
+const { checkQuoteForOrder } = require('../services/pricing/quoteService');
 const { persistSnapshot } = require('../services/pricing/quoteService');
 const { getZoneDeliveryCapacity, resolveOrderZone } = require('../services/riderAssignmentService');
 const { normalizeOwnCloudinaryUrl } = require('../utils/cloudinaryUrl');
@@ -480,6 +481,7 @@ const createOrder = asyncHandler(async (req, res) => {
     tipAmount = 0,
     couponCode = '',
     sendCutlery = false,
+    quoteId = '',
   } = req.body;
 
   // Pillar 3 — dual payment engine. Both methods are gated by the platform
@@ -697,6 +699,32 @@ const createOrder = asyncHandler(async (req, res) => {
     }
 
     engineQuotes = engine.quotes;
+
+    // -- Quote verification (never silently re-price) -----------------
+    // The customer saw a quote and is paying against it. Before anything is
+    // reserved or created, confirm that quote is genuine, theirs, unexpired
+    // and still what the engine would charge. Single-restaurant checkouts
+    // only: a multi-restaurant basket has no quote today. A request with no
+    // quoteId is not rejected here (older clients); see the audit report.
+    const suppliedQuoteId = typeof quoteId === 'string' ? quoteId.trim() : '';
+    if (suppliedQuoteId && priced.length === 1) {
+      const check = checkQuoteForOrder({
+        quoteId: suppliedQuoteId,
+        userId: req.user._id,
+        restaurantId: priced[0].restaurant._id,
+        paymentMethod: requestedMethod,
+        freshQuote: engineQuotes[0],
+        hasCoupon: Boolean(couponInfo),
+      });
+      if (!check.ok) {
+        return res.status(409).json({
+          success: false,
+          code: check.code,
+          message: check.message,
+          requote: true,
+        });
+      }
+    }
     // The engine owns commission when it is active: the uplift IS the platform
     // food-price revenue, so a commission would double-count it. Each quote
     // reports rate 0 with the restaurant's full agreed base as its net amount.

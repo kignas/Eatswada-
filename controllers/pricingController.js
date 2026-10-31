@@ -72,6 +72,17 @@ async function resolveItems(restaurantId, requestedItems) {
 }
 
 /**
+ * The engine is opt-in. createOrder only prices with it when
+ * `pricingEngineEnabled === true`, so the quote and card endpoints must follow
+ * the SAME strict check — otherwise the cart shows engine prices while the
+ * order is charged the legacy price. Keep this identical to the check in
+ * controllers/orderController.js.
+ */
+function engineEnabled(rules) {
+  return rules?.pricingEngineEnabled === true;
+}
+
+/**
  * POST /api/pricing/quote
  * Body: { restaurantId, addressId, items:[{menuItem,quantity}], paymentMethod?, couponCode? }
  */
@@ -79,6 +90,18 @@ exports.quote = asyncHandler(async (req, res) => {
   const restaurantId = req.body?.restaurantId;
   if (!mongoose.Types.ObjectId.isValid(String(restaurantId || ''))) {
     return res.status(400).json({ success: false, message: 'A valid restaurantId is required.' });
+  }
+
+  const rules = await resolvePricingRules();
+  if (!engineEnabled(rules)) {
+    // Not an error in the quote itself: the engine is switched off, so orders
+    // use the legacy price. Return no quote data so no client can show or
+    // trust an engine price that checkout will not charge.
+    return res.status(409).json({
+      success: false,
+      code: 'PRICING_ENGINE_DISABLED',
+      message: 'Dynamic pricing is not active.',
+    });
   }
 
   const restaurant = await Restaurant.findOne({ _id: restaurantId, isActive: true, approvalStatus: 'approved' })
@@ -94,7 +117,6 @@ exports.quote = asyncHandler(async (req, res) => {
   }
 
   const items = await resolveItems(restaurantId, req.body?.items);
-  const rules = await resolvePricingRules();
   const isFirstOrder = !(await Order.exists({ user: req.user._id }));
   const paymentMethod = String(req.body?.paymentMethod || 'upi').toLowerCase() === 'cod' ? 'cod' : 'upi';
 
@@ -119,6 +141,8 @@ exports.quote = asyncHandler(async (req, res) => {
     customerCoords,
     paymentMethod,
     isFirstOrder,
+    // Binds the signed quoteId to this customer so POST /orders can verify it.
+    userId: req.user._id,
     cacheKeyPrefix: `q:${restaurant._id}:${req.body?.addressId || ''}`,
   });
 
@@ -145,12 +169,19 @@ exports.restaurantCards = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: 'Provide at least one valid restaurantIds value.' });
   }
 
+  const rules = await resolvePricingRules();
+  if (!engineEnabled(rules)) {
+    // Engine off: no engine prices. An empty list lets clients fall back to
+    // the legacy display instead of showing a price checkout will not charge.
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, data: { pricingVersion: rules?.version, engineEnabled: false, cards: [] } });
+  }
+
   const customerCoords = await resolveCustomerCoords({ addressId: req.query?.addressId, userId: req.user._id });
   if (!customerCoords) {
     return res.status(400).json({ success: false, message: 'Select a saved delivery address with a verified map location first.' });
   }
 
-  const rules = await resolvePricingRules();
   const isFirstOrder = !(await Order.exists({ user: req.user._id }));
   const restaurants = await Restaurant.find({ _id: { $in: rawIds }, isActive: true, approvalStatus: 'approved' })
     .select('name image location deliveryRadiusKm deliveryMode commissionRate')
@@ -166,7 +197,7 @@ exports.restaurantCards = asyncHandler(async (req, res) => {
   })));
 
   res.set('Cache-Control', 'no-store');
-  return res.json({ success: true, data: { pricingVersion: rules.version, cards } });
+  return res.json({ success: true, data: { pricingVersion: rules.version, engineEnabled: true, cards } });
 });
 
 /**
