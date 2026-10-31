@@ -24,8 +24,9 @@ const crypto = require('crypto');
 
 const ENGINE_DEFAULTS = Object.freeze({
   // ── Master switch ──────────────────────────────────────────────────
-  // Off by default: an un-migrated deployment keeps today's behaviour exactly.
-  pricingEngineEnabled: false,
+  // Enabled by default: new deployments use the authoritative distance/profitability engine.
+  // Existing explicit admin overrides remain effective until migrated/changed.
+  pricingEngineEnabled: true,
 
   // ── Business model: customer-funded online food-price uplift ───────
   foodPriceUpliftPercent: 30,
@@ -96,7 +97,7 @@ const ENGINE_DEFAULTS = Object.freeze({
 
   // ── Free delivery ──────────────────────────────────────────────────
   freeDeliveryEnabled: true,
-  freeDeliveryThreshold: 299,
+  freeDeliveryThreshold: 0, // no fixed basket threshold; profitability + distance determine the unlock point
   // Conservative pickup distance assumed when no rider is assigned yet (i.e.
   // on a restaurant card or at the start of checkout). The threshold must be
   // quoted against a trip the engine will actually be able to fund once a real
