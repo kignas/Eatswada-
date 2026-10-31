@@ -20,7 +20,7 @@ const schema = new mongoose.Schema({
 
   // ── Pillar 2: checkout bill + delivery pricing ──
   isGlobalFreeDelivery: { type: Boolean, default: false },
-  freeDeliveryMinSubtotal: { type: Number, min: 0, default: 199 },
+  freeDeliveryMinSubtotal: { type: Number, min: 0, default: 0 },
   isFirstOrderFreeDelivery: { type: Boolean, default: false },
   baseDeliveryFee: { type: Number, min: 0, default: 25 },
   baseDistanceKm: { type: Number, min: 0, default: 2 },
