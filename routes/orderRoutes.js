@@ -19,6 +19,9 @@ const { requirePermission } = require('../middleware/permissionMiddleware');
 const createOrderLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   limit: 10,
+  // Validation failures and rejected attempts must not exhaust a customer's
+  // successful-order allowance. Authentication and abuse protection remain on.
+  skipFailedRequests: true,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => String(req.user._id),
@@ -69,7 +72,10 @@ const createOrderValidation = [
     .withMessage('Coupon code must be 100 characters or fewer.'),
 ];
 
-router.post('/', protect, createOrderLimiter, createOrderValidation, validate, createOrder);
+// Validate the request shape before counting it against the order-creation
+// limiter. The controller still performs authoritative pricing, availability,
+// ownership and idempotency checks.
+router.post('/', protect, createOrderValidation, validate, createOrderLimiter, createOrder);
 router.get('/', protect, getOrders);
 
 // ==========================================
