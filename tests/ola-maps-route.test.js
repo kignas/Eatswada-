@@ -11,11 +11,11 @@ delete process.env.MAPBOX_TOKEN;
 
 let calls = [];
 let httpImpl = async () => ({
-  data: { status: 'SUCCESS', rows: [{ elements: [{ status: 'OK', distance: 4321, duration: 720 }] }] },
+  data: { routes: [{ legs: [{ distance: 4321, duration: 720 }] }] },
 });
 const realLoad = Module._load;
 Module._load = function (request) {
-  if (request === 'axios') return { get: (...args) => { calls.push(args); return httpImpl(...args); } };
+  if (request === 'axios') return { post: (...args) => { calls.push(args); return httpImpl(...args); } };
   return realLoad.apply(this, arguments);
 };
 
@@ -35,25 +35,25 @@ function fresh() {
     const result = await routes.resolveRoute(from, to);
     assert.strictEqual(result.distanceKm, 4.32);
     assert.strictEqual(result.durationSec, 720);
-    assert.strictEqual(result.source, 'ola_maps_distance_matrix_basic');
+    assert.strictEqual(result.source, 'ola_maps_directions_bike');
     assert.strictEqual(result.degraded, false);
     assert.strictEqual(calls.length, 1);
 
-    const [url, config] = calls[0];
-    assert.strictEqual(url, 'https://api.olamaps.io/routing/v1/distanceMatrix/basic');
-    assert.strictEqual(config.params.origins, '26.5,88.8');
-    assert.strictEqual(config.params.destinations, '26.51,88.81');
+    const [url, body, config] = calls[0];
+    assert.strictEqual(url, 'https://api.olamaps.io/routing/v1/directions');
+    assert.strictEqual(body, null);
+    assert.strictEqual(config.params.origin, '26.5,88.8');
+    assert.strictEqual(config.params.destination, '26.51,88.81');
+    assert.strictEqual(config.params.mode, 'bike');
     assert.strictEqual(config.params.api_key, 'test-ola-key');
-    assert.strictEqual(config.timeout, 4500);
+    assert.strictEqual(config.timeout, 6500);
 
     // Same coordinates reuse the provider cache.
     await routes.resolveRoute(from, to);
     assert.strictEqual(calls.length, 1);
 
     // A non-OK response safely degrades to the conservative estimate.
-    httpImpl = async () => ({
-      data: { status: 'SUCCESS', rows: [{ elements: [{ status: 'ZERO_RESULTS' }] }] },
-    });
+    httpImpl = async () => ({ data: { routes: [] } });
     const failedRoute = await routes.resolveRoute([88.90, 26.60], [88.91, 26.61]);
     assert.strictEqual(failedRoute.source, 'haversine_estimate');
     assert.strictEqual(failedRoute.degraded, true);
