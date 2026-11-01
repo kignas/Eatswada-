@@ -23,6 +23,7 @@ const {
   approveVendorApplication, rejectVendorApplication, requestVendorApplicationChanges,
 } = require('../controllers/vendorApplicationController');
 const adminRanking = require('../controllers/adminRankingController');
+const { listAuditLogs } = require('../controllers/adminAuditController');
 
 // server.js applies authLimiter to /api/users and /api/auth but not to
 // /api/admin, so this endpoint previously sat behind nothing but the global
@@ -91,6 +92,8 @@ router.get('/customers/trust', protect, authorize('admin'), requirePermission('c
 router.get('/customers/:userId/trust', protect, authorize('admin'), requirePermission('customers.trust'), getCustomerTrust);
 router.patch('/customers/:userId/cod-policy', protect, authorize('admin'), requirePermission('customers.trust'), updateCustomerCodPolicy);
 router.patch('/customers/:userId/freeze', protect, authorize('admin'), requirePermission('customers.trust'), setCustomerAccountFreeze);
+// Read-only admin audit trail (full administrators only).
+router.get('/audit-logs', protect, authorize('admin'), requireFullAdmin, listAuditLogs);
 // Pillar 8 — platform + per-restaurant visit analytics.
 router.get('/analytics/visits', protect, authorize('admin'), requirePermission('analytics.view'), getVisitAnalytics);
 router.get('/inventory', protect, authorize('admin'), requirePermission('restaurants.manage'), getAllRestaurantInventory);
