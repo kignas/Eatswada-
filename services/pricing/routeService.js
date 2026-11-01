@@ -54,21 +54,72 @@ function estimateRoute(from, to) {
 }
 
 /**
+ * Detour sanity guard.
+ *
+ * A road route is never shorter than the straight line, and on Indian town
+ * roads it is normally 1.2-1.6x. When a provider returns something far above
+ * that (e.g. 7.0 km for a 3.3 km straight line = 2.1x) the customer is
+ * charged a higher delivery band for a trip that is probably not that long.
+ *
+ * ROUTE_DETOUR_GUARD (env):
+ *   off      - do nothing
+ *   log      - DEFAULT. Log both providers' numbers when the ratio is exceeded,
+ *              but keep using the primary route. Money is unchanged.
+ *   enforce  - when the primary route exceeds the ratio, ask the secondary
+ *              provider and use the LOWER of the two distances.
+ * ROUTE_DETOUR_RATIO (env, default 1.8): max accepted road / straight-line.
+ *
+ * Pure function: callers inject the secondary provider so it can be tested.
+ */
+function detourSettings(env = process.env) {
+  const raw = String(env.ROUTE_DETOUR_GUARD || 'log').trim().toLowerCase();
+  const mode = ['off', 'log', 'enforce'].includes(raw) ? raw : 'log';
+  const ratio = Number(env.ROUTE_DETOUR_RATIO);
+  return { mode, ratio: Number.isFinite(ratio) && ratio >= 1.2 ? ratio : 1.8 };
+}
+
+async function applyDetourGuard({ from, to, primary, secondary, cacheKey, env = process.env, log = console }) {
+  const { mode, ratio } = detourSettings(env);
+  if (mode === 'off' || !primary) return primary;
+  const straightKm = haversineKm(from, to);
+  const primaryKm = Number(primary.distanceMeters) / 1000;
+  // Very short hops are noisy (a 200 m straight line can be 600 m of road).
+  if (!Number.isFinite(primaryKm) || straightKm < 0.5 || primaryKm <= straightKm * ratio) return primary;
+
+  let alt = null;
+  try { alt = secondary ? await secondary(from, to, cacheKey) : null; } catch (_) { alt = null; }
+  const altKm = alt && Number(alt.distanceMeters) > 0 ? Number(alt.distanceMeters) / 1000 : null;
+  log.warn('[route] detour guard: road distance looks too long', {
+    mode, ratio, straightKm: round2(straightKm), primaryKm: round2(primaryKm),
+    primarySource: primary.source || null, secondaryKm: altKm == null ? null : round2(altKm),
+    secondarySource: alt ? (alt.source || 'mapbox_directions') : null,
+  });
+  if (mode === 'enforce' && altKm != null && altKm < primaryKm) {
+    return { ...alt, source: alt.source || 'mapbox_directions', detourGuard: { replaced: primary.source || null, primaryKm: round2(primaryKm) } };
+  }
+  return primary;
+}
+
+/**
  * Prefer Ola Maps for India-focused road distance. If Ola is unavailable or
  * returns no usable route, retain the existing Mapbox provider as a fallback.
  * If both fail, resolveRoute() uses the conservative Haversine estimate.
  */
 async function getPreferredRoute(from, to, cacheKey) {
   const olaMaps = require('../olaMapsService');
+  const mapbox = require('../mapboxService');
+  const mapboxRoute = (a, b, key) => mapbox.isConfigured()
+    ? mapbox.getRoute(a, b, `mb|${key || ''}`).then(r => (r ? { ...r, source: 'mapbox_directions' } : null))
+    : Promise.resolve(null);
+
   if (olaMaps.isConfigured()) {
     const olaRoute = await olaMaps.getRoute(from, to, cacheKey);
-    if (olaRoute) return olaRoute;
+    if (olaRoute) return applyDetourGuard({ from, to, primary: olaRoute, secondary: mapboxRoute, cacheKey });
   }
 
-  const mapbox = require('../mapboxService');
   if (mapbox.isConfigured()) {
-    const mapboxRoute = await mapbox.getRoute(from, to, cacheKey);
-    if (mapboxRoute) return { ...mapboxRoute, source: 'mapbox_directions' };
+    const route = await mapbox.getRoute(from, to, cacheKey);
+    if (route) return { ...route, source: 'mapbox_directions' };
   }
   return null;
 }
@@ -207,6 +258,8 @@ module.exports = {
   ROAD_FACTOR,
   FALLBACK_SPEED_KMH,
   estimateRoute,
+  detourSettings,
+  applyDetourGuard,
   resolveRoute,
   resolveTripDistances,
   resolveRouteWithOverride,
