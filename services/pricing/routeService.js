@@ -6,10 +6,10 @@
 // The SINGLE backend authority for distance used in money calculations.
 // Nothing in the pricing engine trusts a client-supplied distance.
 //
-// Provider: Mapbox Directions (`services/mapboxService.getRoute`), the mapping
-// integration already present in this repository. It is used only when
-// `MAPBOX_TOKEN` is configured; otherwise the service degrades to a
-// straight-line estimate inflated by ROAD_FACTOR.
+// Provider priority: Ola Maps Distance Matrix Basic (when OLA_MAPS_API_KEY is
+// configured), then the existing Mapbox Directions integration. If neither
+// provider returns a route, the service degrades to a conservative straight-line
+// estimate inflated by ROAD_FACTOR. MapTiler/frontend map rendering is untouched.
 //
 // The straight-line fallback is intentionally CONSERVATIVE (it over-estimates
 // rather than under-estimates road distance), because under-estimating would
@@ -54,12 +54,32 @@ function estimateRoute(from, to) {
 }
 
 /**
+ * Prefer Ola Maps for India-focused road distance. If Ola is unavailable or
+ * returns no usable route, retain the existing Mapbox provider as a fallback.
+ * If both fail, resolveRoute() uses the conservative Haversine estimate.
+ */
+async function getPreferredRoute(from, to, cacheKey) {
+  const olaMaps = require('../olaMapsService');
+  if (olaMaps.isConfigured()) {
+    const olaRoute = await olaMaps.getRoute(from, to, cacheKey);
+    if (olaRoute) return olaRoute;
+  }
+
+  const mapbox = require('../mapboxService');
+  if (mapbox.isConfigured()) {
+    const mapboxRoute = await mapbox.getRoute(from, to, cacheKey);
+    if (mapboxRoute) return { ...mapboxRoute, source: 'mapbox_directions' };
+  }
+  return null;
+}
+
+/**
  * Resolve one road route between two points.
  *
  * @param {number[]} from [lng, lat]
  * @param {number[]} to   [lng, lat]
  * @param {object}   opts
- * @param {Function} opts.routeFn   injectable provider (defaults to mapboxService)
+ * @param {Function} opts.routeFn   injectable provider (tests/custom provider override)
  * @param {string}   opts.cacheKey  optional caller prefix; both endpoints are always
  *                                  appended so the key identifies the route
  * @returns {Promise<{distanceKm:number,durationSec:number,source:string,degraded:boolean}>}
@@ -73,7 +93,7 @@ async function resolveRoute(from, to, { routeFn = null, cacheKey = null } = {}) 
     return { distanceKm: 0, durationSec: 0, source: 'unavailable', degraded: true };
   }
 
-  const provider = routeFn || providerOverride || require('../mapboxService').getRoute;
+  const provider = routeFn || providerOverride || getPreferredRoute;
   try {
     // The provider caches by this key, so it MUST identify the route: a
     // caller prefix alone (`card:<restaurantId>|r2c`) would hand the next
@@ -84,7 +104,7 @@ async function resolveRoute(from, to, { routeFn = null, cacheKey = null } = {}) 
       return {
         distanceKm: round2(Number(result.distanceMeters) / 1000),
         durationSec: Number.isFinite(Number(result.durationSec)) ? Math.round(Number(result.durationSec)) : 0,
-        source: 'mapbox_directions',
+        source: result.source || 'mapbox_directions',
         degraded: false,
       };
     }
