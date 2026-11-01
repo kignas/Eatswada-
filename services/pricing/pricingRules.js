@@ -116,6 +116,15 @@ const ENGINE_DEFAULTS = Object.freeze({
   // ── Free delivery ──────────────────────────────────────────────────
   freeDeliveryEnabled: true,
   freeDeliveryThreshold: 0, // no fixed basket threshold; profitability + distance determine the unlock point
+  // Lower contribution floors apply ONLY to funded threshold-based free-delivery
+  // promotions. Normal order acceptance and non-promotion targets stay unchanged.
+  freeDeliveryContributionByDistance: [
+    { maxKm: 2, target: 3 },
+    { maxKm: 4, target: 4 },
+    { maxKm: 6, target: 6 },
+    { maxKm: 8, target: 8 },
+    { maxKm: 10, target: 12 },
+  ],
   // Conservative pickup distance assumed when no rider is assigned yet (i.e.
   // on a restaurant card or at the start of checkout). The threshold must be
   // quoted against a trip the engine will actually be able to fund once a real
@@ -190,6 +199,19 @@ function normaliseBands(raw, fallback) {
 }
 
 /** Normalise the contribution tiers into ascending maxBasket order. */
+function normaliseDistanceContributionTiers(raw, fallback) {
+  if (!Array.isArray(raw) || raw.length === 0) return fallback.map(b => ({ ...b }));
+  const cleaned = raw
+    .map(band => ({
+      maxKm: clampNumber(band?.maxKm, { min: 0.01, max: 1000, fallback: NaN }),
+      target: clampNumber(band?.target, { min: 0, max: 100000, fallback: NaN }),
+    }))
+    .filter(band => Number.isFinite(band.maxKm) && Number.isFinite(band.target))
+    .sort((a, b) => a.maxKm - b.maxKm);
+  // Require coverage through the platform's supported maximum distance.
+  return cleaned.length ? cleaned : fallback.map(b => ({ ...b }));
+}
+
 function normaliseTiers(raw, fallback) {
   if (!Array.isArray(raw) || raw.length === 0) return fallback.map(t => ({ ...t }));
   const cleaned = raw
@@ -226,6 +248,9 @@ function mergeRules(base, raw) {
         break;
       case 'contributionTiers':
         out.contributionTiers = normaliseTiers(value, base.contributionTiers);
+        break;
+      case 'freeDeliveryContributionByDistance':
+        out.freeDeliveryContributionByDistance = normaliseDistanceContributionTiers(value, base.freeDeliveryContributionByDistance);
         break;
       case 'pricingEngineEnabled':
       case 'menuPricesIncludeUplift':
@@ -310,6 +335,7 @@ function versionOf(rules) {
     paymentGatewayFeeTaxPercent: rules.paymentGatewayFeeTaxPercent,
     gstOnUpliftPercent: rules.gstOnUpliftPercent,
     contributionTiers: rules.contributionTiers,
+    freeDeliveryContributionByDistance: rules.freeDeliveryContributionByDistance,
     smallOrderFeeEnabled: rules.smallOrderFeeEnabled !== false,
     smallOrderFeeMax: rules.smallOrderFeeMax,
     codHandlingFeePercent: rules.codHandlingFeePercent,
@@ -332,8 +358,10 @@ function versionOf(rules) {
 function deepFreeze(rules) {
   Object.freeze(rules.deliveryFeeBands.map(b => Object.freeze(b)));
   Object.freeze(rules.contributionTiers.map(t => Object.freeze(t)));
+  Object.freeze(rules.freeDeliveryContributionByDistance.map(t => Object.freeze(t)));
   Object.freeze(rules.deliveryFeeBands);
   Object.freeze(rules.contributionTiers);
+  Object.freeze(rules.freeDeliveryContributionByDistance);
   return Object.freeze(rules);
 }
 

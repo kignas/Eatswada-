@@ -33,6 +33,21 @@ const { computeSmallOrderFee } = require('./smallOrderFeeEngine');
 const { computeCodFee } = require('./codFeeEngine');
 const { computeFreeDelivery, targetForBasket } = require('./freeDeliveryThresholdEngine');
 const { computeContribution, requiredContributionPaise, DECISION } = require('./profitabilityEngine');
+
+// Distance-specific minimum contribution allowed for a funded threshold-based
+// free-delivery promotion. This does NOT replace the normal order contribution
+// tiers; it is used only while underwriting this particular promotion.
+function freeDeliveryContributionTargetPaise(distanceKm, rules) {
+  const km = Math.max(0, Number(distanceKm) || 0);
+  const bands = Array.isArray(rules?.freeDeliveryContributionByDistance)
+    ? rules.freeDeliveryContributionByDistance : [];
+  const match = bands.find((band) => km <= Number(band.maxKm));
+  if (match) return toPaise(match.target);
+  // Beyond configured bands, fail conservatively using the highest configured
+  // target; never extend the cheapest nearby-customer subsidy tier.
+  if (bands.length) return toPaise(bands[bands.length - 1].target);
+  return requiredContributionPaise(0, rules?.contributionTiers || []);
+}
 const { optimiseDiscount } = require('./discountOptimizer');
 const { resolveTripDistances } = require('./routeService');
 
@@ -221,6 +236,8 @@ async function buildQuote({
    * discount and subsidy is then an explicit, separately-auditable expense line.
    * That keeps each line visible without counting any amount twice.
    */
+  let thresholdFreeDeliveryTargetPaise = null;
+
   const contributionFor = ({
     couponPaise = couponDiscountPaise,
     subsidyPaise = 0,
@@ -250,7 +267,10 @@ async function buildQuote({
       isCod,
       gatewayChargeBasePaise,
       codCashBasePaise,
-      rules,
+      rules: (subsidyPaise > 0 && promotionFundingSource === 'platform_free_delivery_threshold'
+        && Number.isFinite(thresholdFreeDeliveryTargetPaise))
+        ? { ...rules, contributionTiers: [{ maxBasket: null, target: fromPaise(thresholdFreeDeliveryTargetPaise) }] }
+        : rules,
     });
   };
 
@@ -330,7 +350,7 @@ async function buildQuote({
     // The real model (not an uplift-only approximation) decides the threshold
     // and the funding, so the published threshold is one the engine will honour.
     contributionAt: (basketPaise) => contributionAtGrossPaise(basketPaise, 0).contributionPaise,
-    requiredAt: (basketPaise) => requiredContributionPaise(basketPaise, rules.contributionTiers),
+    requiredAt: () => freeDeliveryContributionTargetPaise(deliveryKm, rules),
   });
 
   // First-order free delivery (one redemption, distance + subsidy capped).
@@ -342,6 +362,7 @@ async function buildQuote({
 
   let deliverySubsidyPaise = 0;
   let promotionFundingSource = 'none';
+  thresholdFreeDeliveryTargetPaise = freeDeliveryContributionTargetPaise(deliveryKm, rules);
 
   // Free delivery is a THRESHOLD benefit: it is earned by the eligible basket
   // reaching the effective threshold, never granted to a basket that is merely
@@ -352,7 +373,9 @@ async function buildQuote({
   const noSubsidyContribution = contributionFor({ subsidyPaise: 0 });
   const freeDeliveryReached = freeDeliveryBase.reachedThreshold
     && freeDeliveryBase.subsidisedPaise > 0
-    && noSubsidyContribution.meetsTarget;
+    // Threshold promotions use the distance-specific promotion floor. Normal
+    // order contribution targets remain unchanged for all non-promotion orders.
+    && noSubsidyContribution.contributionPaise >= thresholdFreeDeliveryTargetPaise;
 
   if (firstOrderEligible) {
     const candidate = Math.min(deliveryFee.feePaise, toPaise(rules.firstOrderFreeDeliveryMaxSubsidy));
@@ -791,7 +814,7 @@ async function buildRestaurantCardPricing({
     enabled: rules.freeDeliveryEnabled !== false,
     safetyReservePaise: toPaise(rules.discountSafetyReserve),
     contributionAt: (basketPaise) => contributionAtGross(basketPaise, 0).contributionPaise,
-    requiredAt: (basketPaise) => requiredContributionPaise(basketPaise, rules.contributionTiers),
+    requiredAt: () => freeDeliveryContributionTargetPaise(deliveryKm, rules),
   });
 
   const firstOrderEligible = rules.firstOrderFreeDeliveryEnabled !== false
@@ -822,12 +845,8 @@ async function buildRestaurantCardPricing({
       baseThreshold: freeDelivery.baseThresholdRupees,
       eligibleSubtotal: freeDelivery.eligibleSubtotalRupees,
       amountRemaining: freeDelivery.amountRemainingRupees,
-      // Customer-facing "unlocked" means a subsidy was actually approved
-      // and funded, not merely that first-order eligibility conditions match.
-      // Checkout and the bill use the granted subsidy as the source of truth.
       unlocked: subsidisedPaise > 0,
-      firstOrderFreeDelivery: firstOrderSubsidyPaise > 0,
-      firstOrderEligible,
+      firstOrderFreeDelivery: firstOrderEligible,
       reason: subsidisedPaise > 0 ? 'unlocked' : freeDelivery.reason,
       distanceKm: deliveryKm,
       riderPayoutEstimate: cardRiderPayout.totalRupees,
@@ -842,6 +861,7 @@ async function buildRestaurantCardPricing({
 
 module.exports = {
   DECISION,
+  freeDeliveryContributionTargetPaise,
   DEFAULT_QUOTE_TTL_MS,
   businessHour,
   sumItemsRupees,
