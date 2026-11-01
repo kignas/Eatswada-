@@ -277,11 +277,16 @@ function checkQuoteForOrder({ quoteId, userId, restaurantId, paymentMethod, fres
   if (now.getTime() >= t.exp) return reject('QUOTE_EXPIRED', 'quote_expired');
   if (!freshQuote || freshQuote.serviceable === false) return reject('QUOTE_PRICE_CHANGED', 'not_serviceable');
   if (String(t.pv) !== String(freshQuote.pricingVersion)) return reject('QUOTE_PRICE_CHANGED', 'pricing_version_changed');
-  if (!hasCoupon) {
-    const freshTotal = Number(freshQuote?.paise?.customerTotalPaise);
-    if (!Number.isFinite(freshTotal)) return reject('QUOTE_PRICE_CHANGED', 'quote_unverifiable');
-    if (Math.abs(t.t - freshTotal) > VERIFY_TOLERANCE_PAISE) return reject('QUOTE_PRICE_CHANGED', 'price_changed');
-  }
+  // The order controller has already rebuilt the authoritative quote from
+  // current server-side menu, delivery, promotion and payment data. Do not
+  // reject checkout solely because the signed preview total differs by a
+  // recalculation: the order is created from freshQuote and its bill, while
+  // payment is initiated from the resulting persisted order total.
+  //
+  // Keep customer/restaurant/payment-method binding, signature, expiry and
+  // pricing-version checks. These prevent token reuse and stale policy use.
+  // The browser refreshes and renders the latest quote immediately before
+  // submitting the order; the server never trusts a client-supplied amount.
   return { ok: true };
 }
 
