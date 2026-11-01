@@ -343,7 +343,8 @@ exports.createVendor = asyncHandler(async (req, res) => {
         freeDeliveryEnabled: freeDeliveryEnabled ?? true,
         freeDeliveryAbove: freeDeliveryAbove ?? 200,
         deliveryRadiusKm: deliveryRadiusKm ?? 10,
-        codEnabled: false,
+        // Cash on Delivery is OFF unless an admin explicitly ticks it (boolean true only).
+        codEnabled: codEnabled === true,
         isFeatured: isFeatured === true,
         isBestSeller: isBestSeller === true,
         isNearFast: isNearFast === true,
