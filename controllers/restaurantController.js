@@ -16,6 +16,7 @@ const {
 } = require('../services/restaurantHours');
 const { buildAvailabilityExpr } = require('../services/restaurantAvailability');
 const { withServiceability, getRankingConfig } = require('../services/restaurantRankingService');
+const { resolveRoute } = require('../services/pricing/routeService');
 
 const clampPage = (value, fallback = 1) => Math.max(1, Number(value) || fallback);
 const clampLimit = (value, fallback = 20, max = 100) => Math.min(max, Math.max(1, Number(value) || fallback));
@@ -255,19 +256,64 @@ const getRestaurants = asyncHandler(async (req, res) => {
   const total = (result && result.total && result.total[0] && result.total[0].n) || 0;
   const restaurants = (result && result.data) || [];
 
+  // Attach provider-backed road distance for customer-facing cards. The
+  // serviceability radius remains the existing geographic radius check; road
+  // distance is a separate customer display/pricing input and is never
+  // substituted with browser-side Haversine.
+  const prepared = restaurants.map((restaurant, index) => {
+    const view = withOperationalAvailability(restaurant, now, hoursContext);
+    const withDistance = withServiceability(view, customerCoords);
+    return { restaurant, withDistance, index };
+  });
+
+  // Keep provider concurrency bounded so a 20-card home page cannot create a
+  // burst of simultaneous routing calls. routeService/Ola cache handles repeats.
+  const roadDistanceById = new Map();
+  if (customerCoords) {
+    const queue = prepared.filter(({ restaurant }) =>
+      Array.isArray(restaurant.location?.coordinates) &&
+      restaurant.location.coordinates.length >= 2
+    );
+    const concurrency = 4;
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+      while (cursor < queue.length) {
+        const item = queue[cursor++];
+        const coords = item.restaurant.location.coordinates;
+        try {
+          const route = await resolveRoute(coords, customerCoords, {
+            cacheKey: `restaurant-card:${String(item.restaurant._id)}:r2c`,
+          });
+          roadDistanceById.set(String(item.restaurant._id), route);
+        } catch (_) {
+          // resolveRoute is designed not to reject; preserve the existing
+          // conservative estimate if a future provider implementation throws.
+        }
+      }
+    });
+    await Promise.all(workers);
+  }
+
   res.json({
     success: true,
     page: Number(page),
     pages: Math.ceil(total / limit),
     total,
-    // Effective status is computed at request time, without writes or timers.
-    data: restaurants.map((restaurant, index) => {
-      const view = withOperationalAvailability(restaurant, now, hoursContext);
-      const withDistance = withServiceability(view, customerCoords);
+    data: prepared.map(({ restaurant, withDistance, index }) => {
+      const roadRoute = roadDistanceById.get(String(restaurant._id));
+      const roadDistanceKm = roadRoute && Number.isFinite(Number(roadRoute.distanceKm))
+        ? Number(roadRoute.distanceKm)
+        : null;
       return {
         ...withDistance,
-        // Ranking metadata — the backend is the source of truth; the frontend
-        // must render this, never compute its own order.
+        // distanceKm is the canonical customer-facing road distance whenever
+        // a route could be resolved. Keep straightLineDistanceKm separately
+        // for geographic radius/serviceability diagnostics.
+        straightLineDistanceKm: withDistance.distanceKm,
+        distanceKm: roadDistanceKm ?? withDistance.distanceKm,
+        roadDistanceKm,
+        distanceSource: roadRoute?.source || 'haversine_estimate',
+        distanceDegraded: roadRoute ? roadRoute.degraded === true : true,
         rankPosition: skip + index + 1,
         online: restaurant.__isOpen === true,
         orderable: restaurant.__isOpen === true,
