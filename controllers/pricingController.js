@@ -21,6 +21,9 @@ const { createQuote } = require('../services/pricing/quoteService');
 const { buildRestaurantCardPricing } = require('../services/pricing/pricingOrchestrator');
 const { validCoordinates } = require('../services/deliveryPricing');
 const { calculateItemServerPrice } = require('../services/pricing/menuItemPrice');
+const { getPlatformSettings } = require('../services/platformSettingsService');
+const { evaluatePaymentOptions } = require('../services/paymentEligibility');
+const User = require('../models/User');
 
 /** Resolve the customer's verified delivery coordinates (never client-supplied). */
 async function resolveCustomerCoords({ addressId, userId }) {
@@ -172,16 +175,39 @@ exports.quote = asyncHandler(async (req, res) => {
     cacheKeyPrefix: `q:${restaurant._id}:${req.body?.addressId || ''}`,
   });
 
+  // The verdict for BOTH payment methods, from the same gates POST /orders
+  // enforces. Lets the cart show the true COD answer and the true reason
+  // (platform off / account blocked / restaurant off / over the cap) instead of
+  // guessing. Display-only: it never changes the signed quote or any money.
+  let payment = null;
+  try {
+    const [settings, customer] = await Promise.all([
+      getPlatformSettings(),
+      User.findById(req.user._id).select('isCodBlocked codPolicy').lean(),
+    ]);
+    payment = evaluatePaymentOptions({
+      settings,
+      customer,
+      restaurants: [{ codEnabled: restaurant.codEnabled }],
+      totalRupees: Number(quote?.bill?.grandTotal || 0),
+      foodSubtotalRupees: Number(quote?.bill?.customerFoodSubtotal || 0),
+      discountRupees: Number(quote?.bill?.discount || 0),
+    });
+  } catch (err) {
+    console.error('[pricing] payment eligibility failed:', err.message);
+  }
+  const data = payment ? { ...quote, payment } : quote;
+
   if (quote.serviceable === false) {
     return res.status(409).json({
       success: false,
       code: quote.reason || 'NOT_ECONOMICALLY_SERVICEABLE',
       message: quote.message || 'This delivery is not available right now.',
-      data: quote,
+      data,
     });
   }
 
-  return res.json({ success: true, data: quote });
+  return res.json({ success: true, data });
 });
 
 /**
