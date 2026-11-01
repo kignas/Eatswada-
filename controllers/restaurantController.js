@@ -37,9 +37,11 @@ const CUSTOMER_LIST_PROJECTION = {
   ratingCount: 1,
   estimatedDeliveryMin: 1,
   estimatedDeliveryMax: 1,
-  distanceMeters: 1,
+  // NOTE: the stored `distanceMeters` / `distance` fields are static seed values
+  // (e.g. "2.0 km") that do not depend on the customer's location, so they are
+  // intentionally NOT returned. Customer-facing distance is `distanceKm`,
+  // computed per request from the customer's coordinates.
   time: 1,
-  distance: 1,
   offer: 1,
   minOrder: 1,
   deliveryFee: 1,
@@ -223,11 +225,42 @@ const getRestaurants = asyncHandler(async (req, res) => {
     ],
   };
 
+  // Distance sort must use the customer's real location, not the static stored
+  // `distanceMeters`. Straight-line (haversine) distance is computed inside the
+  // aggregation so it can be sorted before pagination; it preserves the
+  // nearest-first order closely enough, and the card then shows road distance.
   const sortMap = {
     rating: { rating: -1, ratingCount: -1 },
     time: { estimatedDeliveryMin: 1, rating: -1 },
-    distance: { distanceMeters: 1, rating: -1 },
   };
+  if (sort === 'distance' && customerCoords) {
+    const [custLng, custLat] = customerCoords;
+    const rad = (v) => ({ $degreesToRadians: v });
+    const restLng = { $arrayElemAt: ['$location.coordinates', 0] };
+    const restLat = { $arrayElemAt: ['$location.coordinates', 1] };
+    const sinSq = (v) => ({ $pow: [{ $sin: { $divide: [v, 2] } }, 2] });
+    const dLat = rad({ $subtract: [restLat, custLat] });
+    const dLng = rad({ $subtract: [restLng, custLng] });
+    const a = {
+      $add: [
+        sinSq(dLat),
+        { $multiply: [{ $cos: rad(custLat) }, { $cos: rad(restLat) }, sinSq(dLng)] },
+      ],
+    };
+    addFields.__straightKm = {
+      $cond: [
+        { $and: [{ $isArray: '$location.coordinates' }, { $gte: [{ $size: '$location.coordinates' }, 2] }] },
+        {
+          $multiply: [
+            2 * 6371,
+            { $atan2: [{ $sqrt: a }, { $sqrt: { $subtract: [1, a] } }] },
+          ],
+        },
+        1e9, // restaurants without a location sort last
+      ],
+    };
+    sortMap.distance = { __straightKm: 1, rating: -1 };
+  }
 
   // Every sort keeps online-first as the leading key. The default
   // ('recommended') is the performance ranking: legacy explicit position, then
@@ -301,7 +334,10 @@ const getRestaurants = asyncHandler(async (req, res) => {
     total,
     data: prepared.map(({ restaurant, withDistance, index }) => {
       const roadRoute = roadDistanceById.get(String(restaurant._id));
-      const roadDistanceKm = roadRoute && Number.isFinite(Number(roadRoute.distanceKm))
+      // 'unavailable' means a coordinate was missing/invalid: no distance is
+      // known, so do not present it as a real 0 m.
+      const roadDistanceKm = roadRoute && roadRoute.source !== 'unavailable' &&
+        Number.isFinite(Number(roadRoute.distanceKm))
         ? Number(roadRoute.distanceKm)
         : null;
       return {
@@ -511,7 +547,6 @@ async function buildUnder99Payload() {
       'estimatedDeliveryMin',
       'estimatedDeliveryMax',
       'time',
-      'distance',
       'cuisine',
       'cuisineDisplay',
       'offer',
@@ -617,7 +652,9 @@ async function buildUnder99Payload() {
           estimatedDeliveryMax: restaurant.estimatedDeliveryMax,
           businessType: restaurant.businessType || 'restaurant',
           deliveryMode: restaurant.deliveryMode || 'eatswada_rider',
-          distance: restaurant.distance || '',
+          // Stored `distance` is a static seed value, not the customer's real
+          // distance, so it is no longer returned.
+          distance: '',
           cuisine: restaurant.cuisineDisplay || (restaurant.cuisine || []).join(', '),
           offer: restaurant.offer || '',
           freeDeliveryAbove: restaurant.freeDeliveryEnabled ? restaurant.freeDeliveryAbove : null,
